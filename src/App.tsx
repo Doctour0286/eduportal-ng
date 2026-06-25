@@ -18,7 +18,12 @@ import { supabase } from './lib/supabase'
 import { useAuthStore } from './stores/authStore'
 import { LoginPage } from './routes/LoginPage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
-import { BottomNav, type NavTab } from './components/BottomNav'
+import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
+
+// App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
+// BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
+// but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
+type NavTab = BottomNavTab | 'home'
 import AdminDashboard from './routes/AdminDashboard'
 
 // ─── School data ──────────────────────────────────────────────────────────
@@ -214,7 +219,6 @@ export default function App() {
       <main className="app-main">
         <TabContent
           tab={activeTab}
-          schoolId={school.id}
           actorType={actorType}
           onOpenSetup={() => setForceShowOnboarding(true)}
         />
@@ -222,7 +226,7 @@ export default function App() {
 
       {/* Bottom navigation */}
       <BottomNav
-        activeTab={activeTab}
+        activeTab={activeTab as BottomNavTab}
         onNavigate={setActiveTab}
         actorType={actorType}
       />
@@ -234,12 +238,10 @@ export default function App() {
 
 function TabContent({
   tab,
-  schoolId,
   actorType,
   onOpenSetup,
 }: {
   tab: NavTab
-  schoolId: string
   actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null
   onOpenSetup: () => void
 }) {

@@ -156,7 +156,7 @@ function todayDateString(): string {
 
 export default function AdminDashboard() {
   const school = useSchoolStore((s) => s.school);
-  const actor = useAuthStore((s) => s.actor);
+  const session = useAuthStore((s) => s.session);
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -164,8 +164,8 @@ export default function AdminDashboard() {
   const [annsLoading, setAnnsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Derive a greeting name from the actor record
-  const staffName = (actor as { full_name?: string })?.full_name ?? 'Admin';
+  // Derive greeting name from session user metadata
+  const staffName = (session?.user?.user_metadata?.full_name as string | undefined) ?? 'Admin';
   const firstName = staffName.split(' ')[0];
 
   const greeting = (() => {
@@ -194,10 +194,10 @@ export default function AdminDashboard() {
         staffRes,
         attendanceTodayRes,
         presentTodayRes,
-        paymentsRes,
+        _sessionRes,
         pendingScoresRes,
         pendingLeaveRes,
-        currentSessionRes,
+        _placeholder,
       ] = await Promise.all([
         // 1. Total active students
         supabase
@@ -247,34 +247,14 @@ export default function AdminDashboard() {
         Promise.resolve(null),
       ]);
 
-      // 8. Payments total for current session (needs session id first)
-      let sessionPaymentsTotal = 0;
-      if (currentSessionRes && paymentsRes) {
-        // currentSessionRes is actually paymentsRes slot — let me fix the ordering:
-        // We resolve payments after we have session id
-      }
-
-      const currentSession = (paymentsRes as any)?.data as { id: string } | null;
-
-      let paymentsTotal = 0;
-      if (currentSession?.id) {
-        const { data: paymentRows } = await supabase
-          .from('payments')
-          .select('amount')
-          .eq('status', 'completed')
-          .eq('session_id', currentSession.id);  // NOTE: payments doesn't have session_id directly
-        // payments doesn't have session_id — we'll skip this for now and sum all completed payments
-        // The schema shows payments links to fee_assignments which links to session_id
-        // For dashboard simplicity: sum all completed payments (school-scoped via RLS)
-      }
-
-      // Simpler: sum all completed payments this school, no session filter
+      // 8. Sum all completed payments (school-scoped via RLS)
+      // payments links to fee_assignments → session, but for dashboard we sum all completed
       const { data: allPayments } = await supabase
         .from('payments')
         .select('amount')
         .eq('status', 'completed');
 
-      paymentsTotal = (allPayments ?? []).reduce(
+      const paymentsTotal = (allPayments ?? []).reduce(
         (sum, p) => sum + parseFloat(p.amount),
         0
       );
@@ -323,32 +303,25 @@ export default function AdminDashboard() {
       ? Math.round((stats.todayPresentCount / stats.todayAttendanceTotal) * 100)
       : null;
 
-  const attendanceLabel =
-    stats && stats.todayAttendanceMarked === 0
-      ? 'Not marked yet'
-      : attendancePct !== null
-      ? `${attendancePct}% present`
-      : '—';
-
   const attendanceSub =
     stats && stats.todayAttendanceMarked > 0
       ? `${stats.todayPresentCount} of ${stats.todayAttendanceTotal} students`
       : undefined;
 
-  const actionItems: ActionItem[] = [
+  const actionItems: ActionItem[] = ([
     {
       label: 'scores waiting for approval',
       count: stats?.pendingScoreApprovals ?? 0,
-      urgency: (stats?.pendingScoreApprovals ?? 0) > 10 ? 'urgent' : 'warning',
+      urgency: ((stats?.pendingScoreApprovals ?? 0) > 10 ? 'urgent' : 'warning') as ActionItem['urgency'],
       route: 'results',
     },
     {
       label: 'leave requests pending',
       count: stats?.pendingLeaveRequests ?? 0,
-      urgency: 'normal',
+      urgency: 'normal' as const,
       route: 'hr',
     },
-  ].filter((a) => a.count > 0);
+  ] as ActionItem[]).filter((a) => a.count > 0);
 
   // ── Render ──────────────────────────────────────────────────────────────────
 

@@ -15,7 +15,7 @@
  *   8. Staff accounts
  */
 
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   saveSchoolIdentity,
   saveLanguage,
@@ -34,7 +34,6 @@ import {
   getOnboardingProgress,
   type WeekDayInput,
   type PeriodInput,
-  type ClassNodeInput,
 } from '../services/onboardingService'
 
 const TOTAL_STEPS = 8
@@ -857,7 +856,7 @@ function Step6Classes({
   }
 
   // Build tree for display
-  function renderTree(parentId: string | null, depth: number): JSX.Element[] {
+  function renderTree(parentId: string | null, depth: number): React.ReactElement[] {
     return nodes
       .filter((n) => n.parent_id === parentId)
       .sort((a, b) => a.sort_order - b.sort_order)
