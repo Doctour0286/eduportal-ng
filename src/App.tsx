@@ -25,6 +25,7 @@ import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
 // but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
 type NavTab = BottomNavTab | 'home'
 import AdminDashboard from './routes/AdminDashboard'
+import TimetableModule from './routes/TimetableModule'
 
 // ─── School data ──────────────────────────────────────────────────────────
 
@@ -265,14 +266,7 @@ function TabContent({
   }
 
   if (tab === 'timetable') {
-    return (
-      <PlaceholderModule
-        icon="📅"
-        title="Timetable"
-        description="View today's schedule and the weekly class timetable."
-        comingSoon
-      />
-    )
+    return <TimetableModule />
   }
 
   if (tab === 'attendance') {
