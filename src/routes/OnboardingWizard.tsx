@@ -59,6 +59,7 @@ export function OnboardingWizard({ schoolId, schoolName, onComplete }: WizardPro
   const [currentStep, setCurrentStep] = useState(1)
   const [completedSteps, setCompletedSteps] = useState<number[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [finishError, setFinishError] = useState<string | null>(null)
 
   // Load saved progress on mount
   useEffect(() => {
@@ -86,7 +87,19 @@ export function OnboardingWizard({ schoolId, schoolName, onComplete }: WizardPro
   }
 
   async function handleFinish() {
-    await completeOnboarding(schoolId)
+    setFinishError(null)
+    const result = await completeOnboarding(schoolId)
+    if (!result.ok) {
+      // Do NOT call onComplete() — the DB write failed, so onboarding_complete
+      // is still false server-side. Surfacing this now (instead of letting the
+      // user sail through to the app and get bounced back to the wizard on the
+      // next reload) is the actual fix for the reload-loop bug: the UI must not
+      // advance past a state the database doesn't agree with.
+      setFinishError(
+        result.error ?? 'Could not finish setup — please check your connection and try again.',
+      )
+      return
+    }
     onComplete()
   }
 
@@ -189,6 +202,7 @@ export function OnboardingWizard({ schoolId, schoolName, onComplete }: WizardPro
             schoolId={schoolId}
             onFinish={handleFinish}
             onBack={() => setCurrentStep(7)}
+            finishError={finishError}
           />
         )}
       </div>
@@ -1171,7 +1185,8 @@ function Step8Staff({
   schoolId,
   onFinish,
   onBack,
-}: { schoolId: string; onFinish: () => void; onBack: () => void }) {
+  finishError,
+}: { schoolId: string; onFinish: () => void | Promise<void>; onBack: () => void; finishError: string | null }) {
   const [roles, setRoles] = useState<{ id: string; name: string }[]>([])
   const [staffList, setStaffList] = useState<StaffEntry[]>([])
   const [fullName, setFullName] = useState('')
@@ -1215,7 +1230,12 @@ function Step8Staff({
 
   async function handleFinish() {
     setFinishing(true)
-    onFinish()
+    await onFinish()
+    // If completeOnboarding() failed, the parent sets finishError and does NOT
+    // call its own onComplete() — meaning this component is still mounted and
+    // visible. Clear `finishing` so the button is tappable again for a retry,
+    // rather than being stuck on "Setting up…" forever.
+    setFinishing(false)
   }
 
   return (
@@ -1307,6 +1327,8 @@ function Step8Staff({
           </button>
         </div>
       </div>
+
+      {finishError && <p className="form-error" role="alert">{finishError}</p>}
 
       <div className="wizard-actions wizard-actions--two">
         <button className="btn btn--ghost" onClick={onBack}>Back</button>

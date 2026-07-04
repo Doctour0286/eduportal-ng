@@ -1,13 +1,20 @@
 /**
  * authService.ts
- * Business logic for all three login methods.
+ * Business logic for login methods.
  * No browser-only APIs. No UI imports.
  * React Native compatible.
+ *
+ * Supported methods:
+ *   - Staff: email + password
+ *   - Guardian / Student: login code (issued by school admin)
+ *
+ * Phone OTP removed — requires Twilio configuration that is not yet set up.
+ * Re-add sendPhoneOtp / verifyPhoneOtp here when Twilio is connected.
  */
 
 import { supabase } from '../lib/supabase'
 
-export type LoginMethod = 'email_password' | 'phone_otp' | 'login_code'
+export type LoginMethod = 'email_password' | 'login_code'
 
 export interface AuthResult {
   ok: boolean
@@ -25,69 +32,65 @@ export async function loginWithEmail(
   return { ok: true }
 }
 
-// ─── Phone OTP (guardian) ─────────────────────────────────────────────────
-
-export async function sendPhoneOtp(phone: string): Promise<AuthResult> {
-  // Normalise Nigerian numbers: ensure E.164 format (+234...)
-  const normalised = normaliseNigerianPhone(phone)
-  if (!normalised) {
-    return { ok: false, error: 'Enter a valid Nigerian phone number (e.g. 0812 345 6789)' }
-  }
-  const { error } = await supabase.auth.signInWithOtp({ phone: normalised })
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
-}
-
-export async function verifyPhoneOtp(
-  phone: string,
-  token: string,
-): Promise<AuthResult> {
-  const normalised = normaliseNigerianPhone(phone)
-  if (!normalised) return { ok: false, error: 'Invalid phone number' }
-  const { error } = await supabase.auth.verifyOtp({
-    phone: normalised,
-    token,
-    type: 'sms',
-  })
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
-}
-
-function normaliseNigerianPhone(raw: string): string | null {
-  const digits = raw.replace(/\D/g, '')
-  if (digits.length === 11 && digits.startsWith('0')) {
-    return '+234' + digits.slice(1)
-  }
-  if (digits.length === 10) {
-    return '+234' + digits
-  }
-  if (digits.length === 13 && digits.startsWith('234')) {
-    return '+' + digits
-  }
-  return null
-}
-
-// ─── Login code (student + guardian) ──────────────────────────────────────
+// ─── Login code (guardian + student) ─────────────────────────────────────
 // Handled by the `login-with-code` Edge Function using the service-role key
-// server-side. The client sends the code + school_id; the Edge Function
-// mints the session and returns tokens. The service-role key NEVER appears here.
+// server-side. The service-role key NEVER appears here.
+//
+// Flow:
+//   1. POST to Edge Function with school_id + login_code
+//   2. Edge Function looks up identity, calls admin.generateLink({ type:'magiclink' })
+//      and returns { hashed_token }  ← new in this version
+//   3. We call supabase.auth.verifyOtp({ token_hash, type:'magiclink' }) to
+//      exchange the token for a real session — official Supabase v2 pattern.
+//      No email is ever sent; we consume the token directly.
 
 export async function loginWithCode(
   schoolId: string,
   code: string,
 ): Promise<AuthResult> {
-  const { data, error } = await supabase.functions.invoke('login-with-code', {
-    body: { school_id: schoolId, login_code: code },
-  })
-  if (error || !data?.access_token) {
-    return { ok: false, error: data?.error ?? 'Invalid login code' }
+  // import.meta.env is typed by vite/client — use it directly rather than
+  // casting through Record<string, unknown>, which TS rejects because
+  // ImportMeta has no index signature.
+  const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
+  const ANON_KEY     = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+
+  let res: Response
+  try {
+    res = await fetch(`${SUPABASE_URL}/functions/v1/login-with-code`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${ANON_KEY}`,
+        'apikey':        ANON_KEY,
+      },
+      body: JSON.stringify({
+        school_id:  schoolId,
+        login_code: code.trim().toUpperCase(),
+      }),
+    })
+  } catch {
+    return { ok: false, error: 'Network error — check your connection and try again' }
   }
-  // Set the session using the tokens returned by the Edge Function
-  const { error: sessionError } = await supabase.auth.setSession({
-    access_token: data.access_token,
-    refresh_token: data.refresh_token,
+
+  let body: Record<string, string>
+  try { body = await res.json() } catch { body = {} }
+
+  if (!res.ok) {
+    return { ok: false, error: body?.error ?? 'Invalid login code' }
+  }
+
+  // ── Exchange hashed_token for a real session ──────────────────────────────
+  const { hashed_token } = body
+  if (!hashed_token) {
+    return { ok: false, error: 'Login failed — no token returned. Contact your school admin.' }
+  }
+
+  const { error: otpError } = await supabase.auth.verifyOtp({
+    token_hash: hashed_token,
+    type: 'magiclink',
   })
-  if (sessionError) return { ok: false, error: sessionError.message }
+  if (otpError) return { ok: false, error: otpError.message }
+
   return { ok: true }
 }
 

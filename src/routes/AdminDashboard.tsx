@@ -154,7 +154,23 @@ function todayDateString(): string {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function AdminDashboard() {
+// NavTab here intentionally mirrors only the subset of App.tsx's NavTab union
+// this component actually navigates to — not the full union — so this file
+// doesn't need to import App.tsx's type and create a circular dependency.
+// Every value here must stay in sync with App.tsx's NavTab values by name.
+type DashboardNavTarget = 'students' | 'finance' | 'attendance' | 'timetable' | 'results' | 'hr' | 'announcements'
+
+// Mirrors App.tsx's NavIntent shape — kept as a local subset for the same
+// reason DashboardNavTarget is local (avoid a circular import). Only the
+// three intents wired in this file are listed; additive, non-breaking change
+// to the onNavigate signature per PRD Problem 2.2c.
+type DashboardNavIntent = { intent?: 'add_student' | 'record_payment' | 'mark_attendance' }
+
+export default function AdminDashboard({
+  onNavigate,
+}: {
+  onNavigate: (tab: DashboardNavTarget, intent?: DashboardNavIntent) => void
+}) {
   const school = useSchoolStore((s) => s.school);
   const session = useAuthStore((s) => s.session);
 
@@ -362,10 +378,7 @@ export default function AdminDashboard() {
               <ActionBadge
                 key={item.route}
                 item={item}
-                onClick={() => {
-                  // TODO Phase 6: navigate to the relevant module
-                  // For now: no-op. Routing will be wired when those modules exist.
-                }}
+                onClick={() => onNavigate(item.route as DashboardNavTarget)}
               />
             ))}
           </div>
@@ -424,22 +437,22 @@ export default function AdminDashboard() {
           <QuickAction
             icon="➕"
             label="Add student"
-            onClick={() => { /* TODO: navigate to student management */ }}
+            onClick={() => onNavigate('students', { intent: 'add_student' })}
           />
           <QuickAction
             icon="💳"
             label="Record payment"
-            onClick={() => { /* TODO: navigate to finance */ }}
+            onClick={() => onNavigate('finance', { intent: 'record_payment' })}
           />
           <QuickAction
             icon="📋"
             label="Mark attendance"
-            onClick={() => { /* TODO: navigate to attendance */ }}
+            onClick={() => onNavigate('attendance', { intent: 'mark_attendance' })}
           />
           <QuickAction
             icon="📅"
             label="View timetable"
-            onClick={() => { /* TODO: navigate to timetable */ }}
+            onClick={() => onNavigate('timetable')}
           />
         </div>
       </div>
@@ -451,7 +464,7 @@ export default function AdminDashboard() {
           <button
             className="dash-compose-btn"
             type="button"
-            onClick={() => { /* TODO: navigate to announcements compose */ }}
+            onClick={() => onNavigate('announcements')}
           >
             + Post
           </button>
@@ -469,7 +482,7 @@ export default function AdminDashboard() {
             <button
               className="btn btn-ghost"
               type="button"
-              onClick={() => { /* TODO */ }}
+              onClick={() => onNavigate('announcements')}
             >
               Post your first announcement →
             </button>

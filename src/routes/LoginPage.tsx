@@ -1,21 +1,18 @@
 /**
  * LoginPage.tsx
- * Login screen supporting three auth methods:
- *   - Staff: email + password
- *   - Guardian: phone + OTP
- *   - Anyone: login code (6-char alphanumeric issued by school admin)
+ * Login screen supporting two auth methods:
+ *   - Staff:   email + password
+ *   - Anyone:  login code (issued by school admin — used by guardians and students)
  *
- * Mobile-first. All three flows handle errors and loading states.
+ * Phone OTP removed — requires Twilio configuration not yet active.
+ * Re-add the Guardian tab and GuardianLoginForm when Twilio is connected.
+ *
+ * Mobile-first. Both flows handle errors and loading states.
  * Business logic lives in authService.ts — this file is UI only.
  */
 
 import { useState } from 'react'
-import {
-  loginWithEmail,
-  sendPhoneOtp,
-  verifyPhoneOtp,
-  loginWithCode,
-} from '../services/authService'
+import { loginWithEmail, loginWithCode } from '../services/authService'
 
 interface LoginPageProps {
   schoolId: string
@@ -24,7 +21,7 @@ interface LoginPageProps {
   themeColor?: string | null
 }
 
-type TabKey = 'staff' | 'guardian' | 'code'
+type TabKey = 'staff' | 'code'
 
 export function LoginPage({ schoolId, schoolName, logoUrl, themeColor }: LoginPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('staff')
@@ -45,16 +42,24 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor }: LoginPa
 
       {/* Tab switcher */}
       <div className="login-tabs" role="tablist">
-        <TabButton active={activeTab === 'staff'} onClick={() => setActiveTab('staff')} label="Staff" icon="👤" />
-        <TabButton active={activeTab === 'guardian'} onClick={() => setActiveTab('guardian')} label="Parent" icon="👨‍👩‍👧" />
-        <TabButton active={activeTab === 'code'} onClick={() => setActiveTab('code')} label="Code" icon="🔑" />
+        <TabButton
+          active={activeTab === 'staff'}
+          onClick={() => setActiveTab('staff')}
+          label="Staff"
+          icon="👤"
+        />
+        <TabButton
+          active={activeTab === 'code'}
+          onClick={() => setActiveTab('code')}
+          label="Login code"
+          icon="🔑"
+        />
       </div>
 
       {/* Login forms */}
       <div className="login-form-area">
         {activeTab === 'staff' && <StaffLoginForm />}
-        {activeTab === 'guardian' && <GuardianLoginForm />}
-        {activeTab === 'code' && <CodeLoginForm schoolId={schoolId} />}
+        {activeTab === 'code'  && <CodeLoginForm schoolId={schoolId} />}
       </div>
     </div>
   )
@@ -89,10 +94,10 @@ function TabButton({
 // ─── Staff: email + password ──────────────────────────────────────────────
 
 function StaffLoginForm() {
-  const [email, setEmail] = useState('')
+  const [email,    setEmail]    = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [error,    setError]    = useState<string | null>(null)
+  const [loading,  setLoading]  = useState(false)
 
   async function handleSubmit() {
     if (!email.trim() || !password.trim()) {
@@ -153,132 +158,11 @@ function StaffLoginForm() {
   )
 }
 
-// ─── Guardian: phone OTP ──────────────────────────────────────────────────
-
-function GuardianLoginForm() {
-  const [phone, setPhone] = useState('')
-  const [otp, setOtp] = useState('')
-  const [step, setStep] = useState<'phone' | 'otp'>('phone')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSendOtp() {
-    if (!phone.trim()) {
-      setError('Enter your phone number')
-      return
-    }
-    setError(null)
-    setLoading(true)
-    const result = await sendPhoneOtp(phone.trim())
-    setLoading(false)
-    if (!result.ok) {
-      setError(result.error ?? 'Could not send code — check the number and try again')
-      return
-    }
-    setStep('otp')
-  }
-
-  async function handleVerifyOtp() {
-    if (otp.trim().length < 6) {
-      setError('Enter the 6-digit code from your SMS')
-      return
-    }
-    setError(null)
-    setLoading(true)
-    const result = await verifyPhoneOtp(phone.trim(), otp.trim())
-    setLoading(false)
-    if (!result.ok) {
-      setError(result.error ?? 'Wrong code — check your SMS and try again')
-    }
-  }
-
-  if (step === 'otp') {
-    return (
-      <div className="login-form">
-        <p className="login-form-hint">
-          A 6-digit code was sent to <strong>{phone}</strong>.{' '}
-          <button className="link-btn" onClick={() => { setStep('phone'); setError(null) }}>
-            Change number
-          </button>
-        </p>
-
-        <label className="form-label">
-          6-digit code
-          <input
-            className="form-input form-input--otp"
-            type="text"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            autoComplete="one-time-code"
-            maxLength={6}
-            value={otp}
-            onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-            placeholder="123456"
-            disabled={loading}
-            autoFocus
-          />
-        </label>
-
-        {error && <p className="form-error" role="alert">{error}</p>}
-
-        <button
-          className="btn btn--primary btn--full"
-          onClick={handleVerifyOtp}
-          disabled={loading}
-        >
-          {loading ? 'Verifying…' : 'Verify and sign in'}
-        </button>
-
-        <button
-          className="btn btn--ghost btn--full"
-          onClick={handleSendOtp}
-          disabled={loading}
-        >
-          Resend code
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="login-form">
-      <p className="login-form-hint">
-        For parents and guardians — we'll send a code to your phone number.
-      </p>
-
-      <label className="form-label">
-        Phone number
-        <input
-          className="form-input"
-          type="tel"
-          inputMode="tel"
-          autoComplete="tel"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          placeholder="0812 345 6789"
-          disabled={loading}
-          onKeyDown={(e) => e.key === 'Enter' && handleSendOtp()}
-        />
-      </label>
-
-      {error && <p className="form-error" role="alert">{error}</p>}
-
-      <button
-        className="btn btn--primary btn--full"
-        onClick={handleSendOtp}
-        disabled={loading}
-      >
-        {loading ? 'Sending code…' : 'Send code'}
-      </button>
-    </div>
-  )
-}
-
-// ─── Login code ───────────────────────────────────────────────────────────
+// ─── Login code (guardians + students) ───────────────────────────────────
 
 function CodeLoginForm({ schoolId }: { schoolId: string }) {
-  const [code, setCode] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  const [code,    setCode]    = useState('')
+  const [error,   setError]   = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   async function handleSubmit() {
@@ -299,7 +183,7 @@ function CodeLoginForm({ schoolId }: { schoolId: string }) {
   return (
     <div className="login-form">
       <p className="login-form-hint">
-        For students or parents with a login code — enter the code given to you by the school.
+        For parents and students — enter the login code given to you by the school.
       </p>
 
       <label className="form-label">
@@ -311,7 +195,7 @@ function CodeLoginForm({ schoolId }: { schoolId: string }) {
           autoComplete="off"
           value={code}
           onChange={(e) => setCode(e.target.value.toUpperCase())}
-          placeholder="e.g. XK7R9"
+          placeholder="e.g. ABCD123"
           disabled={loading}
           onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
           maxLength={12}

@@ -3,11 +3,17 @@
  * Data access layer for the timetable module.
  * No browser-only APIs. No UI imports. React Native compatible.
  *
- * Exports:
+ * Read-only exports:
  *   loadTimetableData()   — everything needed to render class + teacher views
  *   loadStaffList()       — for teacher-view selector
  *   loadClassNodes()      — leaf nodes for class-view selector
  *   getCurrentPeriod()    — live lesson highlight helper
+ *
+ * Admin edit-mode exports (added for tap-to-select, tap-to-place slot assignment):
+ *   loadTeachingAssignments()  — assignment "chips" available for a class+session
+ *   upsertTimetableEntry()     — write/overwrite one day×period slot
+ *   deleteTimetableEntry()     — clear one slot
+ *   findConflictingEntryIds()  — pure helper: which loaded entries double-book a teacher
  */
 
 import { supabase } from '../lib/supabase'
@@ -55,6 +61,19 @@ export interface StaffMember {
   id: string
   full_name: string
   status: string
+}
+
+// A teaching assignment shown as a draggable/tappable "chip" in edit mode.
+// One row = one teacher teaching one subject to one class, for the session.
+// This is the *only* source of who/what can be placed on the timetable —
+// edit mode never lets an admin invent a staff/subject pairing on the fly.
+export interface TeachingAssignment {
+  id: string
+  staff_id: string
+  staff_name: string
+  subject_id: string
+  subject_name: string
+  class_node_id: string
 }
 
 export interface TimetableData {
@@ -193,6 +212,137 @@ export async function loadStaffList(): Promise<{
     return { ok: true, data: data ?? [] }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load staff' }
+  }
+}
+
+// ─── Teaching assignments — the "chips" admin places onto the grid ──────────
+// One row = one teacher teaching one subject to one class, for the session.
+// This is read-only from the timetable module's side: there is no UI here
+// to create a teaching_assignments row. If a class has none, the admin needs
+// to assign teachers to subjects first (a separate, not-yet-built screen) —
+// edit mode surfaces that gap rather than inventing a pairing.
+
+export async function loadTeachingAssignments(
+  sessionId: string,
+  classNodeId: string,
+): Promise<{
+  ok: boolean
+  data?: TeachingAssignment[]
+  error?: string
+}> {
+  try {
+    const { data, error } = await supabase
+      .from('teaching_assignments')
+      .select(`
+        id,
+        staff_id,
+        subject_id,
+        class_node_id,
+        staff ( full_name ),
+        subjects ( name )
+      `)
+      .eq('session_id', sessionId)
+      .eq('class_node_id', classNodeId)
+
+    if (error) return { ok: false, error: error.message }
+
+    const assignments: TeachingAssignment[] = (data ?? []).map((a: any) => ({
+      id: a.id,
+      staff_id: a.staff_id,
+      staff_name: a.staff?.full_name ?? '',
+      subject_id: a.subject_id,
+      subject_name: a.subjects?.name ?? '',
+      class_node_id: a.class_node_id,
+    }))
+
+    return { ok: true, data: assignments }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load teaching assignments' }
+  }
+}
+
+// ─── Conflict detection — derived from data already in memory ───────────────
+// Same teacher, same day, same period, different class = double-booked.
+// There is no "room" concept anywhere in the schema, so room conflicts
+// cannot be checked — this only ever flags the teacher.
+// loadTimetableData() already loads every entry for the session, school-wide
+// (the class/teacher view toggle filters it client-side) — so this is a pure
+// data transform, no extra query, computed fresh every time entries change.
+// "Live query, not a stored flag" per §7.12 — this is that, just in-memory.
+
+export function findConflictingEntryIds(entries: TimetableEntry[]): Set<string> {
+  const byTeacherSlot: Record<string, TimetableEntry[]> = {}
+
+  for (const e of entries) {
+    if (!e.staff_id) continue   // free/supervised periods can't conflict
+    const key = `${e.staff_id}|${e.day_of_week}|${e.period_id}`
+    if (!byTeacherSlot[key]) byTeacherSlot[key] = []
+    byTeacherSlot[key].push(e)
+  }
+
+  const conflictingIds = new Set<string>()
+  for (const group of Object.values(byTeacherSlot)) {
+    const distinctClasses = new Set(group.map(e => e.class_node_id))
+    if (distinctClasses.size > 1) {
+      group.forEach(e => conflictingIds.add(e.id))
+    }
+  }
+
+  return conflictingIds
+}
+
+// ─── Write one day×period slot ───────────────────────────────────────────────
+// Upserts on the table's real unique constraint
+// (school_id, session_id, day_of_week, period_id, class_node_id) — dropping
+// a different assignment onto an already-filled cell overwrites it rather
+// than erroring. Pass teachingAssignmentId + subjectId as null to mark a
+// deliberately free/supervised period (subject_id is nullable for this).
+
+export async function upsertTimetableEntry(params: {
+  schoolId: string
+  sessionId: string
+  dayOfWeek: number
+  periodId: string
+  classNodeId: string
+  teachingAssignmentId: string | null
+  subjectId: string | null
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await supabase
+      .from('timetable_entries')
+      .upsert(
+        {
+          school_id: params.schoolId,
+          session_id: params.sessionId,
+          day_of_week: params.dayOfWeek,
+          period_id: params.periodId,
+          class_node_id: params.classNodeId,
+          teaching_assignment_id: params.teachingAssignmentId,
+          subject_id: params.subjectId,
+        },
+        { onConflict: 'school_id,session_id,day_of_week,period_id,class_node_id' },
+      )
+
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to save the lesson' }
+  }
+}
+
+// ─── Clear one slot ───────────────────────────────────────────────────────────
+
+export async function deleteTimetableEntry(entryId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { error } = await supabase
+      .from('timetable_entries')
+      .delete()
+      .eq('id', entryId)
+
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to remove the lesson' }
   }
 }
 
