@@ -78,6 +78,7 @@ import {
   getAttendanceSummary,
   getSchoolAttendanceAnalytics,
   resolveAnalyticsScopeRange,
+  isSchoolDay,
   todayDateString,
   type ClassNode,
   type Student,
@@ -88,6 +89,7 @@ import {
   type AttendanceUpsertParams,
   type AttendanceAnalyticsScope,
   type SchoolAttendanceAnalytics,
+  type SchoolDayCheck,
 } from '../services/attendanceService'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -127,6 +129,48 @@ const HISTORY_DOT_CLS: Record<AttendanceStatus, string> = {
   late:    'att-dot--late',
 }
 
+// School-day gate (Session 19): fallback sub-label per day_type when the
+// calendar entry has no custom label set. 'school_day' is intentionally
+// absent — that dayType never reaches this UI (isSchoolDay would be true).
+const NOSCHOOL_REASON_LABEL: Partial<Record<SchoolDayCheck['dayType'] & string, string>> = {
+  holiday:  'Marked as a holiday on the school calendar.',
+  exam_day: 'Marked as an exam day on the school calendar.',
+  break:    'Marked as a school break.',
+}
+
+// ─── Attendance ring ──────────────────────────────────────────────────────────
+// SVG stroke-dashoffset ring, ported to match GuardianPortal.tsx's
+// AttendanceRing exactly (owner preference, flagged 2026-07-07) — replaces
+// the previous conic-gradient .att-analytics-ring, which read as a flat,
+// low-contrast donut compared to this. Same component shape/props as the
+// portal's version; kept as a local copy rather than a shared import since
+// AttendanceModule.tsx and GuardianPortal.tsx don't currently share a
+// components file (not introducing a new shared module for one component).
+function AttendanceRing({ percent }: { percent: number | null }) {
+  const pct = percent ?? 0
+  const r = 28
+  const circumference = 2 * Math.PI * r
+  const offset = circumference * (1 - pct / 100)
+  return (
+    <svg viewBox="0 0 70 70" className="att-ring">
+      <circle cx="35" cy="35" r={r} className="att-ring-bg" />
+      {percent !== null && (
+        <circle
+          cx="35"
+          cy="35"
+          r={r}
+          className="att-ring-fg"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      )}
+      <text x="35" y="40" textAnchor="middle" className="att-ring-text">
+        {percent !== null ? `${percent}%` : '—'}
+      </text>
+    </svg>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }: AttendanceModuleProps) {
@@ -156,6 +200,16 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
   // ── Date ──────────────────────────────────────────────────────────────────
   const [selectedDate, setSelectedDate] = useState<string>(todayDateString())
+
+  // ── School-day gate (PRD Tier 5 / Problem 5.2 / Session 19) ───────────────
+  // Whether selectedDate is a real school day for this school, per
+  // school_calendar_days (override) falling back to school_week_days
+  // (weekday). Gates the register itself — see renderRegister() — not just
+  // the history-strip display (that part already existed, see
+  // renderHistoryStrip()'s isNonSchoolUnmarked).
+  const [schoolDayCheck,     setSchoolDayCheck]     = useState<SchoolDayCheck | null>(null)
+  const [schoolDayLoading,   setSchoolDayLoading]   = useState(false)
+  const [schoolDayCheckErr,  setSchoolDayCheckErr]  = useState<string>('')
 
   // ── Attendance data ───────────────────────────────────────────────────────
   const [attMap,      setAttMap]      = useState<AttendanceMap>(new Map())
@@ -327,6 +381,54 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     loadClassData()
     return () => { cancelled = true }
   }, [selectedClass])
+
+  // Derived: does the currently selected date look like a real school day?
+  // Fails open (true) while loading, on error, or before the first check has
+  // resolved — same reasoning as the checkDay() error branch above: an
+  // unconfirmed "no school" is worse than briefly showing the normal bars.
+  const isSelectedDateSchoolDay = schoolDayLoading || !schoolDayCheck || schoolDayCheckErr
+    ? true
+    : schoolDayCheck.isSchoolDay
+
+  // ─── School-day check when date / class changes ─────────────────────────────
+  // Runs alongside loadRecords() below rather than inside it: this check must
+  // resolve (and gate the register) even in load states where loadRecords()
+  // itself no-ops (see its own guard on loadState), and keeping it a separate
+  // effect avoids coupling the gate's fetch to the records fetch's retry/error
+  // handling, which serves a different purpose (§4.3 — actionable empty state
+  // is its own concern, not a side effect of the records load succeeding).
+
+  useEffect(() => {
+    if (!selectedClass) {
+      setSchoolDayCheck(null)
+      return
+    }
+    let cancelled = false
+
+    async function checkDay() {
+      setSchoolDayLoading(true)
+      setSchoolDayCheckErr('')
+
+      const result = await isSchoolDay(selectedDate, schoolId)
+
+      if (cancelled) return
+
+      if (!result.ok) {
+        // Non-fatal: fail open (treat as a school day) rather than blocking
+        // the whole register behind a transient network error — a false
+        // "no school" empty state would be worse than occasionally showing
+        // the register on a day that turns out to be a holiday.
+        setSchoolDayCheckErr(result.error)
+        setSchoolDayCheck(null)
+      } else {
+        setSchoolDayCheck(result.data)
+      }
+      setSchoolDayLoading(false)
+    }
+
+    checkDay()
+    return () => { cancelled = true }
+  }, [selectedClass, selectedDate, schoolId])
 
   // ─── Load attendance records when date / class changes ─────────────────────
 
@@ -579,13 +681,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         {data && (
           <div className="att-analytics-body">
             <div className="att-analytics-ring-row">
-              <div
-                className="att-analytics-ring"
-                style={{ ['--pct' as any]: `${data.presentPercent}` }}
-              >
-                <span className="att-analytics-ring-value">{data.presentPercent}%</span>
-                <span className="att-analytics-ring-label">present</span>
-              </div>
+              <AttendanceRing percent={data.presentPercent} />
 
               <div className="att-analytics-chips">
                 <span className="att-sum att-sum--present">{data.present} present</span>
@@ -748,10 +844,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
           // since a genuine record (e.g. marked before a day was later set
           // as a holiday) still means something happened.
           const isNonSchoolUnmarked = !day.status && !day.isSchoolDay
+          const isToday = day.date === todayDateString()
           return (
             <div
               key={day.date}
-              className="att-history-day"
+              className={['att-history-day', isToday ? 'att-history-day--today' : ''].join(' ').trim()}
               title={isNonSchoolUnmarked ? `${day.date} — no school` : day.date}
             >
               <div
@@ -762,7 +859,8 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
                     : isNonSchoolUnmarked
                       ? 'att-dot--no-school'
                       : 'att-dot--unmarked',
-                ].join(' ')}
+                  isToday ? 'att-dot--today' : '',
+                ].join(' ').trim()}
               />
               <span className="att-history-date-label">
                 {day.date.slice(8)}  {/* day-of-month only */}
@@ -832,6 +930,32 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   function renderRegister() {
     if (!selectedClass) return null
 
+    // ── School-day gate (PRD Tier 5 / Problem 5.2 / Session 19) ─────────────
+    // Checked before the normal load-state branches below: a holiday/break
+    // date should show an actionable "no school" state regardless of
+    // whether students/records happen to have already loaded for it (§4.3 —
+    // do not just disable the UI silently). schoolDayLoading intentionally
+    // does not block rendering the skeleton/register below it — the register
+    // itself still depends on loadState, so there's no flash of the wrong
+    // empty state; this only prevents rendering the gate on stale/undefined
+    // data. A failed check (schoolDayCheckErr set) fails open, showing the
+    // normal register rather than a possibly-wrong "no school" state.
+    if (!isSelectedDateSchoolDay && schoolDayCheck) {
+      return (
+        <div className="att-noschool-state">
+          <span className="att-noschool-icon">📅</span>
+          <p className="att-noschool-msg">
+            No school today{schoolDayCheck.label ? ` — ${schoolDayCheck.label}` : ''}
+          </p>
+          {schoolDayCheck.dayType && (
+            <p className="att-noschool-sub">
+              {NOSCHOOL_REASON_LABEL[schoolDayCheck.dayType] ?? 'Marked as a non-school day.'}
+            </p>
+          )}
+        </div>
+      )
+    }
+
     if (loadState === 'loading' || loadState === 'booting') {
       return (
         <div className="att-register-skel">
@@ -896,11 +1020,13 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         {/* Date + period row — only show once a class is picked */}
         {selectedClass && renderDateBar()}
 
-        {/* Summary bar */}
-        {selectedClass && renderSummaryBar()}
+        {/* Summary bar — hidden on a confirmed non-school day (Session 19):
+            "0 present" reads as a real gap on a holiday when it isn't one. */}
+        {selectedClass && isSelectedDateSchoolDay && renderSummaryBar()}
 
-        {/* Batch mark-all */}
-        {selectedClass && loadState === 'ready' && renderBatchBar()}
+        {/* Batch mark-all — same reasoning: marking attendance on a holiday
+            shouldn't be offered as an action in the first place. */}
+        {selectedClass && loadState === 'ready' && isSelectedDateSchoolDay && renderBatchBar()}
       </div>
 
       {/* Register */}

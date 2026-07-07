@@ -4,8 +4,20 @@
  *
  * Tabs:
  *   School      — branding (name, logo, theme), language, public config (welcome msg, contacts)
- *   Calendar    — sessions + terms (when uses_terms=true); flag to toggle uses_terms
- *   Schedule    — school week days + periods (add/edit/delete/reorder)
+ *   Sessions    — sessions + terms (when uses_terms=true); flag to toggle uses_terms
+ *               (relabeled from "Calendar" — Session 18/6.7 — to avoid confusion with
+ *               the specific-date holiday/exam/break entries now living in Schedule,
+ *               below; internal tab id is left as 'calendar' to avoid touching every
+ *               reference to it, only the visible label changed)
+ *   Schedule    — school week days (collapsed by default — owner request, since most
+ *               modules depend on it and it should not be casually toggled) + periods
+ *               (add/edit/delete/reorder) + holidays & special days (Session 18: single-
+ *               date and bulk-range entry into school_calendar_days, each entry optionally
+ *               marked to extend the containing term/session's effective end date —
+ *               see getEffectiveTermEndDate() in attendanceService.ts, Problem 6.7's
+ *               extension logic, folded into this session at the owner's request rather
+ *               than deferred to Session 29, which now only needs to build the visual
+ *               TermProgressCard on top of this already-working computation)
  *   Classes     — class node tree (add/edit nodes at any depth)
  *   Subjects    — subject list (add/edit)
  *   Roles       — role management + permission assignment
@@ -26,9 +38,9 @@ import {
   loadPublicConfig,         savePublicConfig,
   loadSessions,             upsertSession,
   loadTerms,                upsertTerm,
-  loadCalendarDays,         upsertCalendarDay,  bulkUpsertCalendarDays,  deleteCalendarDay,
   loadWeekDays,             saveWeekDays,
   loadPeriods,              upsertPeriod,   deletePeriod,
+  loadCalendarDays,         upsertCalendarDay, bulkUpsertCalendarDays, deleteCalendarDay,
   loadSubjects,             upsertSubject,
   loadPermissionsCatalog,   loadRoles,      saveRole,   deleteRole,
   loadStaffWithRoles,
@@ -50,7 +62,6 @@ import {
   type AuditEntry,
   type StudentRole,
 } from '../services/settingsService'
-import { getEffectiveTermEndDate } from '../services/attendanceService'
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
@@ -58,7 +69,7 @@ type SettingsTab = 'school' | 'calendar' | 'schedule' | 'classes' | 'subjects' |
 
 const TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: 'school',        label: 'School',        icon: '🏫' },
-  { id: 'calendar',      label: 'Calendar',      icon: '📅' },
+  { id: 'calendar',      label: 'Sessions',      icon: '📅' },
   { id: 'schedule',      label: 'Schedule',      icon: '⏰' },
   { id: 'classes',       label: 'Classes',       icon: '🏷️' },
   { id: 'subjects',      label: 'Subjects',      icon: '📖' },
@@ -399,40 +410,6 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
   const [termSaving, setTermSaving] = useState(false)
   const [termError, setTermError] = useState<string | null>(null)
 
-  // School calendar (holidays/exam days/breaks) — Session 18/29 (PRD Problem
-  // 5.2 + 6.7's per-entry extend refinement). Scoped to selectedSessionId,
-  // same as terms above, so it works whether or not uses_terms is true.
-  const [calendarDays, setCalendarDays] = useState<CalendarDay[]>([])
-  const [calendarLoading, setCalendarLoading] = useState(false)
-  const [calendarError, setCalendarError] = useState<string | null>(null)
-
-  // Effective (possibly extended) end dates, keyed by term id (or the
-  // session id itself when uses_terms=false) — computed live via
-  // attendanceService.getEffectiveTermEndDate(), never stored. Recomputed
-  // whenever calendarDays or terms change so an insert/delete of an
-  // extends_term entry is reflected immediately, no page reload.
-  const [effectiveEndDates, setEffectiveEndDates] = useState<Record<string, string>>({})
-
-  // Single-date entry form
-  const [showDayForm, setShowDayForm] = useState(false)
-  const [editingDay, setEditingDay] = useState<CalendarDay | null>(null)
-  const [dayDate, setDayDate] = useState('')
-  const [dayType, setDayType] = useState<CalendarDayType>('holiday')
-  const [dayLabel, setDayLabel] = useState('')
-  const [dayExtends, setDayExtends] = useState(false)
-  const [daySaving, setDaySaving] = useState(false)
-  const [dayError, setDayError] = useState<string | null>(null)
-
-  // Bulk date-range entry form
-  const [showRangeForm, setShowRangeForm] = useState(false)
-  const [rangeStart, setRangeStart] = useState('')
-  const [rangeEnd, setRangeEnd] = useState('')
-  const [rangeType, setRangeType] = useState<CalendarDayType>('break')
-  const [rangeLabel, setRangeLabel] = useState('')
-  const [rangeExtends, setRangeExtends] = useState(false)
-  const [rangeSaving, setRangeSaving] = useState(false)
-  const [rangeError, setRangeError] = useState<string | null>(null)
-
   const loadAll = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -460,48 +437,6 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
       setTermsLoading(false)
     })
   }, [selectedSessionId, schoolId, usesTerms])
-
-  const loadCalendar = useCallback(async () => {
-    if (!selectedSessionId) return
-    setCalendarLoading(true)
-    setCalendarError(null)
-    const res = await loadCalendarDays(schoolId, selectedSessionId)
-    if (res.error) { setCalendarError(res.error); setCalendarLoading(false); return }
-    setCalendarDays(res.data)
-    setCalendarLoading(false)
-  }, [schoolId, selectedSessionId])
-
-  useEffect(() => { loadCalendar() }, [loadCalendar])
-
-  // Recompute every relevant effective end date whenever the underlying
-  // terms/session dates or the calendar entries change — this is what makes
-  // an insert/delete of an extends_term day reflect immediately in the UI,
-  // with zero risk of a stored value drifting (see getEffectiveTermEndDate's
-  // own doc comment for why it's live-computed rather than stored).
-  useEffect(() => {
-    if (!selectedSessionId) return
-    let cancelled = false
-
-    async function recompute() {
-      const currentSession = sessions.find(s => s.id === selectedSessionId)
-      const entries: Record<string, string> = {}
-
-      if (usesTerms) {
-        for (const t of terms) {
-          const res = await getEffectiveTermEndDate(t.start_date, t.end_date, schoolId)
-          if (res.ok) entries[t.id] = res.data
-        }
-      } else if (currentSession) {
-        const res = await getEffectiveTermEndDate(currentSession.start_date, currentSession.end_date, schoolId)
-        if (res.ok) entries[currentSession.id] = res.data
-      }
-
-      if (!cancelled) setEffectiveEndDates(entries)
-    }
-
-    recompute()
-    return () => { cancelled = true }
-  }, [selectedSessionId, sessions, terms, usesTerms, calendarDays, schoolId])
 
   function openSessionForm(s?: Session) {
     setEditingSession(s ?? null)
@@ -546,64 +481,6 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
     setTermSaving(false)
   }
 
-  function openDayForm(d?: CalendarDay) {
-    setEditingDay(d ?? null)
-    setDayDate(d?.calendar_date ?? '')
-    setDayType(d?.day_type ?? 'holiday')
-    setDayLabel(d?.label ?? '')
-    setDayExtends(d?.extends_term ?? false)
-    setDayError(null)
-    setShowDayForm(true)
-  }
-
-  async function handleSaveDay() {
-    if (!dayDate || !selectedSessionId) { setDayError('A date is required.'); return }
-    setDaySaving(true)
-    const res = await upsertCalendarDay(schoolId, selectedSessionId, {
-      id: editingDay?.id,
-      calendar_date: dayDate,
-      day_type: dayType,
-      label: dayLabel || null,
-      extends_term: dayExtends,
-    })
-    if (res.error) { setDayError(res.error); setDaySaving(false); return }
-    setShowDayForm(false)
-    setDaySaving(false)
-    loadCalendar()
-  }
-
-  function openRangeForm() {
-    setRangeStart('')
-    setRangeEnd('')
-    setRangeType('break')
-    setRangeLabel('')
-    setRangeExtends(false)
-    setRangeError(null)
-    setShowRangeForm(true)
-  }
-
-  async function handleSaveRange() {
-    if (!rangeStart || !rangeEnd || !selectedSessionId) { setRangeError('Start and end dates are required.'); return }
-    if (rangeStart > rangeEnd) { setRangeError('Start date must be on or before end date.'); return }
-    setRangeSaving(true)
-    const res = await bulkUpsertCalendarDays(schoolId, selectedSessionId, {
-      start_date: rangeStart,
-      end_date: rangeEnd,
-      day_type: rangeType,
-      label: rangeLabel || null,
-      extends_term: rangeExtends,
-    })
-    if (res.error) { setRangeError(res.error); setRangeSaving(false); return }
-    setShowRangeForm(false)
-    setRangeSaving(false)
-    loadCalendar()
-  }
-
-  async function handleDeleteDay(id: string) {
-    await deleteCalendarDay(schoolId, id)
-    loadCalendar()
-  }
-
   if (loading) return <Skeleton />
   if (error) return <ErrorState message={error} onRetry={loadAll} />
 
@@ -620,12 +497,7 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
           <div key={s.id} className={`set-list-row${s.is_current ? ' set-list-row--current' : ''}`}>
             <div className="set-list-row-info">
               <p className="set-list-row-name">{s.name}</p>
-              <p className="set-list-row-meta">
-                {s.start_date} → {s.end_date}
-                {!usesTerms && effectiveEndDates[s.id] && effectiveEndDates[s.id] !== s.end_date && (
-                  <span className="set-extended-date"> (extended to {effectiveEndDates[s.id]})</span>
-                )}
-              </p>
+              <p className="set-list-row-meta">{s.start_date} → {s.end_date}</p>
             </div>
             <div className="set-list-row-actions">
               {s.is_current && <span className="set-current-chip">Current</span>}
@@ -655,12 +527,7 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
                 <div key={t.id} className="set-list-row">
                   <div className="set-list-row-info">
                     <p className="set-list-row-name">{t.name}</p>
-                    <p className="set-list-row-meta">
-                      {t.start_date} → {t.end_date}
-                      {effectiveEndDates[t.id] && effectiveEndDates[t.id] !== t.end_date && (
-                        <span className="set-extended-date"> (extended to {effectiveEndDates[t.id]})</span>
-                      )}
-                    </p>
+                    <p className="set-list-row-meta">{t.start_date} → {t.end_date}</p>
                   </div>
                   <button className="set-edit-btn" onClick={() => openTermForm(t)}>Edit</button>
                 </div>
@@ -708,119 +575,6 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
           </div>
         </div>
       )}
-
-      {/* School calendar — holidays / exam days / breaks (Session 18/29) */}
-      {selectedSessionId && (
-        <>
-          <div className="set-section-header set-section-header--spaced">
-            <SectionLabel>School calendar</SectionLabel>
-            <div className="set-section-controls">
-              <button className="set-add-btn" onClick={() => openDayForm()}>+ Add date</button>
-              <button className="set-add-btn" onClick={openRangeForm}>+ Add range</button>
-            </div>
-          </div>
-          <p className="set-hint-text">
-            Mark specific dates as holidays, exam days, or breaks. Turn on "Extend term end date"
-            for entries that should push the term's effective end date out — a single stray public
-            holiday usually shouldn't, but a planned multi-week break usually should.
-          </p>
-
-          {calendarLoading
-            ? <Skeleton lines={3} />
-            : calendarError
-              ? <ErrorState message={calendarError} onRetry={loadCalendar} />
-              : calendarDays.length === 0
-                ? <p className="set-empty-hint">No calendar entries for this session yet.</p>
-                : calendarDays.map(d => (
-                  <div key={d.id} className="set-list-row">
-                    <div className="set-list-row-info">
-                      <p className="set-list-row-name">
-                        {d.calendar_date}
-                        <span className={`set-daytype-chip set-daytype-chip--${d.day_type}`}>{d.day_type.replace('_', ' ')}</span>
-                        {d.extends_term && <span className="set-extends-chip">extends term</span>}
-                      </p>
-                      {d.label && <p className="set-list-row-meta">{d.label}</p>}
-                    </div>
-                    <div className="set-list-row-actions">
-                      <button className="set-edit-btn" onClick={() => openDayForm(d)}>Edit</button>
-                      <button className="set-delete-btn" onClick={() => handleDeleteDay(d.id)}>Delete</button>
-                    </div>
-                  </div>
-                ))
-          }
-        </>
-      )}
-
-      {/* Single-date entry form sheet */}
-      {showDayForm && (
-        <div className="set-overlay" onClick={() => setShowDayForm(false)}>
-          <div className="set-sheet" onClick={e => e.stopPropagation()}>
-            <h2 className="set-sheet-title">{editingDay ? 'Edit calendar entry' : 'Add calendar entry'}</h2>
-            <FieldRow label="Date"><Input value={dayDate} onChange={setDayDate} type="date" /></FieldRow>
-            <FieldRow label="Type">
-              <select className="set-select" value={dayType} onChange={e => setDayType(e.target.value as CalendarDayType)}>
-                <option value="holiday">Holiday</option>
-                <option value="exam_day">Exam day</option>
-                <option value="break">Break</option>
-                <option value="school_day">School day (override a normally non-school weekday)</option>
-              </select>
-            </FieldRow>
-            <FieldRow label="Label (optional)">
-              <Input value={dayLabel} onChange={setDayLabel} placeholder="e.g. Eid al-Fitr" />
-            </FieldRow>
-            {dayType !== 'school_day' && (
-              <Toggle
-                checked={dayExtends}
-                onChange={setDayExtends}
-                label="Extend term/session end date by this day"
-              />
-            )}
-            {dayError && <p className="set-form-error">{dayError}</p>}
-            <div className="set-sheet-footer">
-              <button className="set-cancel-btn" onClick={() => setShowDayForm(false)}>Cancel</button>
-              <button className="set-save-btn" onClick={handleSaveDay} disabled={daySaving}>{daySaving ? 'Saving…' : 'Save'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Bulk date-range entry form sheet */}
-      {showRangeForm && (
-        <div className="set-overlay" onClick={() => setShowRangeForm(false)}>
-          <div className="set-sheet" onClick={e => e.stopPropagation()}>
-            <h2 className="set-sheet-title">Add date range</h2>
-            <FieldRow label="Start date"><Input value={rangeStart} onChange={setRangeStart} type="date" /></FieldRow>
-            <FieldRow label="End date"><Input value={rangeEnd} onChange={setRangeEnd} type="date" /></FieldRow>
-            <FieldRow label="Type">
-              <select className="set-select" value={rangeType} onChange={e => setRangeType(e.target.value as CalendarDayType)}>
-                <option value="holiday">Holiday</option>
-                <option value="exam_day">Exam day</option>
-                <option value="break">Break</option>
-                <option value="school_day">School day (override a normally non-school weekday)</option>
-              </select>
-            </FieldRow>
-            <FieldRow label="Label (optional)">
-              <Input value={rangeLabel} onChange={setRangeLabel} placeholder="e.g. Mid-term break" />
-            </FieldRow>
-            {rangeType !== 'school_day' && (
-              <Toggle
-                checked={rangeExtends}
-                onChange={setRangeExtends}
-                label="Extend term/session end date for every school day in this range"
-              />
-            )}
-            <p className="set-hint-text">
-              Only the dates in this range that would otherwise have been real school days count
-              toward any extension — marking an already-off Saturday doesn't add an extra day.
-            </p>
-            {rangeError && <p className="set-form-error">{rangeError}</p>}
-            <div className="set-sheet-footer">
-              <button className="set-cancel-btn" onClick={() => setShowRangeForm(false)}>Cancel</button>
-              <button className="set-save-btn" onClick={handleSaveRange} disabled={rangeSaving}>{rangeSaving ? 'Saving…' : 'Save range'}</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -832,6 +586,15 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
   const [error, setError] = useState<string | null>(null)
   const [weekDays, setWeekDays] = useState<number[]>([])
   const [periods, setPeriods] = useState<Period[]>([])
+
+  // Collapsed by default per owner request (2026-07-04) — most other modules
+  // depend on this setting (attendance's school-day logic, analytics
+  // denominators, the new calendar-days extension math below), so it
+  // shouldn't be one accidental tap away from changing. Always collapsed on
+  // load regardless of whether days are already set, not just for new
+  // schools — the owner's ask was "somewhat hidden to avoid mistakes," not
+  // "hidden only until first configured."
+  const [weekDaysOpen, setWeekDaysOpen] = useState(false)
 
   const [daysSaving, setDaysSaving] = useState(false)
   const [daysSaved, setDaysSaved] = useState(false)
@@ -847,6 +610,27 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
   const [pSaving, setPSaving] = useState(false)
   const [pError, setPError] = useState<string | null>(null)
 
+  // Holidays & special days (school_calendar_days) — Session 18 / Problem 6.7.
+  // Scoped to the current session, same as CalendarTab's own sessions/terms
+  // (§3.6 — works whether or not uses_terms is true, since school_calendar_days
+  // is session_id-scoped, not term_id-scoped).
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [calendarDays, setCalendarDays] = useState<CalendarDay[]>([])
+  const [calLoading, setCalLoading] = useState(true)
+  const [calError, setCalError] = useState<string | null>(null)
+
+  const [calMode, setCalMode] = useState<'single' | 'bulk'>('single')
+  const [showCalForm, setShowCalForm] = useState(false)
+  const [editingCalDay, setEditingCalDay] = useState<CalendarDay | null>(null)
+  const [calDate, setCalDate] = useState('')
+  const [calEndDate, setCalEndDate] = useState('')
+  const [calDayType, setCalDayType] = useState<CalendarDayType>('holiday')
+  const [calLabel, setCalLabel] = useState('')
+  const [calExtends, setCalExtends] = useState(false)
+  const [calSaving, setCalSaving] = useState(false)
+  const [calFormError, setCalFormError] = useState<string | null>(null)
+  const [calBulkResult, setCalBulkResult] = useState<string | null>(null)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -861,6 +645,30 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
   }, [schoolId])
 
   useEffect(() => { load() }, [load])
+
+  const loadCalendar = useCallback(async () => {
+    setCalLoading(true)
+    setCalError(null)
+    // Reuses the exact "find current session" pattern CalendarTab already
+    // uses — loadSessions() rather than a dedicated lookup, so there's one
+    // source of truth for "what counts as current" across both tabs.
+    const sRes = await loadSessions(schoolId)
+    if (sRes.error) { setCalError(sRes.error); setCalLoading(false); return }
+    if (sRes.data.length === 0) {
+      setCurrentSessionId(null)
+      setCalendarDays([])
+      setCalLoading(false)
+      return
+    }
+    const current = sRes.data.find(s => s.is_current) ?? sRes.data[0]
+    setCurrentSessionId(current.id)
+    const cRes = await loadCalendarDays(schoolId, current.id)
+    if (cRes.error) { setCalError(cRes.error); setCalLoading(false); return }
+    setCalendarDays(cRes.data)
+    setCalLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { loadCalendar() }, [loadCalendar])
 
   function toggleDay(day: number) {
     setWeekDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
@@ -904,29 +712,109 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
     setPeriods(prev => prev.filter(p => p.id !== id))
   }
 
+  function openCalForm(mode: 'single' | 'bulk', d?: CalendarDay) {
+    setCalMode(mode)
+    setEditingCalDay(d ?? null)
+    setCalDate(d?.calendar_date ?? '')
+    setCalEndDate('')
+    setCalDayType(d?.day_type ?? 'holiday')
+    setCalLabel(d?.label ?? '')
+    setCalExtends(d?.extends_term ?? false)
+    setCalFormError(null)
+    setCalBulkResult(null)
+    setShowCalForm(true)
+  }
+
+  async function handleSaveCalDay() {
+    if (!currentSessionId) { setCalFormError('No session found — create a session first, in the Sessions tab.'); return }
+
+    if (calMode === 'bulk' && !editingCalDay) {
+      if (!calDate || !calEndDate) { setCalFormError('Start date and end date are required.'); return }
+      setCalSaving(true)
+      setCalFormError(null)
+      const res = await bulkUpsertCalendarDays(schoolId, currentSessionId, {
+        start_date: calDate,
+        end_date: calEndDate,
+        day_type: calDayType,
+        label: calLabel || null,
+        extends_term: calExtends,
+      })
+      setCalSaving(false)
+      if (res.error) { setCalFormError(res.error); return }
+      setCalBulkResult(`Marked ${res.count} date${res.count === 1 ? '' : 's'}.`)
+      const cRes = await loadCalendarDays(schoolId, currentSessionId)
+      setCalendarDays(cRes.data)
+      return
+    }
+
+    if (!calDate) { setCalFormError('Date is required.'); return }
+    setCalSaving(true)
+    setCalFormError(null)
+    const res = await upsertCalendarDay(schoolId, currentSessionId, {
+      id: editingCalDay?.id,
+      calendar_date: calDate,
+      day_type: calDayType,
+      label: calLabel || null,
+      extends_term: calExtends,
+    })
+    setCalSaving(false)
+    if (res.error) { setCalFormError(res.error); return }
+    setShowCalForm(false)
+    const cRes = await loadCalendarDays(schoolId, currentSessionId)
+    setCalendarDays(cRes.data)
+  }
+
+  async function handleDeleteCalDay(id: string) {
+    if (!currentSessionId) return
+    if (!confirm('Remove this calendar entry?')) return
+    const res = await deleteCalendarDay(schoolId, id)
+    if (res.error) { alert(res.error); return }
+    setCalendarDays(prev => prev.filter(d => d.id !== id))
+  }
+
   if (loading) return <Skeleton />
   if (error) return <ErrorState message={error} onRetry={load} />
 
   return (
     <div className="set-tab-content">
-      <SectionLabel>School week</SectionLabel>
-      <div className="set-day-chips">
-        {[0, 1, 2, 3, 4, 5, 6].map(d => (
-          <button
-            key={d}
-            className={`set-day-chip${weekDays.includes(d) ? ' set-day-chip--on' : ''}`}
-            onClick={() => toggleDay(d)}
-            type="button"
-          >
-            {DAY_NAMES[d]}
+      <div className="set-collapsible-card" onClick={() => setWeekDaysOpen(o => !o)}>
+        <span className="set-collapsible-label">School week</span>
+        <div className="set-collapsible-row">
+          <span className="set-collapsible-summary">
+            {weekDays.length === 0
+              ? 'Not set'
+              : weekDays.slice().sort().map(d => DAY_NAMES[d]).join(', ')}
+          </span>
+          <button type="button" className="set-collapsible-toggle" aria-expanded={weekDaysOpen}>
+            {weekDaysOpen ? 'Hide' : 'Edit week days'}
           </button>
-        ))}
+        </div>
       </div>
-      <div className="set-save-bar set-save-bar--inline">
-        {daysError && <p className="set-save-error">{daysError}</p>}
-        {daysSaved && <p className="set-save-ok">✓ Saved</p>}
-        <button className="set-save-btn" onClick={handleSaveDays} disabled={daysSaving}>{daysSaving ? 'Saving…' : 'Save week days'}</button>
-      </div>
+      {weekDaysOpen && (
+        <div className="set-collapsible-body">
+          <p className="set-field-hint">
+            Which weekdays count as school days for this school — used everywhere attendance,
+            calendars, and term progress are calculated. Change carefully.
+          </p>
+          <div className="set-day-chips">
+            {[0, 1, 2, 3, 4, 5, 6].map(d => (
+              <button
+                key={d}
+                className={`set-day-chip${weekDays.includes(d) ? ' set-day-chip--on' : ''}`}
+                onClick={() => toggleDay(d)}
+                type="button"
+              >
+                {DAY_NAMES[d]}
+              </button>
+            ))}
+          </div>
+          <div className="set-save-bar set-save-bar--inline">
+            {daysError && <p className="set-save-error">{daysError}</p>}
+            {daysSaved && <p className="set-save-ok">✓ Saved</p>}
+            <button className="set-save-btn" onClick={handleSaveDays} disabled={daysSaving}>{daysSaving ? 'Saving…' : 'Save week days'}</button>
+          </div>
+        </div>
+      )}
 
       <div className="set-section-header set-section-header--spaced">
         <SectionLabel>Periods</SectionLabel>
@@ -969,8 +857,120 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
           </div>
         </div>
       )}
+
+      <div className="set-section-header set-section-header--spaced set-section-header--wrap">
+        <SectionLabel>Holidays & special days</SectionLabel>
+        {currentSessionId && (
+          <div className="set-add-btn-group">
+            <button className="set-add-btn" onClick={() => openCalForm('single')}>+ Add date</button>
+            <button className="set-add-btn set-add-btn--secondary" onClick={() => openCalForm('bulk')}>+ Add range</button>
+          </div>
+        )}
+      </div>
+      <p className="set-field-hint">
+        Mark specific dates as a holiday, exam day, or break — these override the school-week
+        pattern above for that date only. {calendarDays.length} {calendarDays.length === 1 ? 'entry' : 'entries'} in this session.
+      </p>
+
+      {calLoading ? (
+        <Skeleton lines={2} />
+      ) : calError ? (
+        <ErrorState message={calError} onRetry={loadCalendar} />
+      ) : !currentSessionId ? (
+        <p className="set-empty-hint">No session found — create one in the Sessions tab first.</p>
+      ) : calendarDays.length === 0 ? (
+        <p className="set-empty-hint">No holidays or special days marked yet for this session.</p>
+      ) : (
+        calendarDays.map(d => (
+          <div key={d.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">
+                {d.calendar_date}
+                <span className={`set-caldaytype-chip set-caldaytype-chip--${d.day_type}`}>
+                  {CAL_DAY_TYPE_LABELS[d.day_type]}
+                </span>
+                {d.extends_term && <span className="set-extends-chip">Extends term</span>}
+              </p>
+              {d.label && <p className="set-list-row-meta">{d.label}</p>}
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openCalForm('single', d)}>Edit</button>
+              <button className="set-delete-btn" onClick={() => handleDeleteCalDay(d.id)}>✕</button>
+            </div>
+          </div>
+        ))
+      )}
+
+      {showCalForm && (
+        <div className="set-overlay" onClick={() => setShowCalForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">
+              {editingCalDay ? 'Edit calendar entry' : calMode === 'bulk' ? 'Add date range' : 'Add date'}
+            </h2>
+
+            {calMode === 'bulk' && !editingCalDay ? (
+              <>
+                <FieldRow label="Start date"><Input value={calDate} onChange={setCalDate} type="date" /></FieldRow>
+                <FieldRow label="End date"><Input value={calEndDate} onChange={setCalEndDate} type="date" /></FieldRow>
+              </>
+            ) : (
+              <FieldRow label="Date"><Input value={calDate} onChange={setCalDate} type="date" /></FieldRow>
+            )}
+
+            <FieldRow label="Type">
+              <select
+                className="set-select"
+                value={calDayType}
+                onChange={e => setCalDayType(e.target.value as CalendarDayType)}
+              >
+                <option value="holiday">Holiday</option>
+                <option value="exam_day">Exam day</option>
+                <option value="break">Break</option>
+                <option value="school_day">School day (override)</option>
+              </select>
+            </FieldRow>
+
+            <FieldRow label="Label (optional)">
+              <Input value={calLabel} onChange={setCalLabel} placeholder="e.g. Eid al-Fitr, Mid-term break" />
+            </FieldRow>
+
+            <Toggle
+              checked={calExtends}
+              onChange={setCalExtends}
+              label="Extend the term/session end date to make up for this"
+            />
+            <p className="set-field-hint">
+              On: a school-day lost to this entry pushes the term's effective end date out by one
+              day, so the same number of teaching days is still delivered. Off: this is just a
+              marked exception inside the term as originally planned — the common choice for a
+              single stray public holiday. Only applies to dates that would otherwise have been
+              real school days; already non-school dates (per the school week above) are ignored
+              either way.
+            </p>
+
+            {calFormError && <p className="set-form-error">{calFormError}</p>}
+            {calBulkResult && <p className="set-save-ok">✓ {calBulkResult}</p>}
+
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowCalForm(false)}>
+                {calBulkResult ? 'Close' : 'Cancel'}
+              </button>
+              <button className="set-save-btn" onClick={handleSaveCalDay} disabled={calSaving}>
+                {calSaving ? 'Saving…' : calMode === 'bulk' && !editingCalDay ? 'Mark range' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+const CAL_DAY_TYPE_LABELS: Record<CalendarDayType, string> = {
+  school_day: 'School day',
+  holiday: 'Holiday',
+  exam_day: 'Exam day',
+  break: 'Break',
 }
 
 // ─── Tab: Classes ─────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ import {
   loadPaymentHistory,
   loadPortalAnnouncements,
   formatNaira,
+  todayDateString,
   type PortalChild,
   type PortalSession,
   type PortalTerm,
@@ -732,13 +733,24 @@ function AttendanceTab({
         <div className="port-strip">
           <p className="port-strip-label">Last 30 days</p>
           <div className="port-strip-row">
-            {strip.map((d) => (
-              <span
-                key={d.date}
-                className={`port-strip-dot port-strip-dot--${d.status}`}
-                title={`${d.date}: ${stripDotTitle(d.status)}`}
-              />
-            ))}
+            {strip.map((d) => {
+              const isToday = d.date === todayDateString()
+              return (
+                <div key={d.date} className="port-strip-day">
+                  <span
+                    className={[
+                      'port-strip-dot',
+                      `port-strip-dot--${d.status}`,
+                      isToday ? 'port-strip-dot--today' : '',
+                    ].join(' ').trim()}
+                    title={`${d.date}: ${stripDotTitle(d.status)}`}
+                  />
+                  <span className={['port-strip-date-label', isToday ? 'port-strip-date-label--today' : ''].join(' ').trim()}>
+                    {d.date.slice(8)}{/* day-of-month only, matches staff-side att-history-date-label */}
+                  </span>
+                </div>
+              )
+            })}
           </div>
           <div className="port-strip-legend">
             <span><i className="port-strip-dot port-strip-dot--present" /> Present</span>
@@ -1119,7 +1131,7 @@ function getGreeting(): string {
 }
 
 function todayCapped(endDate: string): string {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayDateString()
   return today < endDate ? today : endDate
 }
 

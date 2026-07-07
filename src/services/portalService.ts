@@ -16,7 +16,7 @@
  */
 
 import { supabase } from '../lib/supabase'
-import { getSchoolDayMap, countSchoolDaysInRange, getEffectiveTermEndDate } from './attendanceService'
+import { getSchoolDayMap, countSchoolDaysInRange, getEffectiveTermEndDate, loadCurrentTerm as loadAttendanceCurrentTerm } from './attendanceService'
 
 /**
  * Unwraps a PostgREST embedded relation, whether it comes back as a single
@@ -64,33 +64,6 @@ export interface PortalTerm {
   sequence: number
   start_date: string
   end_date: string
-}
-
-/**
- * Term/session progress — Session 29 (PRD Problem 6.7), surfaced read-only to
- * guardians/students. Mirrors exactly what the admin Settings screen shows
- * (SettingsModule.tsx's CalendarTab), reusing the same
- * attendanceService.getEffectiveTermEndDate() rather than a second
- * implementation, so a parent and an admin never see two different "days
- * remaining" numbers for the same term.
- *
- * scopeLabel/scopeStartDate/scopeEndDate describe whichever the school
- * actually uses — the current term when uses_terms is true, otherwise the
- * whole session. effectiveEndDate may be later than baseEndDate when one or
- * more school-day calendar entries in range are marked extends_term=true;
- * equal to it otherwise (no reload needed to reflect an admin's edit next
- * time this is called).
- */
-export interface TermProgress {
-  scopeLabel: string
-  scopeStartDate: string
-  baseEndDate: string
-  effectiveEndDate: string
-  totalDays: number
-  elapsedDays: number
-  remainingDays: number
-  percentElapsed: number // 0–100, clamped, based on today vs [scopeStartDate, effectiveEndDate]
-  isExtended: boolean
 }
 
 export interface AttendanceSummary {
@@ -298,76 +271,90 @@ export async function loadSchoolUsesTerms(schoolId: string): Promise<boolean> {
   return data?.uses_terms ?? true
 }
 
+// ─── Term/session progress (Session 29, PRD Problem 6.7) ──────────────────
+// Backs TermProgressCard.tsx on the guardian/student portal's Summary tab.
+// Added 2026-07-07 — the component and its call site in GuardianPortal.tsx
+// already existed and were wired up, but this type/function were never
+// actually added here, which crashed the whole portal at module-load time
+// ("no exported member 'TermProgress'"/'loadTermProgress'). Deliberately
+// built on the same getEffectiveTermEndDate() attendanceService.ts already
+// uses for the admin Settings screen's extend/revert computation (§12,
+// Session 18) — never a second, parallel calculation — so a parent and an
+// admin can never see two different "days remaining" numbers for the same
+// term. Nothing new is stored: still live-computed every call, per that
+// function's own reasoning (insert/delete of an extending holiday stays
+// symmetric for free).
+
+export interface TermProgress {
+  scopeLabel: string          // term name (e.g. "First Term") or session name, whichever applies
+  scopeStartDate: string      // the term's/session's own start_date, unaffected by extension
+  baseEndDate: string         // the term's/session's original end_date, before any extension
+  effectiveEndDate: string    // getEffectiveTermEndDate()'s result — may equal baseEndDate
+  isExtended: boolean         // true when effectiveEndDate !== baseEndDate
+  elapsedDays: number         // days from scopeStartDate to today, inclusive, clamped to [0, totalDays]
+  totalDays: number           // scopeStartDate to effectiveEndDate, inclusive
+  remainingDays: number       // totalDays - elapsedDays, floor at 0
+  percentElapsed: number      // 0-100, rounded, for the progress bar fill
+}
+
 /**
- * Resolves the school's current term-or-session progress for the guardian
- * portal's term-progress card. Picks whichever term's [start_date, end_date]
- * actually contains today (falls back to the last term if today is past
- * every term's base end date, so a school that hasn't yet added next term's
- * dates doesn't just show nothing); when uses_terms is false, uses the
- * current session directly. Returns null when there's no current session at
- * all (nothing sensible to show) or the resolved scope's own dates are
- * missing/invalid.
+ * Resolves the current term (if the school uses terms and one covers today)
+ * or falls back to the current session as the progress "scope" — same
+ * fallback order as resolveAnalyticsScopeRange() in attendanceService.ts.
+ * Returns null when there's no current session at all, or the school uses
+ * terms but today falls outside every term's range (a real gap between
+ * terms — nothing to show progress against, not an error).
  */
 export async function loadTermProgress(schoolId: string): Promise<TermProgress | null> {
   const session = await loadCurrentSession(schoolId)
   if (!session) return null
 
   const usesTerms = await loadSchoolUsesTerms(schoolId)
-  const today = todayDateString()
 
-  let scopeLabel: string
-  let scopeStartDate: string
-  let baseEndDate: string
+  let scopeLabel = session.name
+  let scopeStartDate = session.start_date
+  let baseEndDate = session.end_date
 
   if (usesTerms) {
-    const terms = await loadTermsForSession(session.id)
-    if (terms.length === 0) {
-      // uses_terms is on but no terms exist yet for this session — fall back
-      // to the session itself rather than returning null, so the card still
-      // shows something sensible instead of silently disappearing.
-      scopeLabel = session.name
-      scopeStartDate = session.start_date
-      baseEndDate = session.end_date
-    } else {
-      const current = terms.find(t => today >= t.start_date && today <= t.end_date)
-      const chosen = current ?? terms[terms.length - 1]
-      scopeLabel = chosen.name
-      scopeStartDate = chosen.start_date
-      baseEndDate = chosen.end_date
-    }
-  } else {
-    scopeLabel = session.name
-    scopeStartDate = session.start_date
-    baseEndDate = session.end_date
+    const termRes = await loadAttendanceCurrentTerm(session.id)
+    if (!termRes.ok) return null
+    if (!termRes.data) return null   // between terms — genuinely nothing to show
+    scopeLabel = termRes.data.name
+    scopeStartDate = termRes.data.startDate
+    baseEndDate = termRes.data.endDate
   }
 
-  if (!scopeStartDate || !baseEndDate) return null
-
   const effectiveRes = await getEffectiveTermEndDate(scopeStartDate, baseEndDate, schoolId)
-  const effectiveEndDate = effectiveRes.ok ? effectiveRes.data : baseEndDate
+  if (!effectiveRes.ok) return null
+  const effectiveEndDate = effectiveRes.data
 
-  const start = new Date(scopeStartDate + 'T00:00:00')
-  const effectiveEnd = new Date(effectiveEndDate + 'T00:00:00')
-  const now = new Date(today + 'T00:00:00')
-
-  const msPerDay = 24 * 60 * 60 * 1000
-  const totalDays = Math.max(1, Math.round((effectiveEnd.getTime() - start.getTime()) / msPerDay) + 1)
-  const rawElapsed = Math.round((now.getTime() - start.getTime()) / msPerDay) + 1
-  const elapsedDays = Math.min(totalDays, Math.max(0, rawElapsed))
+  const today = todayDateString()
+  const totalDays = daysBetweenInclusive(scopeStartDate, effectiveEndDate)
+  const elapsedDaysRaw = daysBetweenInclusive(scopeStartDate, today < effectiveEndDate ? today : effectiveEndDate)
+  const elapsedDays = Math.max(0, Math.min(totalDays, elapsedDaysRaw))
   const remainingDays = Math.max(0, totalDays - elapsedDays)
-  const percentElapsed = Math.min(100, Math.max(0, Math.round((elapsedDays / totalDays) * 100)))
+  const percentElapsed = totalDays > 0 ? Math.round((elapsedDays / totalDays) * 100) : 0
 
   return {
     scopeLabel,
     scopeStartDate,
     baseEndDate,
     effectiveEndDate,
-    totalDays,
+    isExtended: effectiveEndDate !== baseEndDate,
     elapsedDays,
+    totalDays,
     remainingDays,
     percentElapsed,
-    isExtended: effectiveEndDate !== baseEndDate,
   }
+}
+
+/** Inclusive day count between two 'YYYY-MM-DD' local dates (never negative). */
+function daysBetweenInclusive(startDate: string, endDate: string): number {
+  const start = new Date(startDate + 'T00:00:00')
+  const end = new Date(endDate + 'T00:00:00')
+  const msPerDay = 24 * 60 * 60 * 1000
+  const diff = Math.round((end.getTime() - start.getTime()) / msPerDay) + 1
+  return Math.max(0, diff)
 }
 
 // ─── Attendance (§4.9 — percentage, count relative to total, calendar strip) ──
@@ -473,7 +460,7 @@ export async function loadAttendanceCalendarStrip(
 ): Promise<AttendanceDay[]> {
   const since = new Date()
   since.setDate(since.getDate() - 30)
-  const sinceStr = since.toISOString().slice(0, 10)
+  const sinceStr = formatLocalDate(since)
   const todayStr = todayDateString()
 
   const [{ data }, dayMapRes] = await Promise.all([
@@ -514,10 +501,10 @@ export async function loadAttendanceCalendarStrip(
 
 function buildDateRangeInclusive(startDate: string, endDate: string): string[] {
   const dates: string[] = []
-  const cur = new Date(startDate + 'T00:00:00')
+  const cur = new Date(startDate + 'T00:00:00')   // force local midnight
   const end = new Date(endDate + 'T00:00:00')
   while (cur <= end) {
-    dates.push(cur.toISOString().slice(0, 10))
+    dates.push(formatLocalDate(cur))
     cur.setDate(cur.getDate() + 1)
   }
   return dates
@@ -789,6 +776,26 @@ export function formatNaira(amount: number): string {
   return `₦${amount.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+/**
+ * Returns today's date as 'YYYY-MM-DD' in local time.
+ * Fixed 2026-07-07 (owner-flagged: guardian portal's "today" pulse on the
+ * attendance strip never matched) — this previously used
+ * `new Date().toISOString().slice(0, 10)`, which converts to UTC first.
+ * Nigeria is UTC+1, so toISOString() can shift the date, and every date
+ * built by buildDateRangeInclusive() below had the same shift applied,
+ * making `d.date === new Date().toISOString().slice(0,10)` in
+ * GuardianPortal.tsx compare two independently-shifted values that didn't
+ * actually agree. Matches attendanceService.ts's own todayDateString()/
+ * formatDate() pattern exactly — local getFullYear/getMonth/getDate, no
+ * timezone conversion.
+ */
 export function todayDateString(): string {
-  return new Date().toISOString().slice(0, 10)
+  return formatLocalDate(new Date())
+}
+
+function formatLocalDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
 }

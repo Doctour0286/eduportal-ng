@@ -3,6 +3,17 @@
  * Data access layer for the Students module.
  * No browser-only APIs. No UI imports. React Native compatible.
  *
+ * FLAGGED EXCEPTION (Session 21, §5): resizeImageToBlob() below uses
+ * createImageBitmap/canvas/canvas.toBlob — all browser-only DOM APIs — to
+ * satisfy §4.8's "resize client-side before upload" requirement. This is a
+ * deliberate, named deviation from this file's own "no browser-only APIs"
+ * rule, not an oversight: the PRD's Session 21 instructions explicitly name
+ * canvas-based resize as an acceptable approach in the same step as the
+ * upload call, and keeping resize inside uploadStudentPhoto() guarantees
+ * every caller gets a resized image with no way to bypass it. If this file
+ * is ever reused in a non-browser context (React Native), this one function
+ * would need to move to a platform-specific implementation.
+ *
  * Read exports:
  *   loadLeafClasses()             — all is_leaf_enrollable class nodes with path labels
  *   loadStudents()                — paginated student list for a class (or all active)
@@ -23,11 +34,14 @@
  *   initiateTransfer()            — call release-student-transfer Edge Function
  *   assignStudentRole()           — Session 13: assign a student_roles row to a student
  *   unassignStudentRole()         — Session 13: remove a role assignment
+ *   uploadStudentPhoto()          — Session 21: resize + upload to Storage, save path to photo_url
  *
  * Pure helpers:
  *   buildClassPathMap()           — O(1) map of classNodeId → path label string
  *   todayDateString()             — local date string, React Native safe
  *   statusLabel()                 — human-readable label for a status value
+ *   getStudentPhotoSignedUrl()    — Session 21: resolves photo_url (a Storage path) into a
+ *                                    short-lived signed URL for display; caches per path/TTL
  */
 
 import { supabase } from '../lib/supabase'
@@ -68,6 +82,14 @@ export interface Student {
   hobbies: string | null
   email: string | null
   phone: string | null
+  // Session 20 (PRD Tier 5 / Problem 5.3, Goal 1) — nullable. Despite the
+  // column name, this stores a **Storage object path**
+  // (<school_id>/<student_id>/photo.jpg), not a directly-renderable URL —
+  // corrected in Session 21 once the bucket was confirmed private
+  // (public: false). Never render this value directly as an <img src>;
+  // resolve it first via getStudentPhotoSignedUrl(). Null = no photo yet;
+  // UI falls back to initials.
+  photo_url: string | null
   created_at: string
 }
 
@@ -211,7 +233,15 @@ export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
  */
 export async function loadStudents(params: {
   classNodeId: string | null
-  includeInactive?: boolean
+  // Session 22 follow-up (stat-strip drill-down): which single status to
+  // return. Defaults to 'active' when omitted, preserving every existing
+  // caller's behavior exactly as before this param was renamed from the old
+  // includeInactive boolean. Only ever one status at a time — the visible
+  // list shows one status view at a time (active by default, or whichever
+  // status chip was clicked), never a blended "all statuses" list. The
+  // combined-total counts for the stat strip come from the separate
+  // getStudentStatusCounts() below, not from this function.
+  statusFilter?: Student['status']
 }): Promise<Result<Student[]>> {
   try {
     let query = supabase
@@ -233,13 +263,12 @@ export async function loadStudents(params: {
         hobbies,
         email,
         phone,
+        photo_url,
         created_at
       `)
       .order('full_name')
 
-    if (!params.includeInactive) {
-      query = query.eq('status', 'active')
-    }
+    query = query.eq('status', params.statusFilter ?? 'active')
 
     if (params.classNodeId) {
       query = query.eq('class_node_id', params.classNodeId)
@@ -267,12 +296,67 @@ export async function loadStudents(params: {
       hobbies: r.hobbies ?? null,
       email: r.email ?? null,
       phone: r.phone ?? null,
+      photo_url: r.photo_url ?? null,
       created_at: r.created_at,
     }))
 
     return { ok: true, data: students }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load students' }
+  }
+}
+
+export interface StudentStatusCounts {
+  active: number
+  inactive: number
+  alumni: number
+  transferred_out: number
+  transferred_in_pending: number
+  total: number
+}
+
+/**
+ * Session 22 follow-up (stat-strip drill-down).
+ * Returns counts of students by status, scoped to a class filter exactly
+ * like loadStudents() — but across ALL statuses at once, regardless of
+ * which single status the visible list is currently showing. This is what
+ * powers the Students stat strip; it's deliberately independent of
+ * loadStudents()'s statusFilter so the strip's numbers stay stable while the
+ * list underneath switches between active/inactive/alumni/transferred.
+ *
+ * Selects only the `status` column (no other fields) and tallies
+ * client-side — Supabase's JS client has no native GROUP BY, and a
+ * single-column fetch keeps the payload small even for large rosters.
+ */
+export async function getStudentStatusCounts(params: {
+  classNodeId: string | null
+}): Promise<Result<StudentStatusCounts>> {
+  try {
+    let query = supabase.from('students').select('status')
+
+    if (params.classNodeId) {
+      query = query.eq('class_node_id', params.classNodeId)
+    }
+
+    const { data, error } = await query
+    if (error) return { ok: false, error: error.message }
+
+    const rows = (data ?? []) as Array<{ status: Student['status'] }>
+    const counts: StudentStatusCounts = {
+      active: 0,
+      inactive: 0,
+      alumni: 0,
+      transferred_out: 0,
+      transferred_in_pending: 0,
+      total: rows.length,
+    }
+    for (const r of rows) {
+      if (r.status in counts) counts[r.status as keyof Omit<StudentStatusCounts, 'total'>]++
+    }
+
+    return { ok: true, data: counts }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load student status counts' }
   }
 }
 
@@ -284,7 +368,7 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
   try {
     const { data, error } = await supabase
       .from('students')
-      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, created_at')
+      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, photo_url, created_at')
       .eq('id', studentId)
       .maybeSingle()
 
@@ -311,6 +395,7 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
         hobbies: data.hobbies ?? null,
         email: data.email ?? null,
         phone: data.phone ?? null,
+        photo_url: data.photo_url ?? null,
         created_at: data.created_at,
       },
     }
@@ -455,7 +540,164 @@ export async function loadAttendanceSummary(
   }
 }
 
-// ─── Write: create ────────────────────────────────────────────────────────────
+// ─── Write: photo upload ──────────────────────────────────────────────────────
+// Session 21 (PRD Tier 5 / Problem 5.3, Goal 3). No browser-image-compression
+// dependency exists in package.json (confirmed before writing this) — resize
+// is done with a plain <canvas>, which is web-only but isolated to this one
+// function; a future React Native port swaps this one function's internals,
+// same abstraction-boundary approach §5 asks for elsewhere (storage.get(),
+// platform.openURL()). Nothing else in this file touches the DOM.
+
+/**
+ * Resizes an image file client-side to a max edge of `maxEdge` pixels and
+ * re-encodes it as JPEG at the given quality, entirely in-memory (no disk
+ * write, no browser storage). Never uploads the original raw file — per
+ * §4.8, a full-resolution camera photo is a serious regression on Nigerian
+ * 3G, and nothing in this app displays the photo at more than avatar/ID-card
+ * size, so a full-resolution copy would never even be used once stored.
+ *
+ * Returns a Blob ready to hand to Storage's upload(), not a data URL — a
+ * Blob avoids the ~33% base64 size inflation a data URL would otherwise
+ * cost on top of the network upload.
+ */
+async function resizeImageToBlob(
+  file: File,
+  maxEdge = 480,
+  quality = 0.82,
+): Promise<Result<Blob>> {
+  try {
+    const bitmap = await createImageBitmap(file)
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+    const width  = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return { ok: false, error: 'Could not process image on this device.' }
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close?.()
+
+    const blob: Blob | null = await new Promise(resolve =>
+      canvas.toBlob(resolve, 'image/jpeg', quality),
+    )
+    if (!blob) return { ok: false, error: 'Could not process image on this device.' }
+
+    return { ok: true, data: blob }
+  } catch {
+    return { ok: false, error: 'Could not read that image. Try a different photo.' }
+  }
+}
+
+/**
+ * Resizes, uploads to the student-photos bucket at the path shape the RLS
+ * policies require (<school_id>/<student_id>/<filename> — see
+ * student_photos_bucket_setup.sql), and saves the resulting **storage path**
+ * (not a URL) to students.photo_url.
+ *
+ * Real correction made before shipping this, not glossed over: an earlier
+ * draft called getPublicUrl() and stored that. getPublicUrl() only produces
+ * a working URL for a *public* bucket — this bucket is public: false by
+ * design (student_photos_bucket_setup.sql), so that URL would have silently
+ * 400'd for every viewer, on every render, everywhere. Private buckets need
+ * createSignedUrl(), which is short-lived by nature — wrong shape to persist
+ * as a long-lived column value. Storing the raw path instead and resolving
+ * a fresh signed URL at display time (getStudentPhotoSignedUrl, below) is
+ * the correct pattern for a private bucket; every consumer (list row, Brief,
+ * Info, future ID card) must call that helper rather than rendering
+ * `photo_url` directly as an <img src>.
+ *
+ * A fixed filename (photo.jpg) is used deliberately — every re-upload for a
+ * student overwrites the same object (upsert: true) rather than
+ * accumulating orphaned old photos in the bucket with nothing ever cleaning
+ * them up.
+ */
+export async function uploadStudentPhoto(params: {
+  schoolId: string
+  studentId: string
+  file: File
+}): Promise<Result<{ photo_path: string }>> {
+  try {
+    const resized = await resizeImageToBlob(params.file)
+    if (!resized.ok) return resized
+
+    const path = `${params.schoolId}/${params.studentId}/photo.jpg`
+
+    const { error: uploadError } = await supabase.storage
+      .from('student-photos')
+      .upload(path, resized.data, {
+        contentType: 'image/jpeg',
+        upsert: true,
+      })
+
+    if (uploadError) {
+      const msg = uploadError.message ?? ''
+      if (msg.toLowerCase().includes('row-level security') || msg.toLowerCase().includes('policy')) {
+        return { ok: false, error: "You don't have permission to upload a photo for this student." }
+      }
+      return { ok: false, error: 'Failed to upload photo. Please try again.' }
+    }
+
+    // Store the path, not a URL — see function comment above.
+    const { error: dbError } = await supabase
+      .from('students')
+      .update({ photo_url: path })
+      .eq('id', params.studentId)
+
+    if (dbError) return { ok: false, error: friendlyError(dbError.message) }
+
+    return { ok: true, data: { photo_path: path } }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to upload photo' }
+  }
+}
+
+// In-memory cache of resolved signed URLs, keyed by storage path. Signed
+// URLs are valid for SIGNED_URL_TTL_SECONDS below; re-resolving on every
+// single row render (list can have 100+ students) would mean 100+ Storage
+// API calls on every list load, so a short-lived cache avoids that without
+// ever persisting a URL anywhere durable (React state only — cleared on
+// full reload, matching this project's "no localStorage in shared logic"
+// rule from §5).
+const SIGNED_URL_TTL_SECONDS = 60 * 30 // 30 minutes
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>()
+
+/**
+ * Resolves a student's stored photo path (students.photo_url) into a usable,
+ * temporarily-valid signed URL for display. Returns null if the student has
+ * no photo yet (caller should fall back to initials) or if resolution fails
+ * (caller should fall back to initials rather than show a broken image).
+ *
+ * Cheap to call from every avatar render site — cache above absorbs repeat
+ * calls for the same path within the TTL window.
+ */
+export async function getStudentPhotoSignedUrl(photoPath: string | null): Promise<string | null> {
+  if (!photoPath) return null
+
+  const cached = signedUrlCache.get(photoPath)
+  if (cached && cached.expiresAt > Date.now()) return cached.url
+
+  try {
+    const { data, error } = await supabase.storage
+      .from('student-photos')
+      .createSignedUrl(photoPath, SIGNED_URL_TTL_SECONDS)
+
+    if (error || !data?.signedUrl) return null
+
+    signedUrlCache.set(photoPath, {
+      url: data.signedUrl,
+      expiresAt: Date.now() + (SIGNED_URL_TTL_SECONDS - 30) * 1000, // 30s safety margin
+    })
+    return data.signedUrl
+  } catch {
+    return null
+  }
+}
+
+
+
+
 
 /**
  * Inserts a new student row.

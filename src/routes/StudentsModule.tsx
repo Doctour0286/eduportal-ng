@@ -30,7 +30,7 @@
  *     be set by the transfer flow, not by the status buttons
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import {
   loadLeafClasses,
@@ -66,6 +66,10 @@ import {
   unassignStudentRole,
   type StudentRoleTag,
   type AssignableStudentRole,
+  uploadStudentPhoto,
+  getStudentPhotoSignedUrl,
+  getStudentStatusCounts,
+  type StudentStatusCounts,
 } from '../services/studentsService'
 import {
   searchGuardians,
@@ -200,10 +204,32 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
   // Failure here degrades silently (empty tags, no error banner) since a
   // missing tag row is not worth blocking or cluttering the whole list over.
   const [listRoleTags, setListRoleTags] = useState<Map<string, StudentRoleTag[]>>(new Map())
+  // Session 21 — resolved signed URLs for student photos, keyed by the
+  // storage *path* stored in student.photo_url (not by student id — two
+  // students could theoretically share no path, but keying on the path
+  // itself means a re-upload that keeps the same path, i.e. the fixed
+  // photo.jpg filename studentsService.ts always uses, naturally
+  // invalidates by just overwriting the map entry after upload, rather
+  // than needing a separate cache-bust mechanism). Same non-blocking
+  // batch-resolve shape as listRoleTags above: fired after the list
+  // itself renders, never blocks it.
+  const [photoUrls, setPhotoUrls] = useState<Map<string, string>>(new Map())
 
   // ── Filters ───────────────────────────────────────────────────────────────
   const [filterClass,  setFilterClass]  = useState<string>('')
   const [searchQuery,  setSearchQuery]  = useState('')
+
+  // Session 22 follow-up (stat-strip drill-down). Which single status the
+  // visible list is currently showing — defaults to 'active' so the list's
+  // default behavior is unchanged from before this feature. Set by clicking
+  // a non-active stat chip; cleared back to 'active' via the "Showing: X ×"
+  // indicator or by clicking the same chip again.
+  const [statusFilter, setStatusFilter] = useState<Student['status']>('active')
+
+  // Counts across ALL statuses, scoped to filterClass — independent of
+  // statusFilter above, so the stat strip's numbers stay stable while the
+  // list underneath switches which single status it displays.
+  const [statusCounts, setStatusCounts] = useState<StudentStatusCounts | null>(null)
 
   // ── Add / edit form ───────────────────────────────────────────────────────
   const [formOpen,     setFormOpen]     = useState(false)
@@ -230,6 +256,20 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
   // ── Detail panel ──────────────────────────────────────────────────────────
   const [detailStudent,  setDetailStudent]  = useState<Student | null>(null)
   const [detailTab,      setDetailTab]      = useState<DetailTab>('brief')
+
+  // ── Photo upload (Info subtab only, Session 21, PRD Problem 5.3) ──────────
+  // Deliberately not folded into formSaving/formError — a photo upload is
+  // independent of the rest of the edit form's own save flow (same reasoning
+  // as roleTogglingId being separate from handleSubmit above), and tapping
+  // the avatar shouldn't be blocked by, or block, the surrounding form.
+  const [photoUploading, setPhotoUploading] = useState(false)
+  const [photoError,     setPhotoError]     = useState('')
+  const photoInputRef = useRef<HTMLInputElement>(null)
+
+  // Full-size photo preview lightbox, opened by tapping the header avatar
+  // when a photo exists. Reset on every open/closeDetail so it never
+  // carries over between students.
+  const [photoPreviewOpen, setPhotoPreviewOpen] = useState(false)
 
   // ── Role tags (Session 13, PRD Problem 5.5) ───────────────────────────────
   // Header-level, not tab-scoped — fetched once per openDetail() alongside
@@ -490,7 +530,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
 
   const loadList = useCallback(async () => {
     setListState('loading')
-    const res = await loadStudents({ classNodeId: filterClass || null })
+    const res = await loadStudents({ classNodeId: filterClass || null, statusFilter })
     if (!res.ok) {
       setListError(res.error)
       setListState('error')
@@ -511,11 +551,33 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     // degrades to "no tags shown yet" rather than a loading stall.
     const tagsRes = await loadStudentRoleTagsBatch(enriched.map(s => s.id))
     if (tagsRes.ok) setListRoleTags(tagsRes.data)
-  }, [filterClass, classPathMap])
+
+    // Session 21 — same non-blocking, degrade-silently treatment as the
+    // role-tag batch immediately above. Only resolves students who actually
+    // have a photo_url set (most won't, especially right after this
+    // feature ships) and skips any path already in the cache.
+    enriched
+      .filter(s => s.photo_url)
+      .forEach(s => { resolvePhoto(s.photo_url) })
+  }, [filterClass, statusFilter, classPathMap])
 
   useEffect(() => {
     if (bootState === 'ready') loadList()
   }, [bootState, loadList])
+
+  // ─── Load status counts whenever CLASS filter changes ──────────────────────
+  // Deliberately separate from loadList()/statusFilter above: the stat strip
+  // must keep showing every status's count even while the visible list is
+  // scoped to just one of them. Only class filter should reset these counts.
+
+  const loadStatusCounts = useCallback(async () => {
+    const res = await getStudentStatusCounts({ classNodeId: filterClass || null })
+    if (res.ok) setStatusCounts(res.data)
+  }, [filterClass])
+
+  useEffect(() => {
+    if (bootState === 'ready') loadStatusCounts()
+  }, [bootState, loadStatusCounts])
 
   // ─── Filtered list (client-side search) ───────────────────────────────────
 
@@ -525,7 +587,24 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
       )
     : students
 
+  // ─── Status stat strip (PRD Session 22, Problem 5.4) ──────────────────────
+  // Sourced from statusCounts (a dedicated getStudentStatusCounts() query,
+  // scoped only to filterClass) rather than derived from `students` — the
+  // `students` array is now scoped to a single statusFilter at a time (active
+  // by default, or whichever chip was clicked), so aggregating it here would
+  // make every non-selected status's count collapse to 0. statusCounts stays
+  // independent of statusFilter, so the strip's numbers stay stable no matter
+  // which status the visible list underneath is currently showing.
+  const studentStats = {
+    total: statusCounts?.total ?? 0,
+    active: statusCounts?.active ?? 0,
+    inactive: statusCounts?.inactive ?? 0,
+    alumni: statusCounts?.alumni ?? 0,
+    transferred: (statusCounts?.transferred_out ?? 0) + (statusCounts?.transferred_in_pending ?? 0),
+  }
+
   // ─── Open detail panel ────────────────────────────────────────────────────
+
 
   function openDetail(student: Student) {
     setDetailStudent(student)
@@ -579,15 +658,20 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     setRoleTagsState('booting')
     setAssignableRoles([])
     setAssignableRolesState('booting')
+    setPhotoUploading(false)
+    setPhotoError('')
+    setPhotoPreviewOpen(false)
     fetchBrief(student.id)
     fetchStudentIdentity(student.id)
     fetchRoleTags(student.id)
+    resolvePhoto(student.photo_url)
   }
 
   function closeDetail() {
     setDetailStudent(null)
     setEditingId(null)
     setFormError('')
+    setPhotoPreviewOpen(false)
   }
 
   // ─── Detail tab switch — lazy-load data ───────────────────────────────────
@@ -605,6 +689,21 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     if (tab === 'info' && assignableRolesState === 'booting') {
       await fetchAssignableRoles(detailStudent)
     }
+  }
+
+  // ─── Photo: resolve a stored path into a displayable signed URL ───────────
+  // Session 21 — students.photo_url stores a Storage *path*, not a
+  // renderable URL (the bucket is private; see studentsService.ts's
+  // uploadStudentPhoto doc comment for why getPublicUrl() would have been
+  // wrong here). Every render site must go through this, never read
+  // photo_url directly into an <img src>. Silent no-op if resolution fails
+  // or there's no path — callers already fall back to initials, matching
+  // §4.3's "no broken image icons" empty-state spirit.
+  async function resolvePhoto(photoPath: string | null) {
+    if (!photoPath) return
+    if (photoUrls.has(photoPath)) return
+    const url = await getStudentPhotoSignedUrl(photoPath)
+    if (url) setPhotoUrls(prev => new Map(prev).set(photoPath, url))
   }
 
   // ─── Brief: fetch ──────────────────────────────────────────────────────────
@@ -943,6 +1042,52 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     }
   }
 
+  // ─── Photo upload (Info subtab, Session 21) ───────────────────────────────
+  // Fires from the file input's onChange, not a separate "confirm" step —
+  // matches the "tap avatar → camera/gallery picker → done" flow the PRD
+  // describes, with no extra tap in between. Resize/compress happens inside
+  // uploadStudentPhoto() itself (studentsService.ts) — this handler only
+  // owns the UI-facing loading/error state and the post-success local patch.
+  async function handlePhotoSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // Always clear the input's value, success or failure, so selecting the
+    // *same* file twice in a row (e.g. retry after an error) still fires
+    // onChange — browsers don't fire a change event for an unchanged value.
+    e.target.value = ''
+    if (!file || !detailStudent) return
+
+    setPhotoUploading(true)
+    setPhotoError('')
+
+    const result = await uploadStudentPhoto({
+      schoolId,
+      studentId: detailStudent.id,
+      file,
+    })
+
+    setPhotoUploading(false)
+    if (!result.ok) {
+      setPhotoError(result.error)
+      return
+    }
+
+    // Same no-full-reload local-patch pattern as handleSubmit above:
+    // update detailStudent + the students list in place.
+    const updated: Student = { ...detailStudent, photo_url: result.data.photo_path }
+    setDetailStudent(updated)
+    setStudents(prev => prev.map(s => s.id === updated.id ? updated : s))
+    // The fixed photo.jpg filename means a re-upload keeps the exact same
+    // path — force a fresh resolve rather than relying on resolvePhoto's
+    // own "already cached" skip, or the old (now-stale) image would keep
+    // showing until the signed-URL cache's 30-minute TTL happens to expire.
+    setPhotoUrls(prev => {
+      const next = new Map(prev)
+      next.delete(result.data.photo_path)
+      return next
+    })
+    await resolvePhoto(result.data.photo_path)
+  }
+
   // ─── Render helpers ────────────────────────────────────────────────────────
 
   function renderHeader() {
@@ -1060,7 +1205,21 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
               onClick={() => openDetail(student)}
             >
               <div className="stu-row-avatar" aria-hidden>
-                {student.full_name.charAt(0).toUpperCase()}
+                {/* Session 21 — photo_url is a Storage path, never rendered
+                    directly; photoUrls holds the resolved signed URL, keyed
+                    by that path, populated by the batch resolve in
+                    loadList(). Falls back to initials until resolved or if
+                    the student has no photo — same "no broken image icons"
+                    treatment used everywhere else in this file. */}
+                {student.photo_url && photoUrls.get(student.photo_url) ? (
+                  <img
+                    className="stu-row-avatar-img"
+                    src={photoUrls.get(student.photo_url)}
+                    alt=""
+                  />
+                ) : (
+                  student.full_name.charAt(0).toUpperCase()
+                )}
               </div>
               <div className="stu-row-body">
                 <span className="stu-row-name">{student.full_name}</span>
@@ -1090,7 +1249,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
   }
 
   function renderCount() {
-    if (listState !== 'ready') return null
+    if (listState !== 'ready' && listState !== 'empty') return null
     const total = students.length
     const shown = filteredStudents.length
     return (
@@ -1098,9 +1257,81 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
         {searchQuery
           ? `${shown} of ${total} student${total !== 1 ? 's' : ''}`
           : `${total} student${total !== 1 ? 's' : ''}`}
+        {statusFilter !== 'active' && (
+          <button
+            type="button"
+            className="stu-status-filter-clear"
+            onClick={() => setStatusFilter('active')}
+          >
+            Showing: {statusLabel(statusFilter)} ×
+          </button>
+        )}
       </p>
     )
   }
+
+  // PRD Session 22, Problem 5.4 — status stat strip above the list, same
+  // "class/chip" pattern as AdminDashboard.tsx and AttendanceModule.tsx's
+  // att-summary-bar (§4.7 consistency). Only shows chips for statuses with
+  // at least one student, same "don't show a zero" convention as
+  // renderSummaryBar() in AttendanceModule.tsx.
+  //
+  // Follow-up to the original stat strip: each non-total chip is now a
+  // toggle into the hidden (non-active) statuses. The visible list itself
+  // still defaults to active-only; clicking "N inactive" switches the list
+  // to show just that status (via statusFilter), while the strip's own
+  // counts (statusCounts) stay put regardless of which one is selected, so
+  // the numbers never jump around as you drill in and out. Clicking the
+  // currently-selected chip again returns to the active-only default —
+  // same affordance as the "Showing: X ×" indicator in renderCount().
+  function renderStatStrip() {
+    if (studentStats.total === 0) return null
+
+    function chip(
+      status: Student['status'] | null,
+      count: number,
+      label: string,
+      variant: string,
+    ) {
+      if (count === 0) return null
+      const isSelected = status !== null && statusFilter === status
+      return (
+        <button
+          type="button"
+          className={`stu-stat stu-stat--${variant}${isSelected ? ' stu-stat--selected' : ''}`}
+          onClick={() => {
+            if (status === null) return
+            setStatusFilter(isSelected ? 'active' : status)
+          }}
+        >
+          {count} {label}
+        </button>
+      )
+    }
+
+    return (
+      <div className="stu-stat-strip">
+        <span className="stu-stat stu-stat--total stu-stat--static">
+          {studentStats.total} total
+        </span>
+        {chip('active', studentStats.active, 'active', 'active')}
+        {chip('inactive', studentStats.inactive, 'inactive', 'inactive')}
+        {chip('alumni', studentStats.alumni, 'alumni', 'alumni')}
+        {/* "transferred" combines two underlying statuses (transferred_out /
+            transferred_in_pending), so it can't map to a single statusFilter
+            value the way the others do. Kept as a static, non-clickable
+            count for now rather than guessing which of the two the user
+            means — same "don't invent scope" approach as elsewhere in this
+            file. */}
+        {studentStats.transferred > 0 && (
+          <span className="stu-stat stu-stat--transferred stu-stat--static">
+            {studentStats.transferred} transferred
+          </span>
+        )}
+      </div>
+    )
+  }
+
 
   // ─── Detail panel ──────────────────────────────────────────────────────────
 
@@ -1120,9 +1351,31 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
         >
           {/* Detail header */}
           <div className="stu-detail-header">
-            <div className="stu-detail-avatar">
-              {detailStudent.full_name.charAt(0).toUpperCase()}
-            </div>
+            {/* Header avatar — the single source of truth for the photo in
+                this popup (Brief's own copy removed, was disconnected and
+                display-only anyway per the Session 21 note below). Photo
+                resolution mirrors Info tab's stu-info-avatar exactly, keyed
+                off the same photoUrls map. When a photo exists, renders as
+                a button that opens the full-size lightbox; otherwise falls
+                back to the plain initials div, unchanged from before. */}
+            {detailStudent.photo_url && photoUrls.get(detailStudent.photo_url) ? (
+              <button
+                type="button"
+                className="stu-detail-avatar stu-detail-avatar--photo"
+                onClick={() => setPhotoPreviewOpen(true)}
+                aria-label="View photo"
+              >
+                <img
+                  className="stu-detail-avatar-img"
+                  src={photoUrls.get(detailStudent.photo_url)}
+                  alt=""
+                />
+              </button>
+            ) : (
+              <div className="stu-detail-avatar">
+                {detailStudent.full_name.charAt(0).toUpperCase()}
+              </div>
+            )}
             <div className="stu-detail-title-wrap">
               <h3 className="stu-detail-name">{detailStudent.full_name}</h3>
               <span className={`stu-status-badge stu-status-badge--${detailStudent.status}`}>
@@ -1173,6 +1426,32 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
             {detailTab === 'status' && renderStatusTab()}
           </div>
         </div>
+
+        {/* Full-size photo preview, opened by tapping the header avatar.
+            Sibling of .stu-detail-sheet inside the same .stu-form-overlay,
+            per the CSS's own stacking convention (z-index 60 vs the sheet's
+            50). Click on the dimmed backdrop or the close button both
+            dismiss it without closing the whole detail panel. */}
+        {photoPreviewOpen && detailStudent.photo_url && photoUrls.get(detailStudent.photo_url) && (
+          <div
+            className="stu-photo-preview-overlay"
+            onClick={e => { if (e.target === e.currentTarget) setPhotoPreviewOpen(false) }}
+          >
+            <button
+              type="button"
+              className="stu-photo-preview-close"
+              onClick={() => setPhotoPreviewOpen(false)}
+              aria-label="Close preview"
+            >
+              ✕
+            </button>
+            <img
+              className="stu-photo-preview-img"
+              src={photoUrls.get(detailStudent.photo_url)}
+              alt={detailStudent.full_name}
+            />
+          </div>
+        )}
       </div>
     )
   }
@@ -1201,6 +1480,10 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
         {briefSuccessMsg && (
           <p className="stu-brief-success" role="status">✓ {briefSuccessMsg}</p>
         )}
+
+        {/* Photo moved to the popup header (single source of truth, click-
+            to-preview) — Brief no longer renders its own copy. See the
+            header avatar block above for the current photo logic. */}
 
         {/* SESSION 12 step 3 — Info is no longer its own tab. Editing is
             reached explicitly from here, gated on the real permission key
@@ -1445,6 +1728,51 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
           >
             ← Back to Brief
           </button>
+
+          {/* Session 21 — the only upload entry point (Brief's is
+              display-only, owner decision). Circle + separate "Change
+              photo" link rather than making the whole circle the tap
+              target, so upload state (uploading/error) has a natural home
+              beneath it instead of crowding the circle itself. Hidden
+              file input triggered via photoInputRef so the visible
+              control can be plain text, not a native file-picker button. */}
+          {detailStudent && (
+            <div className="stu-info-avatar-section">
+              <div className="stu-info-avatar" aria-hidden>
+                {detailStudent.photo_url && photoUrls.get(detailStudent.photo_url) ? (
+                  <img
+                    className="stu-info-avatar-img"
+                    src={photoUrls.get(detailStudent.photo_url)}
+                    alt=""
+                  />
+                ) : (
+                  detailStudent.full_name.charAt(0).toUpperCase()
+                )}
+              </div>
+              {canEditStudentRecords && !isTransferred && (
+                <>
+                  <input
+                    ref={photoInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="stu-info-avatar-input"
+                    onChange={handlePhotoSelected}
+                  />
+                  <button
+                    type="button"
+                    className="stu-info-avatar-change-btn"
+                    onClick={() => photoInputRef.current?.click()}
+                    disabled={photoUploading}
+                  >
+                    {photoUploading ? 'Uploading…' : 'Change photo'}
+                  </button>
+                  {photoError && (
+                    <p className="stu-form-error" role="alert">{photoError}</p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {isTransferred && (
             <p className="stu-detail-readonly-notice">
@@ -2719,6 +3047,7 @@ function renderGuardiansTab() {
         {listSuccessMsg && (
           <p className="stu-brief-success stu-list-success" role="status">✓ {listSuccessMsg}</p>
         )}
+        {renderStatStrip()}
         {renderCount()}
         {renderList()}
       </div>
