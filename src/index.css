@@ -5,20 +5,144 @@
   --color-primary:        #2563eb;
   --color-primary-dark:   #1d4ed8;
   --color-primary-light:  #eff6ff;
+  --color-primary-subtle: #eff6ff;
 
   /* Semantic */
   --color-success:        #16a34a;
   --color-warning:        #d97706;
   --color-danger:         #dc2626;
   --color-info:           #0891b2;
+  --color-error:          #dc2626;
 
   /* Neutrals */
   --color-bg:             #f8fafc;
+  --color-bg-page:        #f5f5f5;
+  --color-bg-subtle:      #f9fafb;
   --color-surface:        #ffffff;
+  --color-surface-raised: #f3f4f6;
   --color-border:         #e2e8f0;
   --color-text:           #0f172a;
   --color-text-muted:     #64748b;
   --color-text-inverse:   #ffffff;
+  --color-white:          #ffffff;
+
+  /* ────────────────────────────────────────────────────────────
+     PRD Session 23 (Tier 6, Problem 6.1) — additions below.
+     Full audit of every var(--token, #fallback) reference across
+     this file found 63 token names in active use that were never
+     declared here — every one of them was silently running off
+     its own inline fallback, and several of those fallbacks
+     disagreed with each other at different call sites (most
+     importantly --color-brand-600 itself: 48 sites assumed blue
+     #2563eb, 11 assumed green #16a34a — the direct cause of admin-
+     set theme colors only partially "taking" app-wide). Every
+     token below is now declared for real, with the value chosen
+     to match the MAJORITY existing fallback usage (so this change
+     is a declaration, not a redesign — nothing should visibly
+     shift except the handful of inconsistent outlier sites named
+     in the session log). See §11 2026-07-08 entry for the full
+     audit and the 11 hardcoded-green outlier line numbers that
+     still need an explicit owner decision (convert to brand token,
+     or confirm intentionally school-specific).
+     ──────────────────────────────────────────────────────────── */
+
+  /* Brand scale — 500/600 are a placeholder default (blue) used only
+     before any school has set a theme color, or if the derivation
+     below hasn't run yet. Real values are set live, all at once, by
+     themeService.ts's applyBrandTheme() the moment an admin picks a
+     color in Settings — see that file for the accessible-scale
+     derivation (tints/shades computed from the picked color, not
+     fixed swatches, since research for this session found no single
+     fixed palette pairs safely with an arbitrary admin-chosen hue). */
+  --color-brand-raw:      #2563eb;
+  --color-brand-50:       #eff6ff;
+  --color-brand-100:      #dbeafe;
+  --color-brand-200:      #bfdbfe;
+  --color-brand-300:      #93c5fd;
+  --color-brand-400:      #60a5fa;
+  --color-brand-500:      #2563eb;
+  --color-brand-600:      #2563eb;
+  --color-brand-700:      #1d4ed8;
+  --color-brand-800:      #1e40af;
+  /* Text/icon color for content rendered on top of a solid
+     --color-brand-600 fill (e.g. a primary button's label). White is
+     the correct default for the blue placeholder above; themeService.ts
+     recomputes this per-school based on real contrast, it is not
+     hardcoded white once a school sets its own color. */
+  --color-brand-on:       #ffffff;
+  /* Subtle brand-tinted background fill (5 call sites, all consistently
+     falling back to the same #eff6ff — equivalent to --color-brand-50,
+     aliased rather than duplicated so it stays in sync automatically). */
+  --color-brand-subtle:   var(--color-brand-50);
+
+  /* Neutral scale (Tailwind slate/gray convention — matches the
+     already-dominant fallback values found across the file). */
+  --color-neutral-50:     #f9fafb;
+  --color-neutral-100:    #f3f4f6;
+  --color-neutral-200:    #e5e7eb;
+  --color-neutral-300:    #d1d5db;
+  --color-neutral-400:    #9ca3af;
+  --color-neutral-500:    #6b7280;
+  --color-neutral-600:    #4b5563;
+  --color-neutral-700:    #374151;
+  --color-neutral-800:    #1f2937;
+  --color-neutral-900:    #111827;
+
+  /* Text roles — distinct from the pre-existing --color-text/-muted
+     pair above (kept as-is, still used by the Phase 0/5 base styles);
+     these three are the names actually referenced by later modules. */
+  --color-text-primary:   #111827;
+  --color-text-secondary: #6b7280;
+  --color-text-tertiary:  #9ca3af;
+  --color-text-subtle:    #9ca3af;
+
+  /* Status scales — success/danger/warning each got a subtle/100/
+     50/600/700(+800 for warning) tier somewhere in the file without
+     ever being declared. Values match each token's dominant existing
+     fallback; the two internally-inconsistent ones
+     (--color-warning-700 and --color-warning-100, each had two
+     disagreeing fallback values at different call sites) are resolved
+     here using the more-frequently-used value — the other, rarer
+     variant's call sites are named in the §11 audit entry for owner
+     review, not silently overridden without a record. */
+  --color-success-subtle: #ecfdf5;
+  --color-success-100:    #dcfce7;
+  --color-success-500:    #22c55e;
+  --color-success-600:    #16a34a;
+  --color-success-700:    #15803d;
+
+  --color-danger-subtle:  #fef2f2;
+  --color-danger-50:      #fef2f2;
+  --color-danger-100:     #fee2e2;
+  --color-danger-600:     #dc2626;
+  --color-danger-700:     #b91c1c;
+
+  --color-warning-subtle: #fffbeb;
+  --color-warning-50:     #fffbeb;
+  --color-warning-100:    #fef3c7;
+  --color-warning-200:    #fde68a;
+  --color-warning-500:    #f59e0b;
+  --color-warning-600:    #d97706;
+  --color-warning-700:    #b45309;
+  --color-warning-800:    #92400e;
+
+  --color-error-500:      #ef4444;
+
+  /* Raw palette names — a handful of call sites reference a plain
+     Tailwind color name directly instead of a semantic token. Left in
+     place rather than rewritten to a semantic name in this session
+     (that rewrite is a separate, larger cleanup — renaming call sites
+     app-wide — not a token-declaration task), but declared so they at
+     least resolve to a real, intentional value instead of an
+     undeclared fallback. */
+  --color-red-50:         #fef2f2;
+  --color-red-200:        #fecaca;
+  --color-red-500:        #ef4444;
+  --color-red-600:        #dc2626;
+  --color-green-50:       #f0fdf4;
+  --color-green-500:      #22c55e;
+  --color-green-700:      #15803d;
+  --color-blue-500:       #3b82f6;
 
   /* Spacing scale */
   --space-1:  0.25rem;
@@ -58,6 +182,30 @@
 
   /* Bottom nav height — reserved space so content isn't hidden behind it */
   --nav-height: 3.5rem;
+
+  /* ── Legacy bare-name aliases (Session 23) ──────────────────────────
+     lines 1481-2084 (AdminDashboard.tsx's original phase6-dashboard.css,
+     committed separately in an earlier session, per §13) use a second,
+     older naming scheme with no `color-` prefix: --brand-50/500/600/100
+     and --neutral-100/200, entirely absent from the rest of the file and
+     never declared anywhere either. Rather than rewriting that block's
+     selectors to the canonical --color-brand- and --color-neutral- names
+     (a larger, separate touch-every-selector cleanup, not a token-
+     declaration task), these bare names are aliased straight onto the
+     real tokens above, so .skeleton and the two other call sites in that
+     block resolve to a real, intentional value instead of silently
+     rendering transparent/invisible gradient stops, which is what was
+     actually happening before this fix (verified: zero fallback existed
+     on any of these four bare-name usages, not even an inconsistent one
+     — they were resolving to nothing at all). Flagged for a future
+     session to actually rewrite the block onto canonical names, rather
+     than carrying two parallel schemes forever. */
+  --brand-50:   var(--color-brand-50);
+  --brand-100:  var(--color-brand-100);
+  --brand-500:  var(--color-brand-500);
+  --brand-600:  var(--color-brand-600);
+  --neutral-100: var(--color-neutral-100);
+  --neutral-200: var(--color-neutral-200);
 }
 
 /* RTL support — flips layout for Arabic */
@@ -231,7 +379,7 @@ body {
 .platform-home-title {
   font-size: 1.75rem;
   font-weight: 700;
-  color: var(--color-brand-700, #15803d);
+  color: var(--color-brand-700);
   margin-bottom: 0.5rem;
 }
 
@@ -262,112 +410,234 @@ body {
 
 /* ═══════════════════════════════════════════════════════════════════
    LOGIN PAGE
+   PRD Session 24 (Tier 6, Problem 6.2) — rebuilt against the reference
+   app's `.att-login-card` pattern: a centered card on a neutral page
+   background, rather than the old full-bleed colored header + sticky
+   tabs layout. Built exclusively on Session 23's existing tokens
+   (--color-brand-*, --color-neutral-*, --radius-*, --shadow-*) — no
+   new hardcoded colors introduced. Dark mode intentionally out of
+   scope: no `theme_mode` concept exists anywhere in the schema or
+   this stylesheet (only `theme_color` does), so only light-theme
+   values are built here — see §11 2026-07-08 Session 24 entry.
 ═══════════════════════════════════════════════════════════════════ */
 
 .login-shell {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   background: var(--color-neutral-50, #f9fafb);
+  padding: 24px 16px;
 }
 
-.login-header {
-  padding: 2.5rem 1.5rem 2rem;
+/* Compact brand identity strip above the card — replaces the old
+   full-bleed colored header block. Kept small and un-cardlike on
+   purpose: the reference app's own login card carries the school's
+   identity via its icon + title, not via a separate colored banner,
+   but this app already has a real logo/theme_color per school that
+   the reference app (single-school) never needed to show here, so a
+   minimal strip is kept rather than removed outright. */
+.login-brand-strip {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 8px;
+  margin-bottom: 22px;
   text-align: center;
-  color: white;
-  gap: 0.5rem;
 }
 
 .login-logo {
-  width: 80px;
-  height: 80px;
-  border-radius: 20px;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-lg, 0.75rem);
   object-fit: cover;
-  border: 3px solid rgba(255,255,255,0.4);
+  border: 1px solid var(--color-border, #e2e8f0);
 }
 
 .login-logo-placeholder {
-  width: 80px;
-  height: 80px;
-  border-radius: 20px;
-  background: rgba(255,255,255,0.2);
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-lg, 0.75rem);
+  background: var(--color-brand-subtle, var(--color-brand-50));
+  color: var(--color-brand-700, var(--color-brand-600));
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.75rem;
+  font-size: 1.4rem;
   font-weight: 700;
-  color: white;
 }
 
 .login-school-name {
-  font-size: 1.5rem;
+  font-size: 1.15rem;
   font-weight: 700;
+  color: var(--color-text-primary, #111827);
   margin: 0;
 }
 
-.login-tagline {
-  font-size: 0.875rem;
-  opacity: 0.85;
-  margin: 0;
+/* ─── Card — modeled directly on the reference app's .att-login-card ──────
+   centered, white surface, border, radius, shadow-md, max-width 400px. ─── */
+
+.login-card {
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-xl, 1rem);
+  box-shadow: var(--shadow-md, 0 4px 6px -1px rgb(0 0 0 / 0.1));
+  padding: 34px 28px;
+  width: 100%;
+  max-width: 400px;
 }
+
+/* Icon + title + description header inside the card — reference's
+   .att-login-icon/.att-login-title/.att-login-desc pattern. */
+
+.login-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 14px;
+  border-radius: var(--radius-full, 9999px);
+  background: var(--color-brand-subtle, var(--color-brand-50));
+  color: var(--color-brand-600, #2563eb);
+}
+
+.login-card-icon svg {
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.login-card-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--color-text-primary, #111827);
+  text-align: center;
+  margin: 0 0 4px;
+}
+
+.login-card-desc {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary, #6b7280);
+  text-align: center;
+  margin: 0 0 22px;
+}
+
+/* Tab switcher — reference app has one primary form + one subtle
+   secondary link (staff link below the student form). This app has
+   two genuinely peer login methods (staff vs. login-code), so a
+   segmented control is kept rather than forcing an artificial
+   primary/secondary hierarchy — but restyled to sit inside the card
+   and match its visual language, not the old sticky full-width
+   browser-tab-like bar. */
 
 .login-tabs {
   display: flex;
-  background: white;
-  border-bottom: 1px solid var(--color-neutral-200, #e5e7eb);
-  position: sticky;
-  top: 0;
-  z-index: 10;
+  gap: 6px;
+  background: var(--color-bg-page, #f5f5f5);
+  border-radius: var(--radius-lg, 0.75rem);
+  padding: 4px;
+  margin-bottom: 22px;
 }
 
 .login-tab {
   flex: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
-  padding: 0.75rem 0.5rem;
-  min-height: 56px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--color-neutral-500, #6b7280);
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  min-height: 40px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
   border: none;
+  border-radius: var(--radius-md, 0.5rem);
   background: transparent;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
 .login-tab--active {
-  color: var(--color-brand-600, #16a34a);
-  border-bottom-color: var(--color-brand-600, #16a34a);
-  font-weight: 600;
+  color: var(--color-brand-700, var(--color-brand-600));
+  background: var(--color-surface, #ffffff);
+  box-shadow: var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05));
 }
 
 .login-tab-icon {
-  font-size: 1.25rem;
+  display: flex;
+  align-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+.login-tab-icon svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .login-form-area {
-  padding: 1.5rem 1rem;
-  flex: 1;
+  /* No longer a separate full-width section below sticky tabs — the
+     form now sits directly inside .login-card, so this is just a
+     pass-through wrapper kept for the component's existing markup. */
 }
 
 .login-form {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  max-width: 420px;
-  margin: 0 auto;
+  gap: 15px;
 }
 
 .login-form-hint {
-  font-size: 0.875rem;
-  color: var(--color-neutral-500, #6b7280);
-  margin: 0 0 0.25rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary, #6b7280);
+  text-align: center;
+  margin: 0 0 4px;
+}
+
+/* Inline error — reference's .att-login-err: a soft red panel below
+   the form, not a toast. */
+.form-error {
+  margin: 2px 0 0;
+  padding: 9px 13px;
+  background: var(--color-danger-subtle, var(--color-danger-50));
+  border-radius: var(--radius-sm, 0.25rem);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-danger-600, #dc2626);
+}
+
+/* Secondary-action link below the form — reference's .att-staff-link,
+   used here for nothing yet (both this app's methods are peer tabs,
+   not a primary+secondary pair) but kept available for a future
+   single-secondary-path screen so the pattern exists app-wide. */
+.login-secondary-link {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 18px;
+  padding: 8px;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary, #6b7280);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.login-secondary-link:hover {
+  color: var(--color-brand-600, #2563eb);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -397,8 +667,14 @@ body {
 }
 
 .form-input:focus {
-  border-color: var(--color-brand-500, #22c55e);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+  /* PRD Session 24 fix: this previously hardcoded a green fallback
+     (#22c55e / rgba(34,197,94,...)) that never tracked the school's
+     actual brand color — missed by Session 23's audit since this rule
+     sits outside the ten prefixed CSS blocks that audit covered.
+     Now uses color-mix against the real --color-brand-600, matching
+     every other brand-derived focus/highlight ring in the app. */
+  border-color: var(--color-brand-600, #2563eb);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand-600, #2563eb) 15%, transparent);
 }
 
 .form-input::placeholder {
@@ -419,6 +695,60 @@ body {
   font-weight: 600;
   font-family: monospace;
   text-transform: uppercase;
+}
+
+/* Password-visibility toggle — Session 24, owner-requested. Wraps a
+   password .form-input so the eye/eye-off button can sit inside the
+   field's own right edge rather than as a separate element that would
+   disturb .form-label's existing flex-column layout/spacing. */
+.form-input-wrap {
+  position: relative;
+  display: flex;
+}
+
+.form-input--with-toggle {
+  /* Room for the toggle button without its icon overlapping typed text. */
+  padding-right: 2.75rem;
+}
+
+.form-input-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-neutral-400, #9ca3af);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.form-input-toggle:hover,
+.form-input-toggle:focus-visible {
+  color: var(--color-neutral-700, #374151);
+  background: var(--color-neutral-100, #f3f4f6);
+}
+
+.form-input-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.form-input-toggle svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .form-textarea {
@@ -539,15 +869,21 @@ body {
 .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
 
 .btn--primary {
-  background: var(--color-brand-600, #16a34a);
-  color: white;
+  /* PRD Session 24 fix: was a hardcoded `color: white`, the same
+     brand-background-plus-fixed-white-text bug Session 23 fixed at 24
+     sites across the ten prefixed CSS blocks — missed here because
+     .btn lives outside those prefixes. A school with a pale brand
+     color would get illegible white-on-pale text on every primary
+     button app-wide, including this login screen's Sign-in button. */
+  background: var(--color-brand-600);
+  color: var(--color-brand-on, #ffffff);
 }
-.btn--primary:hover:not(:disabled) { background: var(--color-brand-700, #15803d); }
+.btn--primary:hover:not(:disabled) { background: var(--color-brand-700); }
 
 .btn--secondary {
-  background: var(--color-brand-50, #f0fdf4);
-  color: var(--color-brand-700, #15803d);
-  border: 1.5px solid var(--color-brand-200, #bbf7d0);
+  background: var(--color-brand-50);
+  color: var(--color-brand-700);
+  border: 1.5px solid var(--color-brand-200);
 }
 
 .btn--ghost {
@@ -562,7 +898,7 @@ body {
   background: none;
   border: none;
   padding: 0;
-  color: var(--color-brand-600, #16a34a);
+  color: var(--color-brand-600);
   font-size: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -615,7 +951,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-brand-600, #16a34a);
+  color: var(--color-brand-600);
   margin: 0 0 0.125rem;
 }
 
@@ -755,8 +1091,8 @@ body {
 .radio-card--selected,
 .checkbox-card--selected {
   border-color: var(--color-brand-500, #22c55e);
-  background: var(--color-brand-50, #f0fdf4);
-  color: var(--color-brand-700, #15803d);
+  background: var(--color-brand-50);
+  color: var(--color-brand-700);
 }
 
 .radio-card-icon,
@@ -849,8 +1185,8 @@ body {
 }
 
 .day-chip--selected {
-  background: var(--color-brand-600, #16a34a);
-  border-color: var(--color-brand-600, #16a34a);
+  background: var(--color-brand-600);
+  border-color: var(--color-brand-600);
   color: white;
 }
 
@@ -959,7 +1295,7 @@ body {
   background: none;
   border: none;
   padding: 0 0 0 0.125rem;
-  color: var(--color-brand-600, #16a34a);
+  color: var(--color-brand-600);
   cursor: pointer;
   font-size: 1rem;
   line-height: 1;
@@ -1032,8 +1368,8 @@ body {
 
 .suggestion-chip:hover {
   border-color: var(--color-brand-400, #4ade80);
-  background: var(--color-brand-50, #f0fdf4);
-  color: var(--color-brand-700, #15803d);
+  background: var(--color-brand-50);
+  color: var(--color-brand-700);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1073,7 +1409,7 @@ body {
 .leaf-badge {
   font-size: 0.6875rem;
   background: var(--color-brand-100, #dcfce7);
-  color: var(--color-brand-700, #15803d);
+  color: var(--color-brand-700);
   border-radius: 4px;
   padding: 0.125rem 0.375rem;
   font-weight: 600;
@@ -1124,9 +1460,9 @@ body {
   align-items: center;
   gap: 0.375rem;
   padding: 0.375rem 0.75rem;
-  background: var(--color-brand-50, #f0fdf4);
-  border: 1.5px solid var(--color-brand-200, #bbf7d0);
-  color: var(--color-brand-700, #15803d);
+  background: var(--color-brand-50);
+  border: 1.5px solid var(--color-brand-200);
+  color: var(--color-brand-700);
   border-radius: 20px;
   font-size: 0.875rem;
   font-weight: 500;
@@ -1217,7 +1553,7 @@ body {
 
 .staff-added-row {
   background: white;
-  border: 1.5px solid var(--color-brand-200, #bbf7d0);
+  border: 1.5px solid var(--color-brand-200);
   border-radius: 10px;
   padding: 0.875rem;
   display: flex;
@@ -1305,7 +1641,7 @@ body {
 .bottom-nav-item:active { background: var(--color-neutral-100, #f3f4f6); }
 
 .bottom-nav-item--active {
-  color: var(--color-brand-600, #16a34a);
+  color: var(--color-brand-600);
   font-weight: 600;
 }
 
@@ -2310,12 +2646,19 @@ body {
 }
 
 /* ─── Grid wrapper — horizontal scroll ───────────────────────────────────── */
+/* PRD Session 24 (Tier 6, Problem 6.2): container now matches the
+   reference app's `.tbl-wrap` pattern — rounded corners + shadow-md,
+   so the whole grid reads as one elevated card against the page
+   background rather than a flush, borderless scroll strip. */
 
 .tt-grid-wrapper {
   flex: 1;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  margin: 10px;
+  border-radius: var(--radius-lg, 0.75rem);
+  box-shadow: var(--shadow-md, 0 4px 6px -1px rgb(0 0 0 / 0.1));
 }
 
 /* ─── Grid layout ────────────────────────────────────────────────────────── */
@@ -2324,6 +2667,16 @@ body {
   display: flex;
   min-width: max-content;
   width: 100%;
+  border-radius: var(--radius-lg, 0.75rem);
+  /* overflow: hidden removed (sticky-header bugfix) — any non-visible
+     overflow value here makes .tt-grid itself a scroll container, which
+     breaks position:sticky on the day-header cells and corner cell: they
+     were sticking relative to .tt-grid (which has no internal scrollbar
+     of its own, since its height is exactly its content height) instead
+     of .tt-grid-wrapper (the actual scrolling ancestor), so they never
+     visibly stuck as the user scrolled the wrapper. Corner-radius
+     clipping is now handled by .tt-grid-wrapper's own overflow: auto,
+     which already clips its children to its border-radius. */
 }
 
 /* Period label column */
@@ -2335,6 +2688,12 @@ body {
   z-index: 2;
   background: var(--color-surface, #ffffff);
   border-right: 1px solid var(--color-border, #e5e7eb);
+  border-top-left-radius: var(--radius-lg, 0.75rem);
+  /* overflow: hidden removed, same reasoning as .tt-grid above — this
+     column contains the corner cell, which is sticky on BOTH axes
+     (top and left); an overflow value here would make .tt-col--periods
+     its own scroll container and break the corner cell's top:0 sticky
+     binding to .tt-grid-wrapper the same way .tt-grid did. */
 }
 
 /* Day columns */
@@ -2370,10 +2729,29 @@ body {
   border-bottom: none;
 }
 
-/* Corner cell */
+/* Corner cell — PRD Session 24: now matches the reference app's
+   thead's solid dark fill (th:first-child { background: emerald-900 }),
+   translated onto this app's customizable brand scale rather than a
+   fixed emerald.
+   Contrast fix (Session 24 follow-up): this cell has no text today, but
+   is styled defensively with --color-brand-on-800 rather than the
+   generic --color-brand-on, matching the day-header cells below and
+   guarding against a future addition of text/an icon here inheriting
+   the wrong color. See --color-brand-on-800's doc comment in
+   themeService.ts for why --color-brand-on itself is wrong on an -800
+   background. */
 .tt-cell--corner {
   min-height: 44px;
-  background: var(--color-surface, #ffffff);
+  background: var(--color-brand-800, var(--color-brand-700));
+  color: var(--color-brand-on-800, #ffffff);
+  /* Sticky on BOTH axes — it sits at the intersection of the sticky
+     period-label column (.tt-col--periods, sticky left) and the sticky
+     day-header row above. z-index higher than either alone (3) so it
+     stays above both the day-header row and the rest of the sticky
+     column as they scroll past underneath it. */
+  position: sticky;
+  top: 0;
+  z-index: 4;
 }
 
 /* Period label cells */
@@ -2417,48 +2795,114 @@ body {
   50%       { opacity: 0.4; transform: scale(0.7); }
 }
 
-/* Day header cells */
+/* Day header cells — PRD Session 24: reference app's <thead tr>
+   pattern (solid dark background, white/inverse text, bottom border in
+   a slightly lighter shade of the same hue) ported onto the brand
+   scale.
+   Contrast fix (Session 24 follow-up, real bug found while adding the
+   sticky-header change below): this cell sits on --color-brand-800,
+   not -600, so it must use --color-brand-on-800, not the generic
+   --color-brand-on. --color-brand-on is chosen against the working
+   600 — for a brand pick where black already barely wins there (mid
+   grays, or a pale color the legibility guard darkened toward
+   mid-gray), reusing that same black on the darker -800 background
+   measured as low as ~2.4:1, well under the 4.5:1 AA minimum. Checked
+   directly (5000 random hex colors) that --color-brand-on-800 always
+   resolves to a passing choice — see themeService.ts. */
 .tt-cell--day-header {
   min-height: 44px;
   align-items: center;
   justify-content: flex-start;
   flex-direction: row;
   gap: 6px;
-  background: var(--color-surface, #ffffff);
-  border-bottom: 2px solid var(--color-border, #e5e7eb);
+  background: var(--color-brand-800, var(--color-brand-700));
+  color: var(--color-brand-on-800, #ffffff);
+  border-bottom: 2px solid var(--color-brand-700, var(--color-brand-600));
   padding: 0 8px;
+  /* Sticky header (owner-reported: header scrolls away when the grid
+     is taller than the viewport, losing track of which day/period
+     column is which). Sticky relative to .tt-grid-wrapper's own
+     scroll — see that rule's comment for the matching top offset. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 
+/* Today's column header — reference app highlights the live day's
+   header with its gold accent underline (th.now-col's box-shadow).
+   No gold token exists in this app yet (Session 23 never ported the
+   reference's fuller vocabulary), so per this session's own decision
+   the brand color itself is reused for the highlight instead of
+   introducing a new accent token.
+   Same on-800-vs-on-700 contrast fix as .tt-cell--day-header above —
+   this rule's background is -700, one shade lighter, but per the
+   themeService.ts scan neither shade is safe with the generic `on`
+   value, so this uses --color-brand-on-700 specifically rather than
+   assuming -800's fix also covers -700 (it happens to in every tested
+   case, but the two are computed independently on purpose — see
+   themeService.ts doc comments). */
 .tt-cell--day-header-today {
-  background: color-mix(in srgb, var(--color-brand-600, #2563eb) 6%, transparent);
-  border-bottom-color: var(--color-brand-600, #2563eb);
+  background: var(--color-brand-700, var(--color-brand-600));
+  color: var(--color-brand-on-700, #ffffff);
+  box-shadow: inset 0 -3px 0 0 var(--color-brand-on-700, #ffffff);
 }
 
 .tt-day-short {
   font-size: 13px;
   font-weight: 700;
-  color: var(--color-text-primary, #111827);
+  color: inherit;
 }
 
 .tt-today-pill {
   font-size: 9px;
   font-weight: 700;
-  color: var(--color-brand-600, #2563eb);
-  background: color-mix(in srgb, var(--color-brand-600, #2563eb) 12%, transparent);
+  color: var(--color-brand-800, var(--color-brand-700));
+  background: var(--color-surface, #ffffff);
   border-radius: 10px;
   padding: 2px 6px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-/* Break cells */
+/* Break cells — Session 24 follow-up: real bug, not cosmetic.
+   .tt-cell--break (period-label column) renders TWO lines of real
+   content for a break row (p.label, e.g. "Break", PLUS a start–end
+   time range via .tt-period-time — see the JSX above, which doesn't
+   special-case is_break the way the day-column cells below do).
+   .tt-cell--break-fill (every day column at that same period) renders
+   only one line ("Break"). Both previously shared the same
+   min-height: 32px, which is only enough for one line — so the
+   label-column cell would wrap/grow past 32px while every day-column
+   cell at that row stayed fixed at 32px, misaligning every period
+   below it. Structural root cause: these are independent flex columns
+   (see .tt-col above), not real table rows, so nothing keeps "row N"
+   the same height across columns — a real fix needs the grid rebuilt
+   on CSS Grid/subgrid so row height is shared (tracked as a follow-up,
+   not done here — this is the deliberately-scoped Option B patch:
+   force both sides to an identical, non-wrapping, fixed height instead
+   of a floor). height (not min-height) + white-space: nowrap on the
+   text prevents either side from ever growing past the other. 44px
+   comfortably fits "Break" + an "8:00 AM–8:20 AM"-length range at the
+   9–10px font sizes used here; re-check this value if period labels or
+   font sizes change. */
 .tt-cell--break {
-  min-height: 32px;
+  height: 44px;
+  min-height: 44px;
   background: var(--color-bg-page, #f5f5f5);
+  overflow: hidden;
+}
+
+.tt-cell--break .tt-period-name,
+.tt-cell--break .tt-period-time {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .tt-cell--break-fill {
-  min-height: 32px;
+  height: 44px;
+  min-height: 44px;
   background: var(--color-bg-page, #f5f5f5);
   align-items: center;
   justify-content: center;
@@ -2478,19 +2922,51 @@ body {
   background: transparent;
 }
 
-/* Lesson cell */
+/* Lesson cell — PRD Session 24: hover/focus lift added, matching the
+   reference app's `.cell:hover,.cell:focus{transform:translateY(-2px);
+   box-shadow:...}` interaction. Session 24 follow-up: read-only cells
+   ARE now clickable (tap-to-view-details popup, owner-requested — see
+   TimetableModule.tsx's onCellTap read-only branch), so cursor is
+   pointer in both modes, matching the reference app's own read-only
+   grid, whose cells open a details modal on tap. */
 .tt-cell--lesson {
   background: color-mix(in srgb, var(--color-brand-600, #2563eb) 6%, transparent);
   border-left: 3px solid var(--color-brand-600, #2563eb);
   gap: 3px;
   padding-left: 6px;
-  cursor: default;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.tt-cell--lesson:hover,
+.tt-cell--lesson:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05));
+  z-index: 1;
 }
 
 /* Live highlight — current lesson right now */
 .tt-cell--live {
   background: color-mix(in srgb, #22c55e 12%, transparent) !important;
   border-left: 3px solid #22c55e !important;
+}
+
+/* ─── "Now" column highlight — reserved, not yet wired ───────────────────────
+   PRD Session 24 step 3: reserve the reference app's th.now-col/
+   td.now-col pattern (a persistent highlight across the entire column
+   of whichever period is running right now, distinct from .tt-cell--
+   live's single-cell highlight) without wiring it — Session 26's live
+   period widget supplies the resolved current-period state this needs.
+   Per this session's own gold-token decision, the brand color is
+   reused rather than introducing a new accent. */
+.tt-col--now-col .tt-cell--day-header,
+.tt-col--now-col .tt-cell--day-header-today {
+  background: var(--color-brand-700, var(--color-brand-600));
+  box-shadow: inset 0 -3px 0 0 var(--color-brand-on, #ffffff);
+}
+
+.tt-cell--now-col {
+  box-shadow: inset 0 0 0 2px var(--color-brand-600, #2563eb);
 }
 
 .tt-lesson-subject {
@@ -2608,301 +3084,6 @@ body {
 }
 
 */
-/* ─────────────────────────────────────────────────────────────────────────────
-   phase6-timetable-editmode.css
-   Append to src/index.css immediately after the existing timetable styles.
-   All selectors use the tt- prefix established in the read-only layer.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/* ── Header action group ─────────────────────────────────────────────────── */
-
-.tt-header-actions {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.tt-edit-btn,
-.tt-done-btn {
-  padding: 0.25rem 0.75rem;
-  border-radius: 999px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.tt-edit-btn {
-  background: var(--color-brand-600);
-  color: #fff;
-}
-
-.tt-done-btn {
-  background: var(--color-success, #16a34a);
-  color: #fff;
-}
-
-.tt-edit-btn:active,
-.tt-done-btn:active {
-  opacity: 0.8;
-}
-
-/* "Edit timetable" button shown in the empty state */
-.tt-edit-start-btn {
-  margin-top: 1rem;
-  padding: 0.6rem 1.5rem;
-  border-radius: 999px;
-  background: var(--color-brand-600);
-  color: #fff;
-  font-size: 0.9rem;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
-}
-
-/* ── Assignment tray ─────────────────────────────────────────────────────── */
-
-.tt-tray {
-  margin-top: 0.5rem;
-  padding: 0.5rem 0;
-  border-top: 1px solid var(--color-border, #e5e7eb);
-}
-
-.tt-tray-hint {
-  font-size: 0.75rem;
-  color: var(--color-text-secondary, #6b7280);
-  margin: 0 0 0.5rem;
-}
-
-.tt-tray-empty {
-  font-size: 0.8rem;
-  color: var(--color-text-secondary, #6b7280);
-  margin: 0;
-  line-height: 1.4;
-}
-
-.tt-tray-scroll {
-  display: flex;
-  gap: 0.5rem;
-  overflow-x: auto;
-  padding-bottom: 0.25rem;
-  /* hide scrollbar on webkit */
-  scrollbar-width: none;
-}
-.tt-tray-scroll::-webkit-scrollbar { display: none; }
-
-/* ── Assignment chips ────────────────────────────────────────────────────── */
-
-.tt-chip {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 0.4rem 0.75rem;
-  border-radius: 0.5rem;
-  border: 2px solid var(--color-border, #e5e7eb);
-  background: var(--color-surface, #fff);
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  min-width: 7rem;
-  max-width: 10rem;
-  text-align: left;
-}
-
-.tt-chip--free {
-  border-color: var(--color-text-secondary, #6b7280);
-  color: var(--color-text-secondary, #6b7280);
-}
-
-.tt-chip--armed {
-  border-color: var(--color-brand-600);
-  box-shadow: 0 0 0 2px var(--color-brand-600);
-  background: color-mix(in srgb, var(--color-brand-600) 8%, transparent);
-}
-
-.tt-chip--skel {
-  height: 3.2rem;
-  width: 8rem;
-  border-radius: 0.5rem;
-}
-
-.tt-chip-subject {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-text-primary, #111827);
-  line-height: 1.2;
-  /* truncate long names */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-.tt-chip--free .tt-chip-subject {
-  color: var(--color-text-secondary, #6b7280);
-}
-
-.tt-chip--armed .tt-chip-subject {
-  color: var(--color-brand-600);
-}
-
-.tt-chip-teacher {
-  font-size: 0.7rem;
-  color: var(--color-text-secondary, #6b7280);
-  margin-top: 0.1rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-/* ── Grid edit-mode modifiers ────────────────────────────────────────────── */
-
-/* Thin amber ring to indicate edit mode is active */
-.tt-grid--edit {
-  outline: 2px solid color-mix(in srgb, var(--color-brand-600) 30%, transparent);
-  outline-offset: -2px;
-  border-radius: 0.25rem;
-}
-
-/* Empty cell with a chip armed — inviting tap target */
-.tt-cell--droppable.tt-cell--empty {
-  border: 2px dashed var(--color-brand-600);
-  background: color-mix(in srgb, var(--color-brand-600) 5%, transparent);
-  cursor: pointer;
-}
-
-/* Drop-hint "+" shown inside droppable empty cells */
-.tt-cell-drop-hint {
-  font-size: 1.1rem;
-  color: var(--color-brand-600);
-  opacity: 0.6;
-  line-height: 1;
-}
-
-/* Filled cell with a chip armed — will be replaced on tap */
-.tt-cell--droppable.tt-cell--lesson {
-  border: 2px dashed var(--color-brand-600);
-  cursor: pointer;
-  opacity: 0.85;
-}
-
-/* Filled cell with no chip armed — tappable to clear */
-.tt-cell--clearable {
-  cursor: pointer;
-}
-.tt-cell--clearable:active {
-  opacity: 0.7;
-}
-
-/* Saving spinner */
-.tt-cell--saving {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--color-brand-600) 8%, transparent);
-}
-
-.tt-saving-spinner {
-  width: 1.1rem;
-  height: 1.1rem;
-  border: 2px solid var(--color-brand-600);
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: tt-spin 0.7s linear infinite;
-}
-
-@keyframes tt-spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Error state on a cell */
-.tt-cell--error {
-  background: color-mix(in srgb, #ef4444 10%, transparent);
-  border: 1px solid #ef4444;
-}
-
-.tt-cell-error-badge {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #ef4444;
-}
-
-/* ── Conflict badge ───────────────────────────────────────────────────────── */
-
-.tt-cell--conflict {
-  position: relative;
-}
-
-.tt-conflict-badge {
-  position: absolute;
-  top: 2px;
-  right: 3px;
-  font-size: 0.7rem;
-  color: #d97706;          /* amber-600 */
-  line-height: 1;
-}
-
-/* ── Clear confirmation overlay ─────────────────────────────────────────── */
-
-.tt-cell--pending-clear {
-  position: relative;
-}
-
-.tt-clear-confirm {
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.95);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  border-radius: inherit;
-  z-index: 10;
-  padding: 0.25rem;
-}
-
-.tt-clear-confirm-msg {
-  font-size: 0.68rem;
-  font-weight: 600;
-  color: var(--color-text-primary, #111827);
-  text-align: center;
-  line-height: 1.2;
-}
-
-.tt-clear-confirm-btns {
-  display: flex;
-  gap: 0.35rem;
-}
-
-.tt-clear-confirm-yes,
-.tt-clear-confirm-no {
-  padding: 0.2rem 0.5rem;
-  border-radius: 0.3rem;
-  font-size: 0.68rem;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
-}
-
-.tt-clear-confirm-yes {
-  background: #ef4444;
-  color: #fff;
-}
-
-.tt-clear-confirm-no {
-  background: var(--color-surface-raised, #f3f4f6);
-  color: var(--color-text-primary, #111827);
-}
-
-/* ── Missing grid skeleton class (cosmetic gap from read-only layer) ──────── */
-
-.tt-grid--skel {
-  opacity: 0.6;
-}
-
 /* ─────────────────────────────────────────────────────────────────────────────
    phase6-timetable-editmode.css
    Append to src/index.css immediately after the existing timetable styles.
@@ -3224,6 +3405,169 @@ body {
 
 .tt-grid--skel {
   opacity: 0.6;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Modal.tsx — shared overlay+card component
+   PRD Session 24 (Tier 6, Problem 6.5), built as this session's real
+   first consumer (TimetableModule's period-detail popup) rather than
+   its originally-planned later slot. NOT prefixed tt- — this is a
+   shared, app-wide component (src/components/Modal.tsx), not part of
+   the timetable module. Ported from the reference app's .modal-ov/
+   .modal/.modal-x/.modal-badge/.modal-row/.modal-div/.modal-note
+   pattern (index.html lines ~519-547), onto this app's token system —
+   every reference-app hardcoded value (var(--surface), var(--emerald-
+   900), var(--border), etc.) replaced with this app's own equivalent
+   token, no new hardcoded colors introduced.
+───────────────────────────────────────────────────────────────────────────── */
+
+.modal-ov {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+  padding: 18px;
+}
+
+.modal {
+  background: var(--color-surface, #ffffff);
+  border-radius: var(--radius-lg, 1rem);
+  padding: 26px 24px 20px;
+  max-width: 390px;
+  width: 90%;
+  box-shadow: var(--shadow-lg, 0 10px 15px -3px rgb(0 0 0 / 0.1));
+  position: relative;
+  animation: modal-pop-in 0.18s ease;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+@keyframes modal-pop-in {
+  from { transform: scale(0.92); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal {
+    animation: none;
+  }
+}
+
+.modal-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: var(--color-surface-raised, #f3f4f6);
+  border: none;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  font-size: 0.88rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary, #6b7280);
+  transition: background 0.15s, color 0.15s;
+}
+
+.modal-x svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.modal-x:hover {
+  background: #fee2e2;
+  color: #c00;
+}
+
+.modal-content {
+  /* Body content supplied by each consumer — no default spacing
+     assumptions here beyond what .modal's own padding already gives. */
+}
+
+.modal-badge {
+  display: inline-block;
+  padding: 2px 11px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  margin-bottom: 7px;
+}
+
+.modal-title {
+  font-size: 1.28rem;
+  font-weight: 800;
+  color: var(--color-text-primary, #111827);
+  margin-bottom: 5px;
+}
+
+.modal-div {
+  height: 1px;
+  background: var(--color-border, #e5e7eb);
+  margin: 11px 0;
+}
+
+.modal-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.83rem;
+  margin-bottom: 5px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.modal-row strong {
+  color: var(--color-text-primary, #111827);
+}
+
+.modal-ic {
+  width: 19px;
+  text-align: center;
+  font-size: 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-ic svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.modal-note {
+  font-size: 0.73rem;
+  color: var(--color-text-secondary, #6b7280);
+  text-align: center;
+  font-style: italic;
+  padding: 7px 0 0;
+}
+
+/* Conflict-specific row variant — used by the timetable period-detail
+   popup when the entry is double-booked (see TimetableModule.tsx).
+   Semantic amber, matching .tt-conflict-badge's existing color rather
+   than brand color, per Problem 6.3's own instruction that status
+   colors stay fixed regardless of brand-token context. */
+.modal-row--conflict {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.modal-row--conflict strong {
+  color: #b45309;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -12617,7 +12961,7 @@ body {
   flex-shrink: 0;
 }
 
-.set-collapsible-toggle:hover { background: var(--color-brand-50, #f0fdf4); }
+.set-collapsible-toggle:hover { background: var(--color-brand-50); }
 
 .set-section-controls {
   display: flex;
@@ -13355,15 +13699,15 @@ body {
 }
 
 .set-scope-option:has(input:checked) {
-  border-color: var(--color-brand-600, #16a34a);
-  background-color: var(--color-brand-50, #f0fdf4);
+  border-color: var(--color-brand-600);
+  background-color: var(--color-brand-50);
 }
 
 .set-scope-option input[type="radio"] {
   width: 18px;
   height: 18px;
   flex-shrink: 0;
-  accent-color: var(--color-brand-600, #16a34a);
+  accent-color: var(--color-brand-600);
 }
 
 /* ── Audit log ───────────────────────────────────────────────────────────── */

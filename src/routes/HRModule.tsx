@@ -1589,7 +1589,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
 
   function renderLeaveRequestForm() {
     return (
-      <div className="hr-confirm-banner" style={{ background: 'var(--color-neutral-50, #f9fafb)', borderColor: 'var(--color-border, #e5e7eb)' }}>
+      <div className="hr-confirm-banner" style={{ background: 'var(--color-neutral-50)', borderColor: 'var(--color-border)' }}>
         <p className="hr-section-title">Request leave</p>
         <div className="hr-field">
           <label className="hr-label" htmlFor="hr-lr-type">
@@ -1993,19 +1993,19 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
         <div className="hr-detail-tab-content">
           <div className="hr-field">
             <span className="hr-label">Email</span>
-            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-primary, #111827)' }}>
+            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-primary)' }}>
               {s.email || '—'}
             </p>
           </div>
           <div className="hr-field">
             <span className="hr-label">Phone</span>
-            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-primary, #111827)' }}>
+            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-primary)' }}>
               {s.phone || '—'}
             </p>
           </div>
           <div className="hr-field">
             <span className="hr-label">Hire date</span>
-            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-primary, #111827)' }}>
+            <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-primary)' }}>
               {s.hire_date ? formatDate(s.hire_date) : '—'}
             </p>
           </div>
@@ -2364,7 +2364,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
 
         <div className="hr-field">
           <span className="hr-label">Pay frequency</span>
-          <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-primary, #111827)' }}>
+          <p className="hr-detail-sub" style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-primary)' }}>
             {effectiveFrequency
               ? `${PAY_FREQUENCY_LABELS[effectiveFrequency]}${isSchoolDefault ? ' (school default)' : ''}`
               : (schoolDefaultFrequencyState === 'loading' ? 'Loading…' : '—')}

@@ -33,6 +33,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { applyBrandTheme } from '../services/themeService'
 import {
   loadSchoolSettings,       updateSchoolSettings,
   loadPublicConfig,         savePublicConfig,
@@ -221,7 +222,7 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
   const [name, setName] = useState('')
   const [schoolType, setSchoolType] = useState('')
   const [logoUrl, setLogoUrl] = useState('')
-  const [themeColor, setThemeColor] = useState('#4f46e5')
+  const [themeColor, setThemeColor] = useState('#2563eb')
   const [defaultLang, setDefaultLang] = useState<'en' | 'ar' | 'ha'>('en')
   const [enabledLangs, setEnabledLangs] = useState<string[]>(['en'])
   const [usesTerms, setUsesTerms] = useState(true)
@@ -255,7 +256,7 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
     setName(s.name)
     setSchoolType(s.school_type ?? '')
     setLogoUrl(s.logo_url ?? '')
-    setThemeColor(s.theme_color ?? '#4f46e5')
+    setThemeColor(s.theme_color ?? '#2563eb')
     setDefaultLang(s.default_lang)
     setEnabledLangs(s.enabled_langs ?? ['en'])
     setUsesTerms(s.uses_terms)
@@ -266,6 +267,19 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
     setContactAddress((p.contact_info as { address?: string })?.address ?? '')
     setShowAnnouncements(p.show_announcements)
     setLoading(false)
+
+    // Re-apply the school's saved theme color on load, not just on save.
+    // PRD Session 23 finding: nothing in the app previously applied
+    // theme_color at boot — a page reload would silently show the
+    // :root default (blue) until an admin happened to open Settings and
+    // save again. This does not fully close that gap (App.tsx/
+    // schoolStore.ts would need to call applyBrandTheme() as soon as the
+    // school record loads, before Settings is ever opened, which needs
+    // those files — not available in this session, flagged rather than
+    // guessed at), but it does mean the moment an admin's own Settings
+    // tab mounts, the full accessible scale — not just the one raw
+    // property the old code set — is correctly re-derived and live.
+    if (s.theme_color) applyBrandTheme(s.theme_color)
   }, [schoolId])
 
   useEffect(() => { load() }, [load])
@@ -296,8 +310,34 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
       setSaveError(sRes.error ?? pRes.error)
     } else {
       setSaved(true)
-      // Apply theme color live
-      if (themeColor) document.documentElement.style.setProperty('--color-brand-600', themeColor)
+      // Apply the full derived brand scale live (PRD Session 23) — the
+      // prior code only set --color-brand-600 itself, which most of
+      // index.css was never actually reading correctly (undeclared
+      // token, inconsistent fallbacks — see themeService.ts's header
+      // comment and §11 2026-07-08 for the full audit). applyBrandTheme
+      // sets all nine brand tokens (50-800 + -on) in one call, derived
+      // from this one picked color, so every consumer across the app
+      // updates consistently instead of the old single-property write.
+      if (themeColor) {
+        const scale = applyBrandTheme(themeColor)
+        // Surfaced, not acted on: if the admin's exact pick was too
+        // light/washed-out to hit 4.5:1 contrast as text/button color,
+        // the WORKING brand-600 has been quietly darkened for
+        // legibility — the picker itself still shows their original
+        // hex (harmless, cosmetic-only difference) since themeColor
+        // state is untouched. No UI copy exists yet to tell the admin
+        // this happened; flagged here rather than inventing copy
+        // without the owner's sign-off on the wording (see
+        // BrandScale.wasAdjustedForContrast's own doc comment).
+        if (scale.wasAdjustedForContrast) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[theme] Picked brand color was too light for readable text/buttons — ' +
+            'automatically darkened for the working --color-brand-600. ' +
+            'Original pick preserved in --color-brand-raw.'
+          )
+        }
+      }
       setTimeout(() => setSaved(false), 3000)
     }
     setSaving(false)
@@ -328,7 +368,7 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
       <FieldRow label="Theme colour">
         <div className="set-color-row">
           <input type="color" className="set-color-picker" value={themeColor} onChange={e => setThemeColor(e.target.value)} />
-          <Input value={themeColor} onChange={setThemeColor} placeholder="#4f46e5" />
+          <Input value={themeColor} onChange={setThemeColor} placeholder="#2563eb" />
         </div>
       </FieldRow>
 
@@ -777,21 +817,19 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
 
   return (
     <div className="set-tab-content">
-      <div className="set-collapsible-card" onClick={() => setWeekDaysOpen(o => !o)}>
-        <span className="set-collapsible-label">School week</span>
-        <div className="set-collapsible-row">
-          <span className="set-collapsible-summary">
-            {weekDays.length === 0
-              ? 'Not set'
-              : weekDays.slice().sort().map(d => DAY_NAMES[d]).join(', ')}
-          </span>
-          <button type="button" className="set-collapsible-toggle" aria-expanded={weekDaysOpen}>
-            {weekDaysOpen ? 'Hide' : 'Edit week days'}
-          </button>
-        </div>
+      <div className="set-collapsible-header" onClick={() => setWeekDaysOpen(o => !o)}>
+        <SectionLabel>School week</SectionLabel>
+        <span className="set-collapsible-summary">
+          {weekDays.length === 0
+            ? 'Not set'
+            : weekDays.slice().sort().map(d => DAY_NAMES[d]).join(', ')}
+        </span>
+        <button type="button" className="set-collapsible-toggle" aria-expanded={weekDaysOpen}>
+          {weekDaysOpen ? 'Hide' : 'Edit week days'}
+        </button>
       </div>
       {weekDaysOpen && (
-        <div className="set-collapsible-body">
+        <>
           <p className="set-field-hint">
             Which weekdays count as school days for this school — used everywhere attendance,
             calendars, and term progress are calculated. Change carefully.
@@ -813,7 +851,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
             {daysSaved && <p className="set-save-ok">✓ Saved</p>}
             <button className="set-save-btn" onClick={handleSaveDays} disabled={daysSaving}>{daysSaving ? 'Saving…' : 'Save week days'}</button>
           </div>
-        </div>
+        </>
       )}
 
       <div className="set-section-header set-section-header--spaced">
@@ -858,12 +896,12 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
         </div>
       )}
 
-      <div className="set-section-header set-section-header--spaced set-section-header--wrap">
+      <div className="set-section-header set-section-header--spaced">
         <SectionLabel>Holidays & special days</SectionLabel>
         {currentSessionId && (
           <div className="set-add-btn-group">
             <button className="set-add-btn" onClick={() => openCalForm('single')}>+ Add date</button>
-            <button className="set-add-btn set-add-btn--secondary" onClick={() => openCalForm('bulk')}>+ Add range</button>
+            <button className="set-add-btn" onClick={() => openCalForm('bulk')}>+ Add range</button>
           </div>
         )}
       </div>

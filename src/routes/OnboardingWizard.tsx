@@ -227,7 +227,7 @@ function Step1Identity({
   const [phone, setPhone] = useState('')
   const [email, setEmail] = useState('')
   const [address, setAddress] = useState('')
-  const [themeColor, setThemeColor] = useState('#1a7a4a')
+  const [themeColor, setThemeColor] = useState('#2563eb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

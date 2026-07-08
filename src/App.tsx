@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { useAuthStore } from './stores/authStore'
 import { useSchoolStore } from './stores/schoolStore'
+import { applyBrandTheme } from './services/themeService'
 import { LoginPage } from './routes/LoginPage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
@@ -235,9 +236,20 @@ export default function App() {
           // being truthy and was silently bailing out on every mount.
           useSchoolStore.getState().setSchool(data)
           setSlugState('found')
-          // Apply school theme color to CSS variable
+          // PRD Session 23: previously set only --color-brand-600 itself
+          // directly, the same single-property gap SettingsModule.tsx had
+          // (see themeService.ts's header comment and §11 2026-07-08) —
+          // most of index.css was never actually reading that one
+          // property reliably (undeclared token, inconsistent fallbacks
+          // before this session's :root fix). applyBrandTheme() derives
+          // and sets the full accessible scale (tints/shades/on-color)
+          // from this one saved hex, in one call, at the earliest point
+          // in the app's lifecycle a school record exists — this is what
+          // actually closes the "reload shows the wrong color until an
+          // admin revisits Settings" gap flagged when this session's
+          // Settings-side fix was made.
           if (data.theme_color) {
-            document.documentElement.style.setProperty('--color-brand-600', data.theme_color)
+            applyBrandTheme(data.theme_color)
           }
         }
       })
@@ -338,6 +350,15 @@ export default function App() {
           if (data) {
             setSchool(data)
             useSchoolStore.getState().setSchool(data)
+            // PRD Session 23: this re-fetch previously never applied theme
+            // at all — a school that set its brand color during the
+            // onboarding wizard itself (Step 1, School identity) would see
+            // the default blue until they later happened to open Settings
+            // and re-save. Same applyBrandTheme() call as the initial
+            // school-load effect above, for the same reason.
+            if (data.theme_color) {
+              applyBrandTheme(data.theme_color)
+            }
           }
           setForceShowOnboarding(false)
         }}

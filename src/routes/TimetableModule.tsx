@@ -4,17 +4,7 @@
  *
  * Props:
  *   schoolId  — required for all writes (RLS with-check needs explicit school_id)
- *   isAdmin   — retained for read-state copy only (empty-state hint text);
- *               NOT used to gate the edit toolbar as of PRD Session 10 (same
- *               pattern as AttendanceModule.tsx's Session 9 conversion).
- *
- * Permissions (PRD Tier 3 / Session 10, 2026-07-01):
- *   Entering/using edit mode requires `academics.timetable.edit`, read via
- *   useAuthStore's can() directly inside this component — matching
- *   AttendanceModule.tsx's established pattern exactly, not threaded in as
- *   a prop from App.tsx. The store's can() selector already short-circuits
- *   to granted for admin-role holders (admin-bypass, confirmed 2026-07-01),
- *   so no separate isAdmin check is needed for the edit gate itself.
+ *   isAdmin   — gates the edit toolbar; non-admins see read-only grid
  *
  * Edit-mode interaction (tap-to-select, tap-to-place — no drag/drop):
  *   1. Admin taps "Edit" button → edit mode activates, assignment tray appears.
@@ -34,11 +24,26 @@
  *   - Conflicting cells show a ⚠ badge. No write is blocked — conflicts are
  *     informational per owner's decision (allow + warn).
  *
+ * Read-only detail popup (Session 24, owner-requested, ported from the
+ * reference app's openModal() pattern):
+ *   - Tapping a filled lesson cell OUTSIDE edit mode opens a Modal showing
+ *     subject/teacher/class/day/period/time, assembled entirely from data
+ *     already in memory (TimetableEntry + the Period/day it renders under)
+ *     — no new service query.
+ *   - If the entry is in conflictIds, the popup adds a conflict line
+ *     (double-booked teacher), same underlying Set the ⚠ badge already
+ *     reads — one source of truth, not a second conflict check.
+ *   - This is entirely separate from edit-mode's existing tap semantics
+ *     (armed-chip placement, clear-confirmation) — the two never overlap,
+ *     since edit mode's own onClick branch returns early and this new
+ *     behavior only fires when !editMode.
+ *
  * All CSS uses the `tt-` prefix (no collisions with dash-* or Phase 5 styles).
+ * The one exception is Modal.tsx's own `.modal-*` classes (shared,
+ * app-wide component — see Problem 6.5).
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useAuthStore } from '../stores/authStore'
 import {
   loadTimetableData,
   loadClassNodes,
@@ -58,6 +63,7 @@ import {
   type TeachingAssignment,
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
+import { Modal } from '../components/Modal'
 
 // ─── Prop types ───────────────────────────────────────────────────────────────
 
@@ -90,13 +96,6 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
   const [loadState, setLoadState]     = useState<'loading' | 'error' | 'empty' | 'ready'>('loading')
   const [errorMsg, setErrorMsg]       = useState('')
 
-  // ── Auth: permission gate ───────────────────────────────────────────────────
-  // Entering/using edit mode requires academics.timetable.edit. Read directly
-  // via useAuthStore, same pattern as AttendanceModule.tsx's canMark (Session 9)
-  // — not threaded in as a prop. can() already bypasses to true for admin-role
-  // holders, so no separate isAdmin check is needed here.
-  const canEditTimetable = useAuthStore(s => s.can('academics.timetable.edit'))
-
   // ── View state ────────────────────────────────────────────────────────────────
   const [viewMode, setViewMode]               = useState<ViewMode>('class')
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
@@ -120,6 +119,15 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
 
   // ── Scroll ref for "Jump to today" ────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // ── Read-only detail popup (Session 24) ─────────────────────────────────
+  // Holds the entry + the period/day it's rendered under, so the popup has
+  // everything it needs without a second lookup. null = closed.
+  const [detailPopup, setDetailPopup] = useState<{
+    entry: TimetableEntry
+    period: Period
+    dayOfWeek: number
+  } | null>(null)
 
   // ─── Initial data load ──────────────────────────────────────────────────────
 
@@ -247,7 +255,21 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
     period: Period,
     entry: TimetableEntry | undefined,
   ) {
-    if (!editMode || period.is_break || !sessionId || !selectedClassId) return
+    // ── Read-only tap (Session 24): open the detail popup ────────────────────
+    // Outside edit mode, tapping a filled lesson cell shows what's happening
+    // in that slot — subject/teacher/class/day/period/time, plus a conflict
+    // line if applicable. Break cells and empty cells have nothing to show,
+    // so this only fires for a real entry. Never touches edit-mode's own
+    // tap semantics below — the two branches are mutually exclusive on
+    // `editMode`.
+    if (!editMode) {
+      if (entry && !period.is_break) {
+        setDetailPopup({ entry, period, dayOfWeek })
+      }
+      return
+    }
+
+    if (period.is_break || !sessionId || !selectedClassId) return
 
     // ── Case A: a chip is armed → write to this cell ─────────────────────────
     if (armedChip !== null) {
@@ -381,13 +403,11 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
         <p className="tt-empty-title">No timetable yet</p>
         <p className="tt-empty-msg">
           The timetable for {sessionName} hasn't been set up.
-          {canEditTimetable
+          {isAdmin
             ? ' Tap "Edit timetable" to start adding lessons.'
-            : isAdmin
-              ? ' You have admin access but no timetable-edit permission — check Settings → Roles.'
-              : ' Check back with your school administrator.'}
+            : ' Check back with your school administrator.'}
         </p>
-        {canEditTimetable && (
+        {isAdmin && (
           <button className="tt-edit-start-btn" onClick={enterEditMode}>
             Edit timetable
           </button>
@@ -416,12 +436,12 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
                 🖨
               </button>
             )}
-            {canEditTimetable && !editMode && (
+            {isAdmin && !editMode && (
               <button className="tt-edit-btn" onClick={enterEditMode}>
                 Edit
               </button>
             )}
-            {canEditTimetable && editMode && (
+            {isAdmin && editMode && (
               <button className="tt-done-btn" onClick={exitEditMode}>
                 Done
               </button>
@@ -515,7 +535,102 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
           onCancelClear={() => setPendingClearId(null)}
         />
       </div>
+
+      {/* ── Read-only lesson detail popup (Session 24) ─────────────────────── */}
+      <Modal
+        open={detailPopup !== null}
+        onClose={() => setDetailPopup(null)}
+        title={detailPopup?.entry.subject_name ?? 'Free period'}
+      >
+        {detailPopup && (
+          <TimetableEntryDetail
+            entry={detailPopup.entry}
+            period={detailPopup.period}
+            dayOfWeek={detailPopup.dayOfWeek}
+            viewMode={editMode ? 'class' : viewMode}
+            isConflict={conflictIds.has(detailPopup.entry.id)}
+          />
+        )}
+      </Modal>
     </div>
+  )
+}
+
+// ─── Lesson detail popup content ───────────────────────────────────────────
+// Session 24: modeled on the reference app's openModal() field set
+// (subject, teacher, class, day, period, time) — index.html's own
+// modal-badge/modal-title/modal-div/modal-row pattern, via the shared
+// Modal.tsx shell. Free periods (no staff_name) get the reference app's
+// own "free session" note instead of a blank teacher row, matching its
+// isHifz||noTeacher branch. Conflict state reuses conflictIds — the same
+// Set already driving the ⚠ badge, not a second check.
+
+interface TimetableEntryDetailProps {
+  entry: TimetableEntry
+  period: Period
+  dayOfWeek: number
+  viewMode: ViewMode
+  isConflict: boolean
+}
+
+function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict }: TimetableEntryDetailProps) {
+  const isFree = !entry.staff_name
+
+  return (
+    <>
+      <div className="modal-badge" style={{
+        background: 'color-mix(in srgb, var(--color-brand-600, #2563eb) 12%, transparent)',
+        color: 'var(--color-brand-700, var(--color-brand-600))',
+      }}>
+        {dayName(dayOfWeek, true)} · {period.label}
+      </div>
+      <div className="modal-title">{entry.subject_name ?? 'Free period'}</div>
+      <div className="modal-div" />
+
+      {!isFree && (
+        <div className="modal-row">
+          <span className="modal-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+          </span>
+          <span>Teacher: <strong>{entry.staff_name}</strong></span>
+        </div>
+      )}
+
+      <div className="modal-row">
+        <span className="modal-ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2M4 6v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6" /></svg>
+        </span>
+        <span>Class: <strong>{entry.class_node_name}</strong></span>
+      </div>
+
+      <div className="modal-row">
+        <span className="modal-ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
+        </span>
+        <span>Day: <strong>{dayName(dayOfWeek)}</strong></span>
+      </div>
+
+      <div className="modal-row">
+        <span className="modal-ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 15" /></svg>
+        </span>
+        <span>Time: <strong>{formatTime(period.start_time)}–{formatTime(period.end_time)}</strong></span>
+      </div>
+
+      {isConflict && (
+        <>
+          <div className="modal-div" />
+          <div className="modal-row modal-row--conflict">
+            <span className="modal-ic" aria-hidden="true">⚠</span>
+            <span>This teacher is double-booked in this slot, in another class at the same time.</span>
+          </div>
+        </>
+      )}
+
+      {isFree && (
+        <div className="modal-note">No lesson scheduled — this is a free or supervised period.</div>
+      )}
+    </>
   )
 }
 
@@ -756,13 +871,20 @@ function TimetableGrid({
                     editMode && armedChip === null ? 'tt-cell--clearable' : '',
                   ].filter(Boolean).join(' ')}
                   onClick={() => onCellTap(wd.day_of_week, p, entry)}
-                  role={editMode ? 'button' : undefined}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onCellTap(wd.day_of_week, p, entry)
+                    }
+                  }}
                   aria-label={
                     editMode
                       ? armedChip !== null
                         ? `Replace lesson in ${dayName(wd.day_of_week, true)}, ${p.label}`
                         : `Clear lesson in ${dayName(wd.day_of_week, true)}, ${p.label}`
-                      : undefined
+                      : `View details for ${entry.subject_name ?? 'free period'} in ${dayName(wd.day_of_week, true)}, ${p.label}`
                   }
                 >
                   {/* Conflict badge */}

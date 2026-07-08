@@ -9,10 +9,31 @@
  *
  * Mobile-first. Both flows handle errors and loading states.
  * Business logic lives in authService.ts — this file is UI only.
+ *
+ * PRD Session 24 (Tier 6, Problem 6.2): rebuilt against the reference
+ * app's `.att-login-card` pattern — a centered card (icon + title +
+ * description header, labeled inputs with focus-ring styling,
+ * full-width primary button, inline error below the form) rather than
+ * the old full-bleed colored header + sticky tab bar. The school
+ * identity banner is kept, but shrunk to a compact strip above the
+ * card rather than a full colored section, since this app (unlike the
+ * single-school reference) needs a neutral, theme-color-agnostic page
+ * background that works for any admin-picked brand color. Dark mode
+ * intentionally out of scope this session — no `theme_mode` concept
+ * exists in the schema yet (§11 2026-07-08 Session 24 entry).
+ *
+ * Tab icons are real inline SVGs (viewBox 0 0 24 24, stroke=currentColor,
+ * stroke-width 2 — the same convention the reference app's own ICONS
+ * object uses) rather than emoji, matching this problem's own "no new
+ * hardcoded colors, everything token-driven" instruction. This is not
+ * an attempt at Session 25's full icon-system port — just these two
+ * icons, built in the same visual style so Session 25 can absorb them
+ * into its shared icon module without a mismatch.
  */
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { loginWithEmail, loginWithCode } from '../services/authService'
+import { deriveBrandScale } from '../services/themeService'
 
 interface LoginPageProps {
   schoolId: string
@@ -25,43 +46,112 @@ type TabKey = 'staff' | 'code'
 
 export function LoginPage({ schoolId, schoolName, logoUrl, themeColor }: LoginPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('staff')
-  const accent = themeColor || 'var(--color-brand-600)'
+
+  // Session 23's real-contrast derivation, reused here for the logo
+  // placeholder's text color only — the brand strip no longer paints
+  // a full colored banner (see file header), so there's no large-area
+  // contrast risk left to guard against, but the placeholder circle is
+  // still a solid brand fill and needs the same guarantee.
+  const scale = themeColor ? deriveBrandScale(themeColor) : null
+  const placeholderText = scale ? scale.on : 'var(--color-brand-on, #ffffff)'
 
   return (
     <div className="login-shell">
-      {/* School header */}
-      <div className="login-header" style={{ background: accent }}>
+      {/* Compact brand identity strip */}
+      <div className="login-brand-strip">
         {logoUrl ? (
           <img src={logoUrl} alt={schoolName} className="login-logo" />
         ) : (
-          <div className="login-logo-placeholder">{schoolName.slice(0, 2).toUpperCase()}</div>
+          <div
+            className="login-logo-placeholder"
+            style={scale ? { background: scale[600], color: placeholderText } : undefined}
+          >
+            {schoolName.slice(0, 2).toUpperCase()}
+          </div>
         )}
         <h1 className="login-school-name">{schoolName}</h1>
-        <p className="login-tagline">Sign in to continue</p>
       </div>
 
-      {/* Tab switcher */}
-      <div className="login-tabs" role="tablist">
-        <TabButton
-          active={activeTab === 'staff'}
-          onClick={() => setActiveTab('staff')}
-          label="Staff"
-          icon="👤"
-        />
-        <TabButton
-          active={activeTab === 'code'}
-          onClick={() => setActiveTab('code')}
-          label="Login code"
-          icon="🔑"
-        />
-      </div>
+      {/* Card — icon + title + description header, tab switcher, form */}
+      <div className="login-card">
+        <div className="login-card-icon">
+          {activeTab === 'staff' ? <IconStaff /> : <IconKey />}
+        </div>
+        <p className="login-card-title">
+          {activeTab === 'staff' ? 'Staff sign in' : 'Login code'}
+        </p>
+        <p className="login-card-desc">
+          {activeTab === 'staff'
+            ? 'For teachers and administrators'
+            : 'For parents and students'}
+        </p>
 
-      {/* Login forms */}
-      <div className="login-form-area">
-        {activeTab === 'staff' && <StaffLoginForm />}
-        {activeTab === 'code'  && <CodeLoginForm schoolId={schoolId} />}
+        {/* Tab switcher */}
+        <div className="login-tabs" role="tablist">
+          <TabButton
+            active={activeTab === 'staff'}
+            onClick={() => setActiveTab('staff')}
+            label="Staff"
+            icon={<IconStaff />}
+          />
+          <TabButton
+            active={activeTab === 'code'}
+            onClick={() => setActiveTab('code')}
+            label="Login code"
+            icon={<IconKey />}
+          />
+        </div>
+
+        {/* Login forms */}
+        <div className="login-form-area">
+          {activeTab === 'staff' && <StaffLoginForm />}
+          {activeTab === 'code'  && <CodeLoginForm schoolId={schoolId} />}
+        </div>
       </div>
     </div>
+  )
+}
+
+// ─── Icons (viewBox 0 0 24 24, stroke=currentColor, stroke-width 2 —
+//      matches the reference app's own ICONS convention) ────────────────
+
+function IconStaff() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  )
+}
+
+function IconKey() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="8" cy="15" r="4" />
+      <path d="M10.5 12.5 20 3M17 6l3 3M14 9l2 2" />
+    </svg>
+  )
+}
+
+// Password-visibility toggle icons — Session 24, same viewBox/stroke
+// convention as IconStaff/IconKey above (not a pre-emption of Session
+// 25's full icon-system port, same scoping note as those two).
+
+function IconEye() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+function IconEyeOff() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-10.5-7-10.5-7a18.4 18.4 0 0 1 4.22-5.19M9.9 4.24A9.13 9.13 0 0 1 12 5c7 0 10.5 7 10.5 7a18.4 18.4 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
   )
 }
 
@@ -76,7 +166,7 @@ function TabButton({
   active: boolean
   onClick: () => void
   label: string
-  icon: string
+  icon: ReactNode
 }) {
   return (
     <button
@@ -94,10 +184,17 @@ function TabButton({
 // ─── Staff: email + password ──────────────────────────────────────────────
 
 function StaffLoginForm() {
-  const [email,    setEmail]    = useState('')
-  const [password, setPassword] = useState('')
-  const [error,    setError]    = useState<string | null>(null)
-  const [loading,  setLoading]  = useState(false)
+  const [email,       setEmail]       = useState('')
+  const [password,    setPassword]    = useState('')
+  const [error,       setError]       = useState<string | null>(null)
+  const [loading,     setLoading]     = useState(false)
+  // Password-visibility toggle — owner-requested, Session 24. Same simple
+  // pattern already used elsewhere in the app (TeacherDashboard.tsx's
+  // password-change form has a shared show/hide toggle across its three
+  // password fields); this form has only one password field, so it's a
+  // local toggle rather than a shared-across-fields one, but the same
+  // visual/interaction convention (eye / eye-off icon inside the field).
+  const [showPassword, setShowPassword] = useState(false)
 
   async function handleSubmit() {
     if (!email.trim() || !password.trim()) {
@@ -133,16 +230,29 @@ function StaffLoginForm() {
 
       <label className="form-label">
         Password
-        <input
-          className="form-input"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="••••••••"
-          disabled={loading}
-          onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-        />
+        <div className="form-input-wrap">
+          <input
+            className="form-input form-input--with-toggle"
+            type={showPassword ? 'text' : 'password'}
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            disabled={loading}
+            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+          />
+          <button
+            type="button"
+            className="form-input-toggle"
+            onClick={() => setShowPassword(v => !v)}
+            disabled={loading}
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
+            aria-pressed={showPassword}
+            tabIndex={-1}
+          >
+            {showPassword ? <IconEyeOff /> : <IconEye />}
+          </button>
+        </div>
       </label>
 
       {error && <p className="form-error" role="alert">{error}</p>}
