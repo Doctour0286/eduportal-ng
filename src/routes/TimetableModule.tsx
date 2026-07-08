@@ -123,10 +123,20 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
   // ── Read-only detail popup (Session 24) ─────────────────────────────────
   // Holds the entry + the period/day it's rendered under, so the popup has
   // everything it needs without a second lookup. null = closed.
+  // clashEntry: when the tapped entry is double-booked, this is the OTHER
+  // entry — same teacher, same day+period, a different class — found by a
+  // direct scan of ttData.entries (already loaded in memory, no new query).
+  // Matched on staff_id, not teaching_assignment_id or subject_name: two
+  // teaching_assignments rows can share the same staff_id while differing
+  // in subject_id (a teacher double-booked across two different subjects
+  // in two different classes at the same time is still the same clash),
+  // and staff_id is a real foreign key rather than a denormalized display
+  // string, so it can't be fooled by two staff members sharing a name.
   const [detailPopup, setDetailPopup] = useState<{
     entry: TimetableEntry
     period: Period
     dayOfWeek: number
+    clashEntry: TimetableEntry | null
   } | null>(null)
 
   // ─── Initial data load ──────────────────────────────────────────────────────
@@ -264,7 +274,24 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
     // `editMode`.
     if (!editMode) {
       if (entry && !period.is_break) {
-        setDetailPopup({ entry, period, dayOfWeek })
+        // Find the specific entry causing the clash, if any — same teacher
+        // (by staff_id), same day+period, a different class. This is a
+        // plain scan of ttData.entries, already loaded school-wide in
+        // memory (see conflictIds below), so no extra query is needed.
+        // Deliberately independent of conflictIds itself: conflictIds is
+        // computed later in this component, and re-deriving the match here
+        // directly (rather than depending on that Set) keeps this handler
+        // self-contained and avoids any declaration-order coupling.
+        const clashEntry = entry.staff_id
+          ? ttData?.entries.find(other =>
+              other.id !== entry.id &&
+              other.staff_id === entry.staff_id &&
+              other.day_of_week === dayOfWeek &&
+              other.period_id === period.id,
+            ) ?? null
+          : null
+
+        setDetailPopup({ entry, period, dayOfWeek, clashEntry })
       }
       return
     }
@@ -549,6 +576,7 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
             dayOfWeek={detailPopup.dayOfWeek}
             viewMode={editMode ? 'class' : viewMode}
             isConflict={conflictIds.has(detailPopup.entry.id)}
+            clashEntry={detailPopup.clashEntry}
           />
         )}
       </Modal>
@@ -571,9 +599,13 @@ interface TimetableEntryDetailProps {
   dayOfWeek: number
   viewMode: ViewMode
   isConflict: boolean
+  /** The other entry causing the clash — same teacher, same day+period, a
+   *  different class. null if isConflict is false, or (edge case) if the
+   *  conflicting counterpart couldn't be found in ttData.entries. */
+  clashEntry: TimetableEntry | null
 }
 
-function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict }: TimetableEntryDetailProps) {
+function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict, clashEntry }: TimetableEntryDetailProps) {
   const isFree = !entry.staff_name
 
   return (
@@ -622,7 +654,19 @@ function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict }: Timetabl
           <div className="modal-div" />
           <div className="modal-row modal-row--conflict">
             <span className="modal-ic" aria-hidden="true">⚠</span>
-            <span>This teacher is double-booked in this slot, in another class at the same time.</span>
+            {clashEntry ? (
+              <span>
+                <strong>{entry.staff_name}</strong> is also teaching{' '}
+                <strong>{clashEntry.subject_name ?? 'a lesson'}</strong> to{' '}
+                <strong>{clashEntry.class_node_name}</strong> at this same time.
+              </span>
+            ) : (
+              // Fallback: conflictIds says this entry clashes, but the specific
+              // counterpart entry wasn't found (shouldn't normally happen, since
+              // both are computed from the same in-memory ttData.entries — kept
+              // as a safe default rather than showing nothing).
+              <span>This teacher is double-booked in this slot, in another class at the same time.</span>
+            )}
           </div>
         </>
       )}
