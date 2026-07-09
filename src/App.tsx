@@ -97,6 +97,13 @@ function getSlugFromHostname(hostname: string): string | null {
 export default function App() {
   const [school, setSchool] = useState<SchoolData | null>(null)
   const [slugState, setSlugState] = useState<'loading' | 'not-found' | 'found' | 'no-slug'>('loading')
+  // Set once the wrong-school branch fires signOut() — kept in local state
+  // (not derived from session/identitySchoolId) specifically so the message
+  // stays on screen after onAuthStateChange's listener clears `session` a
+  // moment later. Without this, the !session check further down would start
+  // matching on the very next render and silently swap this message for
+  // LoginPage before the person has had a chance to read it.
+  const [wrongSchoolBlock, setWrongSchoolBlock] = useState(false)
   const [activeTab, setActiveTab] = useState<NavTab>('home')
   const [forceShowOnboarding, setForceShowOnboarding] = useState(false)
   // staff.id of the signed-in actor, resolved once via app_identities — needed by
@@ -145,12 +152,64 @@ export default function App() {
     sheetTouchDeltaY.current = 0
   }
 
-  const { session, actorType, actorRecordId, isAdminRole, isLoading: authLoading, isInitialized, initialize } = useAuthStore()
+  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize } = useAuthStore()
 
   // Initialize auth once on mount
   useEffect(() => {
     initialize()
   }, [initialize])
+
+  // Wrong school → sign out, do not enter this school's shell. Must live
+  // here, unconditionally, alongside every other hook — never after an
+  // early return (see the pendingIntent comment above for why). Guarded
+  // internally against `school`/`session` still being null/loading, since
+  // both early states are reachable at the point these hooks run, before
+  // any of the slugState/session early-return branches below have fired.
+  //
+  // A valid Supabase session only proves *who* the person is — auth.users
+  // is never school-scoped, so the same credentials work under any
+  // subdomain. Nothing before this fix ever checked that the identity
+  // resolved via app_identities (identitySchoolId, from authStore) actually
+  // belongs to the school this subdomain resolved to (school.id). Every
+  // module further down is handed `schoolId={school.id}` — the SUBDOMAIN's
+  // school, not the signed-in identity's — so without this check a user
+  // could log in under any other school's URL and see that school's
+  // name/logo/color in the shell chrome while RLS quietly serves back only
+  // their own rows underneath, since RLS keys off auth.uid() regardless of
+  // what schoolId prop a component was handed. That's not a data leak (RLS
+  // still holds), but it's a real gap at the app's own auth boundary, and
+  // RLS being the only thing preventing a leak here is not a design to
+  // lean on.
+  //
+  // platform_admin is deliberately exempt: authStore.ts's resolveIdentity
+  // always sets schoolId: null for that actor type (platform admins are not
+  // scoped to any single school by design), so this check would otherwise
+  // sign every platform admin back out on every school's subdomain.
+  //
+  // Every other actor type must match exactly, including the null case —
+  // a staff/guardian/student session with no resolvable app_identities row
+  // (identitySchoolId === null) is signed out too, not waved through. An
+  // unresolvable identity is not evidence of belonging here; treating null
+  // as "skip the check" was the same class of silent-pass mistake this fix
+  // exists to close, just moved one line over.
+  const isWrongSchool =
+    !!session &&
+    !!school &&
+    actorType !== 'platform_admin' &&
+    identitySchoolId !== school.id
+
+  useEffect(() => {
+    if (isWrongSchool) {
+      setWrongSchoolBlock(true)
+      supabase.auth.signOut()
+    } else if (session && school && identitySchoolId === school.id) {
+      // Clears the sticky flag once a genuinely matching session exists —
+      // otherwise a correct login right after a wrong-school attempt, on
+      // the same mounted App instance (no full page reload in between),
+      // would stay stuck showing the stale "wrong school" message forever.
+      setWrongSchoolBlock(false)
+    }
+  }, [isWrongSchool, session, school, identitySchoolId])
 
   // Resolve current actor's staff.id (if they are staff) once a session exists.
   // Same app_identities lookup pattern used by hrService/financeService at write time;
@@ -315,15 +374,34 @@ export default function App() {
     )
   }
 
-  // ─── Not logged in → Login ─────────────────────────────────────────────
-
-  if (!session) {
+  // ─── Wrong school → sign out, do not enter this school's shell ───────
+  // Must run BEFORE the "not logged in" check below, not after. Once
+  // signOut() (fired from the effect above) resolves, session flips to
+  // null a moment later — if the !session check ran first, it would win
+  // on that next render and silently swap this message for LoginPage
+  // before the person could read it (the exact blink this ordering fixes).
+  // wrongSchoolBlock is the sticky flag that keeps this branch winning
+  // regardless of what session does afterward; isWrongSchool alone would
+  // stop being true the instant session clears (it requires !!session).
+  // ─── Wrong school, or not logged in → Login (with banner if relevant) ──
+  // Previously a separate full "Wrong school" page — replaced per owner
+  // request with a banner on the same LoginPage the person would otherwise
+  // see, so they can immediately retry with different credentials for
+  // this school without a reload. Message kept deliberately generic (not
+  // naming the person's actual correct school) per owner direction — see
+  // the isWrongSchool/useEffect block above for the reasoning on why.
+  if (isWrongSchool || wrongSchoolBlock || !session) {
     return (
       <LoginPage
         schoolId={school.id}
         schoolName={school.name}
         logoUrl={school.logo_url}
         themeColor={school.theme_color}
+        topLevelError={
+          isWrongSchool || wrongSchoolBlock
+            ? "This isn't your school — check the URL or link your school gave you."
+            : null
+        }
       />
     )
   }

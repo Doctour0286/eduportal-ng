@@ -40,11 +40,26 @@ interface LoginPageProps {
   schoolName: string
   logoUrl?: string | null
   themeColor?: string | null
+  /**
+   * Set when App.tsx's subdomain/identity mismatch check (see App.tsx's
+   * isWrongSchool) rejects an otherwise-successful login — the person's
+   * credentials worked, but the account doesn't belong to the school this
+   * subdomain resolved to, or the account's school couldn't be resolved
+   * at all. Rendered as a banner above the form rather than replacing the
+   * page, so the person can immediately retry with different credentials
+   * for this school without a reload. Kept deliberately generic (no
+   * naming of the person's actual correct school) — see MASTER_PROJECT_PLAN
+   * §12 for the reasoning: revealing a second school's name to an
+   * unverified caller is a small information leak, and a legitimate user
+   * who mistyped the URL doesn't need reminding which school they meant
+   * to log into.
+   */
+  topLevelError?: string | null
 }
 
 type TabKey = 'staff' | 'code'
 
-export function LoginPage({ schoolId, schoolName, logoUrl, themeColor }: LoginPageProps) {
+export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelError }: LoginPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('staff')
 
   // Session 23's real-contrast derivation, reused here for the logo
@@ -71,6 +86,13 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor }: LoginPa
         )}
         <h1 className="login-school-name">{schoolName}</h1>
       </div>
+
+      {topLevelError && (
+        <div className="login-top-error" role="alert">
+          <span className="login-top-error-icon" aria-hidden="true">🚫</span>
+          <span>{topLevelError}</span>
+        </div>
+      )}
 
       {/* Card — icon + title + description header, tab switcher, form */}
       <div className="login-card">
