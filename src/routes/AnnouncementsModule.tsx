@@ -42,9 +42,10 @@
  * permission-gated action.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { supabase } from '../lib/supabase'
+import { Icon } from '../components/icons'
 import {
   loadAnnouncements,
   createAnnouncement,
@@ -89,13 +90,13 @@ function audienceLabel(audience: AudienceType, className?: string | null): strin
   }
 }
 
-function audienceIcon(audience: AudienceType): string {
+function audienceIcon(audience: AudienceType): ReactNode {
   switch (audience) {
-    case 'all':        return '🌐'
-    case 'staff':      return '👩‍🏫'
-    case 'guardians':  return '👨‍👩‍👧'
-    case 'students':   return '🎒'
-    case 'class_node': return '🏫'
+    case 'all':        return <Icon name="globe" size={14} />
+    case 'staff':      return <Icon name="presentation" size={14} />
+    case 'guardians':  return <Icon name="users" size={14} />
+    case 'students':   return <Icon name="backpack" size={14} />
+    case 'class_node': return <Icon name="school" size={14} />
   }
 }
 
@@ -265,7 +266,7 @@ function AnnouncementsTab({
 
       {loadState === 'error' && (
         <div className="ann-error-state">
-          <span className="ann-error-icon">⚠️</span>
+          <span className="ann-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="ann-error-msg">{loadError}</p>
           <button className="ann-retry-btn" onClick={load}>Try again</button>
         </div>
@@ -273,7 +274,7 @@ function AnnouncementsTab({
 
       {loadState === 'ready' && announcements.length === 0 && (
         <div className="ann-empty-state">
-          <span className="ann-empty-icon">📢</span>
+          <span className="ann-empty-icon"><Icon name="megaphone" size={40} /></span>
           <p className="ann-empty-msg">
             {audienceFilter === 'all'
               ? 'No announcements yet.'
@@ -382,7 +383,7 @@ function AnnouncementDetail({
         <div className="ann-form-handle" />
 
         <div className="ann-detail-header">
-          <button className="ann-form-close" onClick={onClose} aria-label="Close">✕</button>
+          <button className="ann-form-close" onClick={onClose} aria-label="Close"><Icon name="x" size={18} /></button>
         </div>
 
         <div className="ann-detail-body">
@@ -512,7 +513,7 @@ function ComposeSheet({
         <div className="ann-form-handle" />
         <div className="ann-form-header">
           <h2 className="ann-form-title">New announcement</h2>
-          <button className="ann-form-close" onClick={onClose} aria-label="Close">✕</button>
+          <button className="ann-form-close" onClick={onClose} aria-label="Close"><Icon name="x" size={18} /></button>
         </div>
 
         <div className="ann-form-body">
@@ -706,7 +707,7 @@ function NotificationsTab({
 
       {loadState === 'error' && (
         <div className="ann-error-state">
-          <span className="ann-error-icon">⚠️</span>
+          <span className="ann-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="ann-error-msg">{loadError}</p>
           <button className="ann-retry-btn" onClick={load}>Try again</button>
         </div>
@@ -714,7 +715,7 @@ function NotificationsTab({
 
       {loadState === 'ready' && notifications.length === 0 && (
         <div className="ann-empty-state">
-          <span className="ann-empty-icon">🔔</span>
+          <span className="ann-empty-icon"><Icon name="bell" size={40} /></span>
           <p className="ann-empty-msg">You're all caught up.</p>
         </div>
       )}

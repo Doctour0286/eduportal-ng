@@ -22,16 +22,18 @@
  * intentionally out of scope this session — no `theme_mode` concept
  * exists in the schema yet (§11 2026-07-08 Session 24 entry).
  *
- * Tab icons are real inline SVGs (viewBox 0 0 24 24, stroke=currentColor,
- * stroke-width 2 — the same convention the reference app's own ICONS
- * object uses) rather than emoji, matching this problem's own "no new
- * hardcoded colors, everything token-driven" instruction. This is not
- * an attempt at Session 25's full icon-system port — just these two
- * icons, built in the same visual style so Session 25 can absorb them
- * into its shared icon module without a mismatch.
+ * Tab icons were originally built as scoped inline SVGs (Session 24) in
+ * the same visual convention as the shared icon module. Session 25
+ * absorbed them into that module as intended by this file's own prior
+ * note: "staff" tab reuses the module's real `lock` icon (this file's
+ * hand-authored badge/shackle shape turned out to be the same shape as
+ * Lucide's actual "lock" glyph), "login code" tab reuses `key`, and the
+ * password show/hide toggle reuses `eye`/`eye-off` — all sourced from
+ * `src/components/icons/index.tsx` rather than duplicated locally.
  */
 
 import { useState, type ReactNode } from 'react'
+import { Icon } from '../components/icons'
 import { loginWithEmail, loginWithCode } from '../services/authService'
 import { deriveBrandScale } from '../services/themeService'
 
@@ -89,7 +91,7 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelE
 
       {topLevelError && (
         <div className="login-top-error" role="alert">
-          <span className="login-top-error-icon" aria-hidden="true">🚫</span>
+          <span className="login-top-error-icon" aria-hidden="true" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
           <span>{topLevelError}</span>
         </div>
       )}
@@ -97,7 +99,7 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelE
       {/* Card — icon + title + description header, tab switcher, form */}
       <div className="login-card">
         <div className="login-card-icon">
-          {activeTab === 'staff' ? <IconStaff /> : <IconKey />}
+          {activeTab === 'staff' ? <Icon name="lock" size={28} /> : <Icon name="key" size={28} />}
         </div>
         <p className="login-card-title">
           {activeTab === 'staff' ? 'Staff sign in' : 'Login code'}
@@ -114,13 +116,13 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelE
             active={activeTab === 'staff'}
             onClick={() => setActiveTab('staff')}
             label="Staff"
-            icon={<IconStaff />}
+            icon={<Icon name="lock" size={18} />}
           />
           <TabButton
             active={activeTab === 'code'}
             onClick={() => setActiveTab('code')}
             label="Login code"
-            icon={<IconKey />}
+            icon={<Icon name="key" size={18} />}
           />
         </div>
 
@@ -131,49 +133,6 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelE
         </div>
       </div>
     </div>
-  )
-}
-
-// ─── Icons (viewBox 0 0 24 24, stroke=currentColor, stroke-width 2 —
-//      matches the reference app's own ICONS convention) ────────────────
-
-function IconStaff() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="11" width="18" height="11" rx="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    </svg>
-  )
-}
-
-function IconKey() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="8" cy="15" r="4" />
-      <path d="M10.5 12.5 20 3M17 6l3 3M14 9l2 2" />
-    </svg>
-  )
-}
-
-// Password-visibility toggle icons — Session 24, same viewBox/stroke
-// convention as IconStaff/IconKey above (not a pre-emption of Session
-// 25's full icon-system port, same scoping note as those two).
-
-function IconEye() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  )
-}
-
-function IconEyeOff() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-10.5-7-10.5-7a18.4 18.4 0 0 1 4.22-5.19M9.9 4.24A9.13 9.13 0 0 1 12 5c7 0 10.5 7 10.5 7a18.4 18.4 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-      <line x1="1" y1="1" x2="23" y2="23" />
-    </svg>
   )
 }
 
@@ -272,7 +231,7 @@ function StaffLoginForm() {
             aria-pressed={showPassword}
             tabIndex={-1}
           >
-            {showPassword ? <IconEyeOff /> : <IconEye />}
+            {showPassword ? <Icon name="eye-off" size={18} /> : <Icon name="eye" size={18} />}
           </button>
         </div>
       </label>

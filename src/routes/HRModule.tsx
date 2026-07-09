@@ -53,6 +53,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { Icon } from '../components/icons'
 import { useAuthStore } from '../stores/authStore'
 import {
   loadStaffList,
@@ -1381,7 +1382,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
     if (staffState === 'error') {
       return (
         <div className="hr-error-state">
-          <span className="hr-error-icon">⚠️</span>
+          <span className="hr-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
           <p className="hr-error-msg">{staffError}</p>
           <button className="hr-retry-btn" onClick={loadStaff}>Retry</button>
         </div>
@@ -1390,7 +1391,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
     if (staffState === 'empty') {
       return (
         <div className="hr-empty-state">
-          <span className="hr-empty-icon">👥</span>
+          <span className="hr-empty-icon"><Icon name="users" /></span>
           <p className="hr-empty-msg">No staff records yet.</p>
         </div>
       )
@@ -1398,7 +1399,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
     if (filteredStaff.length === 0) {
       return (
         <div className="hr-empty-state hr-empty-state--search">
-          <span className="hr-empty-icon">🔍</span>
+          <span className="hr-empty-icon"><Icon name="search" /></span>
           <p className="hr-empty-msg">No staff match "{searchQuery}".</p>
         </div>
       )
@@ -1458,13 +1459,13 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           </div>
         ) : leaveState === 'error' ? (
           <div className="hr-error-state">
-            <span className="hr-error-icon">⚠️</span>
+            <span className="hr-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
             <p className="hr-error-msg">{leaveError}</p>
             <button className="hr-retry-btn" onClick={loadLeaveList}>Retry</button>
           </div>
         ) : leaveState === 'empty' || leaveRequests.length === 0 ? (
           <div className="hr-empty-state">
-            <span className="hr-empty-icon">🗓️</span>
+            <span className="hr-empty-icon"><Icon name="calendar" /></span>
             <p className="hr-empty-msg">
               {leaveFilter ? `No ${leaveFilter} leave requests.` : 'No leave requests yet.'}
             </p>
@@ -1667,7 +1668,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           <div className="hr-form-handle" />
           <div className="hr-form-header">
             <h3 className="hr-form-title">{isEdit ? 'Edit leave type' : 'Add leave type'}</h3>
-            <button className="hr-form-close" onClick={() => { setLeaveTypeFormOpen(false); setEditingLeaveTypeId(null) }} aria-label="Close">✕</button>
+            <button className="hr-form-close" onClick={() => { setLeaveTypeFormOpen(false); setEditingLeaveTypeId(null) }} aria-label="Close"><Icon name="x" /></button>
           </div>
           <div className="hr-form-body">
             <div className="hr-field">
@@ -1755,7 +1756,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           onClick={() => setDueThisMonthOpen(o => !o)}
           aria-expanded={dueThisMonthOpen}
         >
-          <span>💰 Who's due for payment</span>
+          <span><Icon name="wallet" size={16} style={{ verticalAlign: 'text-bottom', marginRight: '0.35em' }} /> Who's due for payment</span>
           <span className="hr-due-panel-chevron">{dueThisMonthOpen ? '▾' : '▸'}</span>
         </button>
 
@@ -1788,7 +1789,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
               </div>
             ) : dueThisMonthState === 'error' ? (
               <div className="hr-error-state">
-                <span className="hr-error-icon">⚠️</span>
+                <span className="hr-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
                 <p className="hr-error-msg">{dueThisMonthError}</p>
                 <button className="hr-retry-btn" onClick={loadDueThisMonth}>Retry</button>
               </div>
@@ -1831,13 +1832,13 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           </div>
         ) : payrollState === 'error' ? (
           <div className="hr-error-state">
-            <span className="hr-error-icon">⚠️</span>
+            <span className="hr-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
             <p className="hr-error-msg">{payrollError}</p>
             <button className="hr-retry-btn" onClick={loadPayrollList}>Retry</button>
           </div>
         ) : payrollState === 'empty' || payrollRuns.length === 0 ? (
           <div className="hr-empty-state">
-            <span className="hr-empty-icon">🧾</span>
+            <span className="hr-empty-icon"><Icon name="receipt" /></span>
             <p className="hr-empty-msg">
               No payroll runs yet.{canRunPayroll ? ' Create a run to start paying staff.' : ''}
             </p>
@@ -1883,7 +1884,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           <div className="hr-form-handle" />
           <div className="hr-form-header">
             <h3 className="hr-form-title">New payroll run</h3>
-            <button className="hr-form-close" onClick={() => setRunFormOpen(false)} aria-label="Close">✕</button>
+            <button className="hr-form-close" onClick={() => setRunFormOpen(false)} aria-label="Close"><Icon name="x" /></button>
           </div>
           <div className="hr-form-body">
             <div className="hr-field">
@@ -1959,7 +1960,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
               <p className="hr-detail-name">{s.full_name}</p>
               <p className="hr-detail-sub">{s.roles.length > 0 ? s.roles.join(', ') : 'No role assigned'}</p>
             </div>
-            <button className="hr-form-close" onClick={closeStaffDetail} aria-label="Close">✕</button>
+            <button className="hr-form-close" onClick={closeStaffDetail} aria-label="Close"><Icon name="x" /></button>
           </div>
 
           <div className="hr-detail-tabs">
@@ -2286,7 +2287,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
                               onClick={() => toggleEditFormAssignment(p.subjectId, p.classNodeId)}
                               aria-label={`Remove ${subjectName} for ${className}`}
                             >
-                              ✕
+                              <Icon name="x" size={14} />
                             </button>
                           </li>
                         )
@@ -2326,7 +2327,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
       return (
         <div className="hr-detail-tab-content">
           <div className="hr-empty-state hr-empty-state--detail">
-            <span className="hr-empty-icon">💰</span>
+            <span className="hr-empty-icon"><Icon name="wallet" /></span>
             <p className="hr-empty-msg">No salary structure set up yet.</p>
           </div>
           {canManageStaff && (
@@ -2459,7 +2460,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
                 value={a.amount || ''}
                 onChange={e => updateAllowanceRow(i, 'amount', e.target.value)}
               />
-              <button className="hr-line-item-remove" onClick={() => removeAllowanceRow(i)} aria-label="Remove allowance">✕</button>
+              <button className="hr-line-item-remove" onClick={() => removeAllowanceRow(i)} aria-label="Remove allowance"><Icon name="x" size={14} /></button>
             </div>
           ))}
           <button className="hr-line-item-add" onClick={addAllowanceRow}>+ Add allowance</button>
@@ -2485,7 +2486,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
                 value={d.amount || ''}
                 onChange={e => updateDeductionRow(i, 'amount', e.target.value)}
               />
-              <button className="hr-line-item-remove" onClick={() => removeDeductionRow(i)} aria-label="Remove deduction">✕</button>
+              <button className="hr-line-item-remove" onClick={() => removeDeductionRow(i)} aria-label="Remove deduction"><Icon name="x" size={14} /></button>
             </div>
           ))}
           <button className="hr-line-item-add" onClick={addDeductionRow}>+ Add deduction</button>
@@ -2552,7 +2553,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           <div className="hr-add-payslip-panel">
             <div className="hr-add-payslip-header">
               <span className="hr-label">Add payslip(s)</span>
-              <button className="hr-form-close" onClick={() => setAddPayslipOpen(false)} aria-label="Close">✕</button>
+              <button className="hr-form-close" onClick={() => setAddPayslipOpen(false)} aria-label="Close"><Icon name="x" /></button>
             </div>
 
             {addPayslipResult && <p className="hr-empty-msg" style={{ textAlign: 'left' }}>{addPayslipResult}</p>}
@@ -2592,7 +2593,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
               </div>
             ) : eligibleState === 'error' ? (
               <div className="hr-error-state">
-                <span className="hr-error-icon">⚠️</span>
+                <span className="hr-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
                 <p className="hr-error-msg">{eligibleError}</p>
                 <button className="hr-retry-btn" onClick={openAddPayslip}>Retry</button>
               </div>
@@ -2654,7 +2655,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
                 <span className={`hr-payroll-status hr-payroll-status--${run.status}`}>{statusLabel(run.status)}</span>
               </p>
             </div>
-            <button className="hr-form-close" onClick={closeRunDetail} aria-label="Close">✕</button>
+            <button className="hr-form-close" onClick={closeRunDetail} aria-label="Close"><Icon name="x" /></button>
           </div>
 
           <div className="hr-detail-body">
@@ -2714,7 +2715,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
                 <p className="hr-form-error" role="alert">{runDetailError}</p>
               ) : detailPayslips.length === 0 ? (
                 <div className="hr-empty-state hr-empty-state--detail">
-                  <span className="hr-empty-icon">🧾</span>
+                  <span className="hr-empty-icon"><Icon name="receipt" /></span>
                   <p className="hr-empty-msg">No payslips added to this run yet.</p>
                 </div>
               ) : (

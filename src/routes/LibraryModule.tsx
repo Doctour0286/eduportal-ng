@@ -53,7 +53,8 @@
  * the handler. Fixed to match, for consistency with §4.3/§4.12 discipline.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type ReactNode } from 'react'
+import { Icon } from '../components/icons'
 import { useAuthStore } from '../stores/authStore'
 import { supabase } from '../lib/supabase'
 import {
@@ -204,19 +205,19 @@ function OverviewPane({ schoolId }: { schoolId: string }) {
   if (error || !stats) {
     return (
       <div className="lib-error">
-        <span className="lib-error-icon">⚠️</span>
+        <span className="lib-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
         <p>{error ?? 'Could not load library overview.'}</p>
       </div>
     )
   }
 
   const cards = [
-    { label: 'Total titles', value: stats.total_titles, icon: '📖', accent: 'blue' },
-    { label: 'Total copies', value: stats.total_copies, icon: '📚', accent: 'teal' },
-    { label: 'Available', value: stats.available_copies, icon: '✅', accent: 'green' },
-    { label: 'Borrowed', value: stats.borrowed_copies, icon: '🔄', accent: 'amber' },
-    { label: 'Overdue', value: stats.overdue_count, icon: '⏰', accent: stats.overdue_count > 0 ? 'red' : 'neutral' },
-    { label: 'Unpaid fines', value: stats.unpaid_fines, icon: '💰', accent: stats.unpaid_fines > 0 ? 'red' : 'neutral' },
+    { label: 'Total titles', value: stats.total_titles, icon: <Icon name="book-open" />, accent: 'blue' },
+    { label: 'Total copies', value: stats.total_copies, icon: <Icon name="book" />, accent: 'teal' },
+    { label: 'Available', value: stats.available_copies, icon: <Icon name="circle-check" />, accent: 'green' },
+    { label: 'Borrowed', value: stats.borrowed_copies, icon: <Icon name="refresh-cw" />, accent: 'amber' },
+    { label: 'Overdue', value: stats.overdue_count, icon: <Icon name="alarm-clock" />, accent: stats.overdue_count > 0 ? 'red' : 'neutral' },
+    { label: 'Unpaid fines', value: stats.unpaid_fines, icon: <Icon name="wallet" />, accent: stats.unpaid_fines > 0 ? 'red' : 'neutral' },
   ]
 
   return (
@@ -237,7 +238,7 @@ function OverviewPane({ schoolId }: { schoolId: string }) {
         <div className="lib-overview-alerts">
           {stats.overdue_count > 0 && (
             <div className="lib-alert lib-alert--warn">
-              <span>⏰</span>
+              <span><Icon name="alarm-clock" /></span>
               <span>
                 {stats.overdue_count} book{stats.overdue_count !== 1 ? 's are' : ' is'} overdue.
                 Check the <strong>Overdue</strong> tab to follow up.
@@ -246,7 +247,7 @@ function OverviewPane({ schoolId }: { schoolId: string }) {
           )}
           {stats.unpaid_fines > 0 && (
             <div className="lib-alert lib-alert--warn">
-              <span>💰</span>
+              <span><Icon name="wallet" /></span>
               <span>
                 {stats.unpaid_fines} unpaid fine{stats.unpaid_fines !== 1 ? 's' : ''} outstanding.
               </span>
@@ -443,7 +444,7 @@ function CataloguePane({
   if (error) {
     return (
       <div className="lib-error">
-        <span className="lib-error-icon">⚠️</span>
+        <span className="lib-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
         <p>{error}</p>
         <button className="lib-retry-btn" onClick={load}>Retry</button>
       </div>
@@ -458,7 +459,7 @@ function CataloguePane({
           <div className="lib-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="lib-sheet-header">
               <h2 className="lib-sheet-title">{editingTitle ? 'Edit book' : 'Add book'}</h2>
-              <button className="lib-sheet-close" onClick={() => setShowTitleForm(false)}>✕</button>
+              <button className="lib-sheet-close" onClick={() => setShowTitleForm(false)} aria-label="Close"><Icon name="x" /></button>
             </div>
             <div className="lib-form">
               <label className="lib-label">Title <span className="lib-required">*</span></label>
@@ -523,7 +524,7 @@ function CataloguePane({
           <div className="lib-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="lib-sheet-header">
               <h2 className="lib-sheet-title">Copies — {openCopiesFor.title}</h2>
-              <button className="lib-sheet-close" onClick={() => setOpenCopiesFor(null)}>✕</button>
+              <button className="lib-sheet-close" onClick={() => setOpenCopiesFor(null)} aria-label="Close"><Icon name="x" /></button>
             </div>
             <div className="lib-form">
               {copiesLoading ? (
@@ -611,7 +612,7 @@ function CataloguePane({
       {/* Book list */}
       {filtered.length === 0 ? (
         <div className="lib-empty">
-          <span className="lib-empty-icon">📖</span>
+          <span className="lib-empty-icon"><Icon name="book-open" /></span>
           <p className="lib-empty-msg">
             {books.length === 0
               ? 'No books in the catalogue yet. Add your first book to get started.'
@@ -629,7 +630,7 @@ function CataloguePane({
                 <div className="lib-book-cover">
                   {b.cover_url
                     ? <img src={b.cover_url} alt={b.title} className="lib-book-cover-img" />
-                    : <span className="lib-book-cover-placeholder">📖</span>
+                    : <span className="lib-book-cover-placeholder"><Icon name="book-open" /></span>
                   }
                 </div>
               </div>
@@ -653,16 +654,18 @@ function CataloguePane({
                   className="lib-icon-btn"
                   onClick={() => openCopies(b)}
                   title="Manage copies"
+                  aria-label="Manage copies"
                 >
-                  📋
+                  <Icon name="clipboard-list" size={16} />
                 </button>
                 {canManage && (
                   <button
                     className="lib-icon-btn"
                     onClick={() => openEditTitle(b)}
                     title="Edit book details"
+                    aria-label="Edit book details"
                   >
-                    ✏️
+                    <Icon name="pencil" size={16} />
                   </button>
                 )}
               </div>
@@ -839,7 +842,7 @@ function BorrowingPane({
   if (error) {
     return (
       <div className="lib-error">
-        <span className="lib-error-icon">⚠️</span>
+        <span className="lib-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
         <p>{error}</p>
         <button className="lib-retry-btn" onClick={load}>Retry</button>
       </div>
@@ -868,7 +871,7 @@ function BorrowingPane({
       {view === 'active' ? (
         borrows.length === 0 ? (
           <div className="lib-empty">
-            <span className="lib-empty-icon">📚</span>
+            <span className="lib-empty-icon"><Icon name="book" /></span>
             <p className="lib-empty-msg">No books are currently borrowed.</p>
           </div>
         ) : (
@@ -923,7 +926,7 @@ function BorrowingPane({
           {copySearchError && <p className="lib-field-error">{copySearchError}</p>}
           {copyFound && copyFound.status === 'available' && (
             <div className="lib-copy-found">
-              <span className="lib-copy-found-icon">✅</span>
+              <span className="lib-copy-found-icon" style={{ color: 'var(--color-success)' }}><Icon name="circle-check" /></span>
               <div>
                 <p className="lib-copy-found-title">{copyFound.title}</p>
                 <p className="lib-copy-found-sub">
@@ -951,12 +954,12 @@ function BorrowingPane({
           </div>
           {selectedBorrower ? (
             <div className="lib-copy-found">
-              <span className="lib-copy-found-icon">👤</span>
+              <span className="lib-copy-found-icon"><Icon name="user" /></span>
               <div>
                 <p className="lib-copy-found-title">{selectedBorrower.name}</p>
                 <p className="lib-copy-found-sub">{borrowerType}</p>
               </div>
-              <button className="lib-clear-btn" onClick={() => { setSelectedBorrower(null); setBorrowerSearch('') }}>✕</button>
+              <button className="lib-clear-btn" onClick={() => { setSelectedBorrower(null); setBorrowerSearch('') }} aria-label="Clear selected borrower"><Icon name="x" size={14} /></button>
             </div>
           ) : (
             <>
@@ -1073,7 +1076,7 @@ function OverduePane({ schoolId, canManageFines }: { schoolId: string; canManage
   if (error) {
     return (
       <div className="lib-error">
-        <span className="lib-error-icon">⚠️</span>
+        <span className="lib-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
         <p>{error}</p>
         <button className="lib-retry-btn" onClick={load}>Retry</button>
       </div>
@@ -1100,7 +1103,7 @@ function OverduePane({ schoolId, canManageFines }: { schoolId: string; canManage
       {view === 'overdue' ? (
         borrows.length === 0 ? (
           <div className="lib-empty">
-            <span className="lib-empty-icon">✅</span>
+            <span className="lib-empty-icon" style={{ color: 'var(--color-success)' }}><Icon name="circle-check" /></span>
             <p className="lib-empty-msg">No overdue books. Good.</p>
           </div>
         ) : (
@@ -1149,7 +1152,7 @@ function OverduePane({ schoolId, canManageFines }: { schoolId: string; canManage
       ) : (
         fines.length === 0 ? (
           <div className="lib-empty">
-            <span className="lib-empty-icon">✅</span>
+            <span className="lib-empty-icon" style={{ color: 'var(--color-success)' }}><Icon name="circle-check" /></span>
             <p className="lib-empty-msg">No unpaid fines at the moment.</p>
           </div>
         ) : (
@@ -1223,12 +1226,12 @@ function DigitalPane() {
     load(tagId)
   }
 
-  const resourceTypeIcon: Record<string, string> = {
-    pdf: '📄',
-    docx: '📝',
-    image: '🖼️',
-    embedded_link: '🔗',
-    video: '🎥',
+  const resourceTypeIcon: Record<string, ReactNode> = {
+    pdf: <Icon name="file" size={18} />,
+    docx: <Icon name="file-text" size={18} />,
+    image: <Icon name="image" size={18} />,
+    embedded_link: <Icon name="link" size={18} />,
+    video: <Icon name="video" size={18} />,
   }
 
   const filtered = resources.filter((r) =>
@@ -1281,12 +1284,12 @@ function DigitalPane() {
         </div>
       ) : error ? (
         <div className="lib-error">
-          <span className="lib-error-icon">⚠️</span>
+          <span className="lib-error-icon" style={{ color: 'var(--color-warning)' }}><Icon name="alert-triangle" /></span>
           <p>{error}</p>
         </div>
       ) : filtered.length === 0 ? (
         <div className="lib-empty">
-          <span className="lib-empty-icon">🔍</span>
+          <span className="lib-empty-icon"><Icon name="search" /></span>
           <p className="lib-empty-msg">
             {resources.length === 0
               ? 'No digital resources have been uploaded yet.'
@@ -1298,7 +1301,7 @@ function DigitalPane() {
           {filtered.map((r) => (
             <div key={r.id} className="lib-resource-card">
               <div className="lib-resource-type-icon">
-                {resourceTypeIcon[r.resource_type] ?? '📁'}
+                {resourceTypeIcon[r.resource_type] ?? <Icon name="folder" size={18} />}
               </div>
               <div className="lib-resource-info">
                 <p className="lib-resource-title">{r.title}</p>

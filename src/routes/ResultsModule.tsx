@@ -52,6 +52,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from '../components/icons'
 import {
   loadCurrentSession,
   loadTermsForSession,
@@ -385,7 +386,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     if (bootState === 'error') {
       return (
         <div className="res-error-state">
-          <span className="res-error-icon">⚠️</span>
+          <span className="res-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="res-error-msg">{bootError}</p>
           <button className="res-retry-btn" onClick={() => window.location.reload()}>Retry</button>
         </div>
@@ -394,7 +395,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     if (bootState === 'empty') {
       return (
         <div className="res-empty-state">
-          <span className="res-empty-icon">📚</span>
+          <span className="res-empty-icon"><Icon name="book" /></span>
           <p className="res-empty-msg">
             {isAdmin
               ? 'No teaching assignments set up for this session yet.'
@@ -450,9 +451,9 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     return (
       <div className="res-approve-bar">
         <div className="res-approve-status">
-          {allApproved && <span className="res-approve-badge res-approve-badge--locked">🔒 Approved</span>}
-          {!allApproved && isComplete && <span className="res-approve-badge res-approve-badge--ready">✓ Ready to approve</span>}
-          {!allApproved && !isComplete && <span className="res-approve-badge res-approve-badge--incomplete">⚠ Incomplete</span>}
+          {allApproved && <span className="res-approve-badge res-approve-badge--locked"><Icon name="lock" size={14} /> Approved</span>}
+          {!allApproved && isComplete && <span className="res-approve-badge res-approve-badge--ready"><Icon name="circle-check" size={14} style={{ color: 'var(--color-success, #16a34a)' }} /> Ready to approve</span>}
+          {!allApproved && !isComplete && <span className="res-approve-badge res-approve-badge--incomplete"><Icon name="alert-triangle" size={14} style={{ color: 'var(--color-warning, #d97706)' }} /> Incomplete</span>}
         </div>
         <button
           className={['res-approve-btn', anyApproved ? 'res-approve-btn--unapprove' : 'res-approve-btn--approve'].join(' ')}
@@ -480,9 +481,9 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     return (
       <td key={component.id} className="res-score-cell">
         <div className="res-score-cell-inner">
-          {isSaving && <span className="res-cell-saving" aria-label="Saving">⟳</span>}
-          {errMsg   && <span className="res-cell-error" title={errMsg}>✕</span>}
-          {isQueued && !isSaving && <span className="res-cell-queued" title="Saved offline — will sync when reconnected">☁</span>}
+          {isSaving && <span className="res-cell-saving" aria-label="Saving"><Icon name="refresh-cw" size={14} /></span>}
+          {errMsg   && <span className="res-cell-error" role="img" aria-label={errMsg} title={errMsg}><Icon name="x" size={14} style={{ color: 'var(--color-error, #dc2626)' }} /></span>}
+          {isQueued && !isSaving && <span className="res-cell-queued" role="img" aria-label="Saved offline, will sync when reconnected" title="Saved offline — will sync when reconnected"><Icon name="cloud" size={14} /></span>}
           <input
             type="number"
             className={[
@@ -501,7 +502,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
             aria-label={`${student.full_name} — ${component.name}`}
             title={!canEdit ? 'You do not have permission to enter scores for this class' : undefined}
           />
-          {isLocked && <span className="res-lock-icon" title="Approved — locked">🔒</span>}
+          {isLocked && <span className="res-lock-icon" role="img" aria-label="Approved, locked" title="Approved — locked"><Icon name="lock" size={14} /></span>}
         </div>
       </td>
     )
@@ -528,7 +529,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     if (!selectedAssign) {
       return (
         <div className="res-empty-state res-empty-state--prompt">
-          <span className="res-empty-icon">📊</span>
+          <span className="res-empty-icon"><Icon name="bar-chart" /></span>
           <p className="res-empty-msg">Select a subject and class above to enter scores.</p>
         </div>
       )
@@ -547,7 +548,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     if (gridState === 'error') {
       return (
         <div className="res-error-state">
-          <span className="res-error-icon">⚠️</span>
+          <span className="res-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="res-error-msg">{gridError}</p>
           <button className="res-retry-btn" onClick={loadGrid}>Retry</button>
         </div>
@@ -557,7 +558,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
     if (gridState === 'empty') {
       return (
         <div className="res-empty-state">
-          <span className="res-empty-icon">👥</span>
+          <span className="res-empty-icon"><Icon name="users" /></span>
           <p className="res-empty-msg">No students enrolled in {selectedAssign.class_node_name} yet.</p>
           {isAdmin && <p className="res-empty-sub">Add students in the Students module.</p>}
         </div>
@@ -602,7 +603,7 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
         <div className="res-header-top">
           <h2 className="res-title">Results</h2>
           {session && <span className="res-session-label">{session.name}</span>}
-          {!isOnline && <span className="res-offline-badge">☁ offline</span>}
+          {!isOnline && <span className="res-offline-badge"><Icon name="cloud" size={14} /> offline</span>}
         </div>
 
         {/* Assignment selector */}

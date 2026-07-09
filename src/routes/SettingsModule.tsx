@@ -34,6 +34,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { applyBrandTheme } from '../services/themeService'
+import { Icon } from '../components/icons'
 import {
   loadSchoolSettings,       updateSchoolSettings,
   loadPublicConfig,         savePublicConfig,
@@ -68,16 +69,16 @@ import {
 
 type SettingsTab = 'school' | 'calendar' | 'schedule' | 'classes' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
-const TABS: { id: SettingsTab; label: string; icon: string }[] = [
-  { id: 'school',        label: 'School',        icon: '🏫' },
-  { id: 'calendar',      label: 'Sessions',      icon: '📅' },
-  { id: 'schedule',      label: 'Schedule',      icon: '⏰' },
-  { id: 'classes',       label: 'Classes',       icon: '🏷️' },
-  { id: 'subjects',      label: 'Subjects',      icon: '📖' },
-  { id: 'roles',         label: 'Roles',         icon: '🔑' },
-  { id: 'student-roles', label: 'Student roles', icon: '🎓' },
-  { id: 'staff',         label: 'Staff',         icon: '👥' },
-  { id: 'audit',         label: 'Audit log',     icon: '📋' },
+const TABS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
+  { id: 'school',        label: 'School',        icon: <Icon name="school" size={18} /> },
+  { id: 'calendar',      label: 'Sessions',      icon: <Icon name="calendar" size={18} /> },
+  { id: 'schedule',      label: 'Schedule',      icon: <Icon name="clock" size={18} /> },
+  { id: 'classes',       label: 'Classes',       icon: <Icon name="tag" size={18} /> },
+  { id: 'subjects',      label: 'Subjects',      icon: <Icon name="book-open" size={18} /> },
+  { id: 'roles',         label: 'Roles',         icon: <Icon name="key" size={18} /> },
+  { id: 'student-roles', label: 'Student roles', icon: <Icon name="graduation-cap" size={18} /> },
+  { id: 'staff',         label: 'Staff',         icon: <Icon name="users" size={18} /> },
+  { id: 'audit',         label: 'Audit log',     icon: <Icon name="clipboard-list" size={18} /> },
 ]
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -133,7 +134,7 @@ function SaveBar({ saving, saved, error, onSave }: { saving: boolean; saved: boo
   return (
     <div className="set-save-bar">
       {error && <p className="set-save-error">{error}</p>}
-      {saved && !error && <p className="set-save-ok">✓ Saved</p>}
+      {saved && !error && <p className="set-save-ok"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> Saved</p>}
       <button className="set-save-btn" onClick={onSave} disabled={saving}>
         {saving ? 'Saving…' : 'Save changes'}
       </button>
@@ -203,7 +204,7 @@ function Skeleton({ lines = 4 }: { lines?: number }) {
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="set-error-state">
-      <span className="set-error-icon">⚠️</span>
+      <span className="set-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
       <p className="set-error-msg">{message}</p>
       <button className="set-retry-btn" onClick={onRetry}>Retry</button>
     </div>
@@ -848,7 +849,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
           </div>
           <div className="set-save-bar set-save-bar--inline">
             {daysError && <p className="set-save-error">{daysError}</p>}
-            {daysSaved && <p className="set-save-ok">✓ Saved</p>}
+            {daysSaved && <p className="set-save-ok"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> Saved</p>}
             <button className="set-save-btn" onClick={handleSaveDays} disabled={daysSaving}>{daysSaving ? 'Saving…' : 'Save week days'}</button>
           </div>
         </>
@@ -872,7 +873,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
             </div>
             <div className="set-list-row-actions">
               <button className="set-edit-btn" onClick={() => openPeriodForm(p)}>Edit</button>
-              <button className="set-delete-btn" onClick={() => handleDeletePeriod(p.id)}>✕</button>
+              <button className="set-delete-btn" onClick={() => handleDeletePeriod(p.id)} aria-label={`Delete period ${p.label}`}><Icon name="x" size={16} /></button>
             </div>
           </div>
         ))
@@ -933,7 +934,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
             </div>
             <div className="set-list-row-actions">
               <button className="set-edit-btn" onClick={() => openCalForm('single', d)}>Edit</button>
-              <button className="set-delete-btn" onClick={() => handleDeleteCalDay(d.id)}>✕</button>
+              <button className="set-delete-btn" onClick={() => handleDeleteCalDay(d.id)} aria-label={`Delete ${d.calendar_date}`}><Icon name="x" size={16} /></button>
             </div>
           </div>
         ))
@@ -987,7 +988,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
             </p>
 
             {calFormError && <p className="set-form-error">{calFormError}</p>}
-            {calBulkResult && <p className="set-save-ok">✓ {calBulkResult}</p>}
+            {calBulkResult && <p className="set-save-ok"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> {calBulkResult}</p>}
 
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowCalForm(false)}>
@@ -1313,8 +1314,8 @@ function RolesTab({ schoolId }: { schoolId: string }) {
             </div>
             <div className="set-list-row-actions">
               <button className="set-edit-btn" onClick={() => openForm(r)}>Edit</button>
-              <button className="set-delete-btn" onClick={() => handleDelete(r.id, r.name)} disabled={deleting === r.id}>
-                {deleting === r.id ? '…' : '✕'}
+              <button className="set-delete-btn" onClick={() => handleDelete(r.id, r.name)} disabled={deleting === r.id} aria-label={`Delete role ${r.name}`}>
+                {deleting === r.id ? '…' : <Icon name="x" size={16} />}
               </button>
             </div>
           </div>
@@ -1470,8 +1471,8 @@ function StudentRolesTab({ schoolId }: { schoolId: string }) {
             </div>
             <div className="set-list-row-actions">
               <button className="set-edit-btn" onClick={() => openForm(r)}>Edit</button>
-              <button className="set-delete-btn" onClick={() => handleDelete(r.id, r.name)} disabled={deleting === r.id}>
-                {deleting === r.id ? '…' : '✕'}
+              <button className="set-delete-btn" onClick={() => handleDelete(r.id, r.name)} disabled={deleting === r.id} aria-label={`Delete student role ${r.name}`}>
+                {deleting === r.id ? '…' : <Icon name="x" size={16} />}
               </button>
             </div>
           </div>

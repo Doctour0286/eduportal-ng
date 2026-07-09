@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useState, useCallback, useRef, type TouchEvent as ReactTouchEvent } from 'react'
+import { Icon } from '../components/icons'
 import {
   loadPortalIdentity,
   loadCurrentSession,
@@ -145,7 +146,7 @@ export default function GuardianPortal({ schoolId, authUserId, initialTab }: Gua
   if (bootState === 'error') {
     return (
       <div className="port-error-state">
-        <span className="port-error-icon">⚠️</span>
+        <span className="port-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
         <p className="port-error-text">Couldn't load your portal. Check your connection, then try again.</p>
         <button className="port-retry-btn" onClick={boot}>Retry</button>
       </div>
@@ -155,7 +156,7 @@ export default function GuardianPortal({ schoolId, authUserId, initialTab }: Gua
   if (bootState === 'no-children') {
     return (
       <div className="port-empty-state">
-        <span className="port-empty-icon">👨‍👩‍👧</span>
+        <span className="port-empty-icon"><Icon name="users" size={40} /></span>
         <p className="port-empty-title">No linked children yet</p>
         <p className="port-empty-desc">
           Once the school links a student to your account, their results, attendance, and fees will appear here.

@@ -4,10 +4,11 @@
 //          scores (pending approval), leave_requests (pending), announcements (recent)
 // All queries are school-scoped automatically via RLS.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
 import { useSchoolStore } from '../stores/schoolStore';
 import { useAuthStore } from '../stores/authStore';
+import { Icon } from '../components/icons';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ interface StatCardProps {
   label: string;
   value: string | number;
   sub?: string;
-  icon: string;
+  icon: ReactNode;
   loading: boolean;
   accent?: 'green' | 'blue' | 'amber' | 'purple';
 }
@@ -92,7 +93,7 @@ function ActionBadge({ item, onClick }: { item: ActionItem; onClick: () => void 
 // ─── Quick Action Button ──────────────────────────────────────────────────────
 
 interface QuickActionProps {
-  icon: string;
+  icon: ReactNode;
   label: string;
   onClick: () => void;
 }
@@ -160,16 +161,10 @@ function todayDateString(): string {
 // Every value here must stay in sync with App.tsx's NavTab values by name.
 type DashboardNavTarget = 'students' | 'finance' | 'attendance' | 'timetable' | 'results' | 'hr' | 'announcements'
 
-// Mirrors App.tsx's NavIntent shape — kept as a local subset for the same
-// reason DashboardNavTarget is local (avoid a circular import). Only the
-// three intents wired in this file are listed; additive, non-breaking change
-// to the onNavigate signature per PRD Problem 2.2c.
-type DashboardNavIntent = { intent?: 'add_student' | 'record_payment' | 'mark_attendance' }
-
 export default function AdminDashboard({
   onNavigate,
 }: {
-  onNavigate: (tab: DashboardNavTarget, intent?: DashboardNavIntent) => void
+  onNavigate: (tab: DashboardNavTarget) => void
 }) {
   const school = useSchoolStore((s) => s.school);
   const session = useAuthStore((s) => s.session);
@@ -344,7 +339,7 @@ export default function AdminDashboard({
   if (error) {
     return (
       <div className="dash-error-state">
-        <div className="dash-error-icon">⚠️</div>
+        <div className="dash-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></div>
         <div className="dash-error-msg">{error}</div>
         <button
           className="btn btn-primary"
@@ -393,7 +388,7 @@ export default function AdminDashboard({
             label="Students"
             value={stats?.totalStudents ?? 0}
             sub="enrolled and active"
-            icon="🎓"
+            icon={<Icon name="graduation-cap" size={22} />}
             loading={statsLoading}
             accent="blue"
           />
@@ -401,7 +396,7 @@ export default function AdminDashboard({
             label="Staff"
             value={stats?.totalStaff ?? 0}
             sub="active members"
-            icon="👩‍🏫"
+            icon={<Icon name="presentation" size={22} />}
             loading={statsLoading}
             accent="purple"
           />
@@ -409,7 +404,7 @@ export default function AdminDashboard({
             label="Attendance today"
             value={statsLoading ? '—' : stats?.todayAttendanceMarked === 0 ? 'Not marked' : attendancePct !== null ? `${attendancePct}%` : '—'}
             sub={attendanceSub}
-            icon="✅"
+            icon={<Icon name="circle-check" size={22} />}
             loading={statsLoading}
             accent={
               attendancePct === null
@@ -423,7 +418,7 @@ export default function AdminDashboard({
             label="Fees collected"
             value={statsLoading ? '—' : formatNaira(stats?.sessionPaymentsTotal ?? 0)}
             sub="all completed payments"
-            icon="💰"
+            icon={<Icon name="wallet" size={22} />}
             loading={statsLoading}
             accent="green"
           />
@@ -435,22 +430,22 @@ export default function AdminDashboard({
         <div className="dash-section-label">Quick actions</div>
         <div className="dash-quick-grid">
           <QuickAction
-            icon="➕"
+            icon={<Icon name="plus" size={20} />}
             label="Add student"
-            onClick={() => onNavigate('students', { intent: 'add_student' })}
+            onClick={() => onNavigate('students')}
           />
           <QuickAction
-            icon="💳"
+            icon={<Icon name="credit-card" size={20} />}
             label="Record payment"
-            onClick={() => onNavigate('finance', { intent: 'record_payment' })}
+            onClick={() => onNavigate('finance')}
           />
           <QuickAction
-            icon="📋"
+            icon={<Icon name="clipboard-list" size={20} />}
             label="Mark attendance"
-            onClick={() => onNavigate('attendance', { intent: 'mark_attendance' })}
+            onClick={() => onNavigate('attendance')}
           />
           <QuickAction
-            icon="📅"
+            icon={<Icon name="calendar" size={20} />}
             label="View timetable"
             onClick={() => onNavigate('timetable')}
           />
@@ -477,7 +472,7 @@ export default function AdminDashboard({
           </div>
         ) : announcements.length === 0 ? (
           <div className="dash-empty-state">
-            <div className="dash-empty-icon">📢</div>
+            <div className="dash-empty-icon"><Icon name="megaphone" size={40} /></div>
             <div className="dash-empty-msg">No announcements yet</div>
             <button
               className="btn btn-ghost"

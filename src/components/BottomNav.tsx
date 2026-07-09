@@ -68,7 +68,9 @@
  * isAdmin derivation (isAdminRole || actorType === 'platform_admin').
  */
 
+import type { ReactNode } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from './icons'
 
 export type NavTab = 'home' | 'timetable' | 'attendance' | 'students' | 'finance' | 'library' | 'more'
 
@@ -79,14 +81,14 @@ interface BottomNavProps {
   actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null
 }
 
-const NAV_ITEMS: { id: NavTab; label: string; icon: string; staffOnly?: boolean; staffHidden?: boolean; guardianLabel?: string; guardianHidden?: boolean }[] = [
-  { id: 'home',       label: 'Home',       icon: '🏠', guardianLabel: 'Dashboard' },
-  { id: 'timetable',  label: 'Timetable',  icon: '📅', guardianHidden: true },
-  { id: 'attendance', label: 'Attendance', icon: '✅', guardianHidden: true },
-  { id: 'students',   label: 'Students',   icon: '👥', staffOnly: true },
-  { id: 'finance',    label: 'Finance',    icon: '💰', guardianHidden: true },
-  { id: 'library',    label: 'Library',    icon: '📚', staffHidden: true },
-  { id: 'more',       label: 'More',       icon: '☰', guardianHidden: true },
+const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?: boolean; staffHidden?: boolean; guardianLabel?: string; guardianHidden?: boolean }[] = [
+  { id: 'home',       label: 'Home',       icon: <Icon name="home" />,          guardianLabel: 'Dashboard' },
+  { id: 'timetable',  label: 'Timetable',  icon: <Icon name="calendar" />,      guardianHidden: true },
+  { id: 'attendance', label: 'Attendance', icon: <Icon name="circle-check" />,  guardianHidden: true },
+  { id: 'students',   label: 'Students',   icon: <Icon name="users" />,         staffOnly: true },
+  { id: 'finance',    label: 'Finance',    icon: <Icon name="wallet" />,        guardianHidden: true },
+  { id: 'library',    label: 'Library',    icon: <Icon name="book" />,          staffHidden: true },
+  { id: 'more',       label: 'More',       icon: <Icon name="menu" />,          guardianHidden: true },
 ]
 
 export function BottomNav({ activeTab, onNavigate, actorType }: BottomNavProps) {

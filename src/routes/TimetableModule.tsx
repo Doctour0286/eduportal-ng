@@ -64,6 +64,7 @@ import {
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
 import { Modal } from '../components/Modal'
+import { Icon } from '../components/icons'
 
 // ─── Prop types ───────────────────────────────────────────────────────────────
 
@@ -416,7 +417,7 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
   if (loadState === 'error') {
     return (
       <div className="tt-error-state">
-        <span className="tt-error-icon">⚠️</span>
+        <span className="tt-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
         <p className="tt-error-msg">{errorMsg}</p>
         <button className="tt-retry-btn" onClick={load}>Try again</button>
       </div>
@@ -426,7 +427,7 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
   if (loadState === 'empty' && !editMode) {
     return (
       <div className="tt-empty-state">
-        <span className="tt-empty-icon">📅</span>
+        <span className="tt-empty-icon"><Icon name="calendar" /></span>
         <p className="tt-empty-title">No timetable yet</p>
         <p className="tt-empty-msg">
           The timetable for {sessionName} hasn't been set up.
@@ -460,7 +461,7 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
             )}
             {!editMode && ttData && (ttData.entries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint} aria-label="Print timetable">
-                🖨
+                <Icon name="printer" size={18} />
               </button>
             )}
             {isAdmin && !editMode && (
@@ -622,7 +623,7 @@ function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict, clashEntry
       {!isFree && (
         <div className="modal-row">
           <span className="modal-ic" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+            <Icon name="lock" size={18} />
           </span>
           <span>Teacher: <strong>{entry.staff_name}</strong></span>
         </div>
@@ -630,21 +631,21 @@ function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict, clashEntry
 
       <div className="modal-row">
         <span className="modal-ic" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2M4 6v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6" /></svg>
+          <Icon name="door-open" size={18} />
         </span>
         <span>Class: <strong>{entry.class_node_name}</strong></span>
       </div>
 
       <div className="modal-row">
         <span className="modal-ic" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
+          <Icon name="calendar" size={18} />
         </span>
         <span>Day: <strong>{dayName(dayOfWeek)}</strong></span>
       </div>
 
       <div className="modal-row">
         <span className="modal-ic" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 15" /></svg>
+          <Icon name="clock" size={18} />
         </span>
         <span>Time: <strong>{formatTime(period.start_time)}–{formatTime(period.end_time)}</strong></span>
       </div>
@@ -653,7 +654,7 @@ function TimetableEntryDetail({ entry, period, dayOfWeek, isConflict, clashEntry
         <>
           <div className="modal-div" />
           <div className="modal-row modal-row--conflict">
-            <span className="modal-ic" aria-hidden="true">⚠</span>
+            <span className="modal-ic" aria-hidden="true"><Icon name="alert-triangle" size={18} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
             {clashEntry ? (
               <span>
                 <strong>{entry.staff_name}</strong> is also teaching{' '}
@@ -933,8 +934,8 @@ function TimetableGrid({
                 >
                   {/* Conflict badge */}
                   {isConflict && (
-                    <span className="tt-conflict-badge" title="This teacher is double-booked in this slot">
-                      ⚠
+                    <span className="tt-conflict-badge" role="img" aria-label="This teacher is double-booked in this slot" title="This teacher is double-booked in this slot">
+                      <Icon name="alert-triangle" size={12} style={{ color: 'var(--color-warning, #d97706)' }} />
                     </span>
                   )}
 

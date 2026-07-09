@@ -64,6 +64,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from '../components/icons'
 import {
   loadCurrentSession,
   loadCurrentTerm,
@@ -729,7 +730,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (classLoadState === 'error') {
       return (
         <div className="att-error-state">
-          <span className="att-error-icon">⚠️</span>
+          <span className="att-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="att-error-msg">{errorMsg}</p>
           <button className="att-retry-btn" onClick={() => window.location.reload()}>Retry</button>
         </div>
@@ -738,7 +739,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (classLoadState === 'empty') {
       return (
         <div className="att-empty-state">
-          <span className="att-empty-icon">🏫</span>
+          <span className="att-empty-icon"><Icon name="school" size={40} /></span>
           <p className="att-empty-msg">No classes have been set up yet.</p>
           {isAdmin && <p className="att-empty-sub">Add classes in the Setup guide.</p>}
         </div>
@@ -787,7 +788,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         {summary.late > 0     && <span className="att-sum att-sum--late">{summary.late} late</span>}
         {summary.excused > 0  && <span className="att-sum att-sum--excused">{summary.excused} excused</span>}
         {unmarkedCount > 0    && <span className="att-sum att-sum--unmarked">{unmarkedCount} unmarked</span>}
-        {!isOnline && <span className="att-sum att-sum--offline">☁ offline</span>}
+        {!isOnline && <span className="att-sum att-sum--offline"><Icon name="cloud" size={14} /> offline</span>}
       </div>
     )
   }
@@ -898,10 +899,24 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
               <span className="att-saving-indicator" aria-label="Saving…">⟳</span>
             )}
             {errMsg && (
-              <span className="att-error-badge" title={errMsg}>✕</span>
+              <span
+                className="att-error-badge"
+                title={errMsg}
+                role="img"
+                aria-label={`Save failed: ${errMsg}`}
+              >
+                <Icon name="x" size={14} style={{ color: 'var(--color-error, #dc2626)' }} />
+              </span>
             )}
             {isQueued && !isSaving && (
-              <span className="att-queued-badge" title="Saved offline — will sync when reconnected">☁</span>
+              <span
+                className="att-queued-badge"
+                title="Saved offline — will sync when reconnected"
+                role="img"
+                aria-label="Saved offline — will sync when reconnected"
+              >
+                <Icon name="cloud" size={14} />
+              </span>
             )}
             {STATUS_ORDER.map(status => (
               <button
@@ -943,7 +958,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (!isSelectedDateSchoolDay && schoolDayCheck) {
       return (
         <div className="att-noschool-state">
-          <span className="att-noschool-icon">📅</span>
+          <span className="att-noschool-icon"><Icon name="calendar" size={40} /></span>
           <p className="att-noschool-msg">
             No school today{schoolDayCheck.label ? ` — ${schoolDayCheck.label}` : ''}
           </p>
@@ -969,7 +984,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (loadState === 'error') {
       return (
         <div className="att-error-state">
-          <span className="att-error-icon">⚠️</span>
+          <span className="att-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="att-error-msg">{errorMsg}</p>
           <button className="att-retry-btn" onClick={loadRecords}>Retry</button>
         </div>
@@ -979,7 +994,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (loadState === 'empty') {
       return (
         <div className="att-empty-state">
-          <span className="att-empty-icon">👥</span>
+          <span className="att-empty-icon"><Icon name="users" size={40} /></span>
           <p className="att-empty-msg">No students enrolled in {selectedClass.name} yet.</p>
           {isAdmin && <p className="att-empty-sub">Add students in the Students module.</p>}
         </div>
@@ -1033,7 +1048,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       <div className="att-body">
         {!selectedClass && classLoadState === 'ready' && (
           <div className="att-empty-state att-empty-state--prompt">
-            <span className="att-empty-icon">📋</span>
+            <span className="att-empty-icon"><Icon name="clipboard-list" size={40} /></span>
             <p className="att-empty-msg">Select a class above to start marking attendance.</p>
           </div>
         )}

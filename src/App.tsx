@@ -21,6 +21,7 @@ import { applyBrandTheme } from './services/themeService'
 import { LoginPage } from './routes/LoginPage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
+import { Icon } from './components/icons'
 
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
@@ -110,7 +111,7 @@ export default function App() {
   // HRModule so a non-admin staff member can submit/see their own leave requests.
   // Null for guardians/students/platform_admins with no staff row.
   const [currentStaffId, setCurrentStaffId] = useState<string | null>(null)
-  // Account popover (👤 header button)
+  // Account popover (user-icon header button)
   const [accountPopoverOpen, setAccountPopoverOpen] = useState(false)
   // More sheet (replaces full-screen More tab)
   const [moreSheetOpen, setMoreSheetOpen] = useState(false)
@@ -350,7 +351,7 @@ export default function App() {
     return (
       <div className="school-not-found">
         <div className="not-found-inner">
-          <span className="not-found-icon">🏫</span>
+          <span className="not-found-icon"><Icon name="school" size={40} /></span>
           <h1>School not found</h1>
           <p>
             We couldn't find a school at this address. Check the URL or contact the school for the correct link.
@@ -366,7 +367,7 @@ export default function App() {
     return (
       <div className="school-suspended">
         <div className="suspended-inner">
-          <span className="suspended-icon">⚠️</span>
+          <span className="suspended-icon"><Icon name="alert-triangle" size={40} /></span>
           <h1>{school.name}</h1>
           <p>This school's account is currently suspended. Please contact the school administration.</p>
         </div>
@@ -471,7 +472,7 @@ export default function App() {
             aria-expanded={accountPopoverOpen}
             aria-haspopup="true"
           >
-            👤
+            <Icon name="user" />
           </button>
         </div>
       </header>
@@ -502,7 +503,7 @@ export default function App() {
                 onClick={() => setAccountPopoverOpen(false)}
                 aria-label="Close account menu"
               >
-                ✕
+                <Icon name="x" size={18} />
               </button>
             </div>
             <div className="account-popover-divider" />
@@ -512,7 +513,7 @@ export default function App() {
                 row rather than a second live control duplicating Settings' write path
                 — avoids a control that silently does nothing in two places at once. */}
             <div className="account-popover-item account-popover-item--static" aria-disabled="true">
-              <span className="account-popover-item-icon">🌐</span>
+              <span className="account-popover-item-icon"><Icon name="globe" size={18} /></span>
               <span className="account-popover-item-label">Language</span>
               <span className="account-popover-item-badge">Coming soon</span>
             </div>
@@ -530,7 +531,7 @@ export default function App() {
                 onNavigate('account_preferences')
               }}
             >
-              <span className="account-popover-item-icon">🔑</span>
+              <span className="account-popover-item-icon"><Icon name="key" size={18} /></span>
               <span className="account-popover-item-label">Account preferences</span>
             </button>
             {(isAdminRole || actorType === 'platform_admin') && (
@@ -542,7 +543,7 @@ export default function App() {
                   onNavigate('settings')
                 }}
               >
-                <span className="account-popover-item-icon">📋</span>
+                <span className="account-popover-item-icon"><Icon name="clipboard-list" size={18} /></span>
                 <span className="account-popover-item-label">Audit log</span>
               </button>
             )}
@@ -682,7 +683,7 @@ function TabContent({
       if (!actorRecordId) {
         return (
           <PlaceholderModule
-            icon="📖"
+            icon={<Icon name="book-open" size={32} />}
             title="Teacher Dashboard"
             description="Loading your dashboard…"
             comingSoon={false}
@@ -710,7 +711,7 @@ function TabContent({
     }
     return (
       <PlaceholderModule
-        icon="🏠"
+        icon={<Icon name="home" size={32} />}
         title="Home"
         description="Your personalised home screen is coming soon."
         comingSoon
@@ -840,7 +841,7 @@ function PlaceholderModule({
   description,
   comingSoon,
 }: {
-  icon: string
+  icon: React.ReactNode
   title: string
   description: string
   comingSoon?: boolean
@@ -902,7 +903,7 @@ function MoreSheetContent({
       <div className="more-menu-section">
         <p className="more-menu-section-title">Modules</p>
         <button className="more-menu-item" onClick={() => onNavigate('results')}>
-          <span className="more-menu-item-icon">📊</span>
+          <span className="more-menu-item-icon"><Icon name="bar-chart" /></span>
           <div>
             <p className="more-menu-item-label">Results</p>
             <p className="more-menu-item-desc">Scores, report cards, and promotions</p>
@@ -910,7 +911,7 @@ function MoreSheetContent({
           <span className="more-menu-item-arrow">›</span>
         </button>
         <button className="more-menu-item" onClick={() => onNavigate('library')}>
-          <span className="more-menu-item-icon">📚</span>
+          <span className="more-menu-item-icon"><Icon name="book" /></span>
           <div>
             <p className="more-menu-item-label">Library</p>
             <p className="more-menu-item-desc">Books, borrowing, and digital resources</p>
@@ -918,7 +919,7 @@ function MoreSheetContent({
           <span className="more-menu-item-arrow">›</span>
         </button>
         <button className="more-menu-item" onClick={() => onNavigate('announcements')}>
-          <span className="more-menu-item-icon">📢</span>
+          <span className="more-menu-item-icon"><Icon name="megaphone" /></span>
           <div>
             <p className="more-menu-item-label">Announcements</p>
             <p className="more-menu-item-desc">School notices and messages</p>
@@ -927,7 +928,7 @@ function MoreSheetContent({
         </button>
         {canViewHR && (
           <button className="more-menu-item" onClick={() => onNavigate('hr')}>
-            <span className="more-menu-item-icon">🗂️</span>
+            <span className="more-menu-item-icon"><Icon name="folder" /></span>
             <div>
               <p className="more-menu-item-label">HR</p>
               <p className="more-menu-item-desc">Staff, leave requests, and payroll</p>
@@ -937,7 +938,7 @@ function MoreSheetContent({
         )}
         {canViewGuardians && (
           <button className="more-menu-item" onClick={() => onNavigate('guardians')}>
-            <span className="more-menu-item-icon">👨‍👩‍👧</span>
+            <span className="more-menu-item-icon"><Icon name="users" /></span>
             <div>
               <p className="more-menu-item-label">Guardians</p>
               <p className="more-menu-item-desc">Manage parents, link students, set up portal access</p>
@@ -951,7 +952,7 @@ function MoreSheetContent({
         <div className="more-menu-section">
           <p className="more-menu-section-title">Administration</p>
           <button className="more-menu-item" onClick={() => onNavigate('settings')}>
-            <span className="more-menu-item-icon">⚙️</span>
+            <span className="more-menu-item-icon"><Icon name="settings" /></span>
             <div>
               <p className="more-menu-item-label">Settings</p>
               <p className="more-menu-item-desc">School config, roles, and preferences</p>
@@ -959,7 +960,7 @@ function MoreSheetContent({
             <span className="more-menu-item-arrow">›</span>
           </button>
           <button className="more-menu-item" onClick={onOpenSetup}>
-            <span className="more-menu-item-icon">🧭</span>
+            <span className="more-menu-item-icon"><Icon name="compass" /></span>
             <div>
               <p className="more-menu-item-label">Setup guide</p>
               <p className="more-menu-item-desc">Return to the onboarding wizard</p>
@@ -989,7 +990,7 @@ function AccountSignOutButton({ onSignedOut }: { onSignedOut: () => void }) {
       onClick={handleSignOut}
       disabled={signingOut}
     >
-      <span className="account-popover-item-icon">🚪</span>
+      <span className="account-popover-item-icon"><Icon name="log-out" size={18} /></span>
       <span className="account-popover-item-label">{signingOut ? 'Signing out…' : 'Sign out'}</span>
     </button>
   )

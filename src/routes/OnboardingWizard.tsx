@@ -16,6 +16,7 @@
  */
 
 import React, { useState, useEffect } from 'react'
+import { Icon } from '../components/icons'
 import {
   saveSchoolIdentity,
   saveLanguage,
@@ -318,9 +319,9 @@ function Step1Identity({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LANG_OPTIONS = [
-  { value: 'en' as const, label: 'English', flag: '🇳🇬' },
-  { value: 'ha' as const, label: 'Hausa', flag: '🌙' },
-  { value: 'ar' as const, label: 'Arabic', flag: '🌙' },
+  { value: 'en' as const, label: 'English' },
+  { value: 'ha' as const, label: 'Hausa' },
+  { value: 'ar' as const, label: 'Arabic' },
 ]
 
 function Step2Language({
@@ -373,7 +374,6 @@ function Step2Language({
                   }}
                   className="sr-only"
                 />
-                <span className="radio-card-icon">{opt.flag}</span>
                 <span className="radio-card-label">{opt.label}</span>
               </label>
             ))}
@@ -391,7 +391,6 @@ function Step2Language({
                   onChange={() => toggleLang(opt.value)}
                   className="sr-only"
                 />
-                <span className="checkbox-card-icon">{opt.flag}</span>
                 <span>{opt.label}</span>
               </label>
             ))}
@@ -876,7 +875,7 @@ function Step6Classes({
       .sort((a, b) => a.sort_order - b.sort_order)
       .flatMap((node) => [
         <div key={node.id} className="class-tree-node" style={{ paddingLeft: `${depth * 1.5}rem` }}>
-          <span className="class-tree-icon">{node.is_leaf_enrollable ? '🏫' : '📁'}</span>
+          <span className="class-tree-icon"><Icon name={node.is_leaf_enrollable ? 'school' : 'folder'} size={16} /></span>
           <span className="class-tree-name">{node.name}</span>
           {node.is_leaf_enrollable && <span className="leaf-badge">enrollable</span>}
           <button
@@ -884,13 +883,15 @@ function Step6Classes({
             onClick={() => setAddingParent(node.id)}
             type="button"
             title="Add child class"
-          >+</button>
+            aria-label={`Add child class under ${node.name}`}
+          ><Icon name="plus" size={14} /></button>
           <button
             className="icon-btn icon-btn--danger icon-btn--sm"
             onClick={() => handleDelete(node.id)}
             type="button"
             title="Remove"
-          >×</button>
+            aria-label={`Remove ${node.name}`}
+          ><Icon name="x" size={14} /></button>
         </div>,
         ...renderTree(node.id, depth + 1),
       ])

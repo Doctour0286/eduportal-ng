@@ -46,9 +46,17 @@
  * pattern, and it means .modal-ov never needs an --open modifier class
  * in CSS (the .modal-ov rule's own `display: flex` always applies to
  * whatever's actually mounted).
+ *
+ * PRD Session 25 (Tier 6, Problem 6.3): the close button originally
+ * carried its own hand-authored inline SVG (two <line> elements forming
+ * an X), built in the same convention pending the shared icon module.
+ * That module's `x` icon was documented from the start as covering
+ * exactly this "popover/modal close buttons" use case, so this file now
+ * imports it directly rather than keeping a duplicate glyph.
  */
 
 import { useEffect, useRef, type ReactNode } from 'react'
+import { Icon } from './icons'
 
 interface ModalProps {
   open: boolean
@@ -106,10 +114,7 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
           onClick={onClose}
           aria-label="Close"
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" style={{ width: '0.85em', height: '0.85em' }}>
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
+          <Icon name="x" size={14} />
         </button>
         <div className="modal-content">
           {children}

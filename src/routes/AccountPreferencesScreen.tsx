@@ -75,10 +75,11 @@
  * misleading).
  */
 
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { loadPayrollVisibilitySettings, setMyPayslipCardHidden } from '../services/hrService'
+import { Icon } from '../components/icons'
 
 const MIN_PASSWORD_LENGTH = 8
 
@@ -140,7 +141,7 @@ function PasswordInput({
           aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
           aria-pressed={visible}
         >
-          {visible ? '🙈' : '👁️'}
+          {visible ? <Icon name="eye-off" size={18} /> : <Icon name="eye" size={18} />}
         </button>
       </div>
     </label>
@@ -159,10 +160,10 @@ export default function AccountPreferencesScreen() {
 
       <PasswordSection />
       {actorType === 'staff' && <PayslipVisibilitySection />}
-      <PlaceholderSection icon="🎨" label="Theme" note="Light/dark mode — coming soon" />
-      <PlaceholderSection icon="🌐" label="Language" note="Coming soon" />
-      <PlaceholderSection icon="🔠" label="Font size" note="Coming soon" />
-      <PlaceholderSection icon="⏰" label="Alarm" note="Coming soon" />
+      <PlaceholderSection icon={<Icon name="palette" size={18} />} label="Theme" note="Light/dark mode — coming soon" />
+      <PlaceholderSection icon={<Icon name="globe" size={18} />} label="Language" note="Coming soon" />
+      <PlaceholderSection icon={<Icon name="font-size" size={18} />} label="Font size" note="Coming soon" />
+      <PlaceholderSection icon={<Icon name="alarm-clock" size={18} />} label="Alarm" note="Coming soon" />
     </div>
   )
 }
@@ -255,7 +256,7 @@ function PasswordSection() {
         aria-expanded={open}
       >
         <h2 className="acctprefs-section-title">
-          <span className="acctprefs-section-icon">🔑</span>
+          <span className="acctprefs-section-icon"><Icon name="key" size={18} /></span>
           Password
         </h2>
         <span className="acctprefs-section-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
@@ -263,7 +264,7 @@ function PasswordSection() {
 
       {success && !open && (
         <div className="acctprefs-success">
-          <span className="acctprefs-success-icon">✅</span>
+          <span className="acctprefs-success-icon"><Icon name="circle-check" size={18} style={{ color: 'var(--color-success, #16a34a)' }} /></span>
           <p className="acctprefs-success-text">Password changed. Use it next time you sign in.</p>
         </div>
       )}
@@ -443,7 +444,7 @@ function PayslipVisibilitySection() {
         aria-expanded={open}
       >
         <h2 className="acctprefs-section-title">
-          <span className="acctprefs-section-icon">💰</span>
+          <span className="acctprefs-section-icon"><Icon name="wallet" size={18} /></span>
           Payslip card
         </h2>
         <span className="acctprefs-section-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
@@ -496,7 +497,7 @@ function PayslipVisibilitySection() {
 // Same section shell as PasswordSection (acctprefs-section) so replacing one
 // of these with a real control later is a body swap, not a layout change.
 
-function PlaceholderSection({ icon, label, note }: { icon: string; label: string; note: string }) {
+function PlaceholderSection({ icon, label, note }: { icon: ReactNode; label: string; note: string }) {
   return (
     <section className="acctprefs-section acctprefs-section--placeholder" aria-disabled="true">
       <h2 className="acctprefs-section-title">

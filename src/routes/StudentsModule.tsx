@@ -32,6 +32,7 @@
 
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from '../components/icons'
 import {
   loadLeafClasses,
   loadStudents,
@@ -1149,7 +1150,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     if (bootState === 'error') {
       return (
         <div className="stu-error-state">
-          <span className="stu-error-icon">⚠️</span>
+          <span className="stu-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="stu-error-msg">{bootError}</p>
           <button className="stu-retry-btn" onClick={() => window.location.reload()}>Retry</button>
         </div>
@@ -1167,7 +1168,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     if (listState === 'error') {
       return (
         <div className="stu-error-state">
-          <span className="stu-error-icon">⚠️</span>
+          <span className="stu-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="stu-error-msg">{listError}</p>
           <button className="stu-retry-btn" onClick={loadList}>Retry</button>
         </div>
@@ -1176,7 +1177,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     if (listState === 'empty') {
       return (
         <div className="stu-empty-state">
-          <span className="stu-empty-icon">👥</span>
+          <span className="stu-empty-icon"><Icon name="users" /></span>
           <p className="stu-empty-msg">
             {filterClass ? 'No students enrolled in this class yet.' : 'No students added yet.'}
           </p>
@@ -1191,7 +1192,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     if (filteredStudents.length === 0) {
       return (
         <div className="stu-empty-state stu-empty-state--search">
-          <span className="stu-empty-icon">🔍</span>
+          <span className="stu-empty-icon"><Icon name="search" /></span>
           <p className="stu-empty-msg">No students match "{searchQuery}".</p>
         </div>
       )
@@ -1395,7 +1396,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
                 </div>
               )}
             </div>
-            <button className="stu-form-close" onClick={closeDetail} aria-label="Close">✕</button>
+            <button className="stu-form-close" onClick={closeDetail} aria-label="Close"><Icon name="x" size={16} /></button>
           </div>
 
 
@@ -1443,7 +1444,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
               onClick={() => setPhotoPreviewOpen(false)}
               aria-label="Close preview"
             >
-              ✕
+              <Icon name="x" size={20} />
             </button>
             <img
               className="stu-photo-preview-img"
@@ -1478,7 +1479,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
       <div className="stu-detail-tab-content">
 
         {briefSuccessMsg && (
-          <p className="stu-brief-success" role="status">✓ {briefSuccessMsg}</p>
+          <p className="stu-brief-success" role="status"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> {briefSuccessMsg}</p>
         )}
 
         {/* Photo moved to the popup header (single source of truth, click-
@@ -1558,7 +1559,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
           </div>
           {s.medical_notes && (
             <div className="stu-brief-medical-notes">
-              <span className="stu-brief-fact-label">⚕️ Medical notes</span>
+              <span className="stu-brief-fact-label"><Icon name="stethoscope" size={14} /> Medical notes</span>
               <p className="stu-brief-medical-notes-text">{s.medical_notes}</p>
             </div>
           )}
@@ -1573,7 +1574,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
               {/* Already provisioned */}
               {studentIdentity && !studentProvisioning && (
                 <div className="stu-provision-status">
-                  <span className="stu-provision-method-badge">🔑 Login code</span>
+                  <span className="stu-provision-method-badge"><Icon name="key" size={14} /> Login code</span>
                   {studentIdentity.login_code ? (
                     <span className="stu-provision-code">{studentIdentity.login_code}</span>
                   ) : (
@@ -2139,7 +2140,7 @@ function renderGuardiansTab() {
 
         {guardiansState === 'error' && (
           <div className="stu-error-state">
-            <span className="stu-error-icon">⚠️</span>
+            <span className="stu-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
             <p className="stu-error-msg">{guardiansError}</p>
             <button className="stu-retry-btn" onClick={() => detailStudent && fetchGuardians(detailStudent.id)}>Retry</button>
           </div>
@@ -2147,7 +2148,7 @@ function renderGuardiansTab() {
 
         {guardiansState === 'empty' && (
           <div className="stu-empty-state">
-            <span className="stu-empty-icon">👨‍👩‍👧</span>
+            <span className="stu-empty-icon"><Icon name="users" /></span>
             <p className="stu-empty-msg">No guardians linked yet.</p>
           </div>
         )}
@@ -2194,7 +2195,7 @@ function renderGuardiansTab() {
                           }}
                           title={link.has_platform_access ? 'Remove portal access' : 'Grant portal access'}
                         >
-                          {link.has_platform_access ? '🔓 Access on' : '🔒 No access'}
+                          <Icon name={link.has_platform_access ? 'lock-open' : 'lock'} size={14} /> {link.has_platform_access ? 'Access on' : 'No access'}
                         </button>
                       )}
                       {canEditStudentRecords && (
@@ -2202,8 +2203,9 @@ function renderGuardiansTab() {
                           className="stu-unlink-btn"
                           onClick={() => setUnlinkTarget(link)}
                           title="Remove guardian link"
+                          aria-label="Remove guardian link"
                         >
-                          ✕
+                          <Icon name="x" size={14} />
                         </button>
                       )}
                     </div>
@@ -2590,7 +2592,7 @@ function renderGuardiansTab() {
               onClick={closeGuardianBrief}
               aria-label="Close"
             >
-              ✕
+              <Icon name="x" size={16} />
             </button>
           </div>
 
@@ -2719,7 +2721,7 @@ function renderGuardiansTab() {
                       {/* Already provisioned — show current method + code */}
                       {briefIdentity && !briefIsProvisioning && (
                         <div className="stu-provision-status">
-                          <span className="stu-provision-method-badge">🔑 Login code</span>
+                          <span className="stu-provision-method-badge"><Icon name="key" size={14} /> Login code</span>
                           {briefIdentity.login_method === 'login_code' && briefIdentity.login_code && (
                             <span className="stu-provision-code">{briefIdentity.login_code}</span>
                           )}
@@ -2814,7 +2816,7 @@ function renderGuardiansTab() {
           <div className="stu-form-handle" />
           <div className="stu-form-header">
             <h3 className="stu-form-title">Add student</h3>
-            <button className="stu-form-close" onClick={closeAddForm} aria-label="Close">✕</button>
+            <button className="stu-form-close" onClick={closeAddForm} aria-label="Close"><Icon name="x" size={16} /></button>
           </div>
           <div className="stu-form-body">
             <div className="stu-field">
@@ -3045,7 +3047,7 @@ function renderGuardiansTab() {
       {renderHeader()}
       <div className="stu-body">
         {listSuccessMsg && (
-          <p className="stu-brief-success stu-list-success" role="status">✓ {listSuccessMsg}</p>
+          <p className="stu-brief-success stu-list-success" role="status"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> {listSuccessMsg}</p>
         )}
         {renderStatStrip()}
         {renderCount()}

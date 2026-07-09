@@ -38,6 +38,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from '../components/icons'
 import {
   loadFeeHeads,
   loadCurrentSession,
@@ -716,7 +717,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     if (bootState === 'error') {
       return (
         <div className="fin-error-state">
-          <span className="fin-error-icon">⚠️</span>
+          <span className="fin-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="fin-error-msg">{bootError}</p>
           <button className="fin-retry-btn" onClick={() => window.location.reload()}>Retry</button>
         </div>
@@ -735,7 +736,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     if (!currentSession) {
       return (
         <div className="fin-empty-state">
-          <span className="fin-empty-icon">📅</span>
+          <span className="fin-empty-icon"><Icon name="calendar" size={40} /></span>
           <p className="fin-empty-msg">No current session is set up. Set up an academic session to track fees.</p>
         </div>
       )
@@ -750,7 +751,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     if (balancesState === 'error') {
       return (
         <div className="fin-error-state">
-          <span className="fin-error-icon">⚠️</span>
+          <span className="fin-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
           <p className="fin-error-msg">{balancesError}</p>
           <button className="fin-retry-btn" onClick={loadBalances}>Retry</button>
         </div>
@@ -759,7 +760,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     if (balancesState === 'empty') {
       return (
         <div className="fin-empty-state">
-          <span className="fin-empty-icon">👥</span>
+          <span className="fin-empty-icon"><Icon name="users" size={40} /></span>
           <p className="fin-empty-msg">No active students found. Add students first.</p>
         </div>
       )
@@ -767,7 +768,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     if (filteredBalances.length === 0) {
       return (
         <div className="fin-empty-state fin-empty-state--search">
-          <span className="fin-empty-icon">🔍</span>
+          <span className="fin-empty-icon"><Icon name="search" size={40} /></span>
           <p className="fin-empty-msg">No students match "{searchQuery}".</p>
         </div>
       )
@@ -867,13 +868,13 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           </div>
         ) : assignmentsState === 'error' ? (
           <div className="fin-error-state">
-            <span className="fin-error-icon">⚠️</span>
+            <span className="fin-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
             <p className="fin-error-msg">{assignmentsError}</p>
             <button className="fin-retry-btn" onClick={loadAssignmentList}>Retry</button>
           </div>
         ) : assignmentsState === 'empty' || assignments.length === 0 ? (
           <div className="fin-empty-state">
-            <span className="fin-empty-icon">📋</span>
+            <span className="fin-empty-icon"><Icon name="clipboard-list" size={40} /></span>
             <p className="fin-empty-msg">
               No fee assignments yet{selectedTermId ? ' for this term' : ' for this session'}.
               {canManageFees ? ' Add an assignment to start billing students.' : ''}
@@ -931,12 +932,12 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           </div>
         ) : feeHeadsState === 'error' ? (
           <div className="fin-error-state">
-            <span className="fin-error-icon">⚠️</span>
+            <span className="fin-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
             <p className="fin-error-msg">{feeHeadsError}</p>
           </div>
         ) : feeHeads.length === 0 ? (
           <div className="fin-empty-state">
-            <span className="fin-empty-icon">🏷️</span>
+            <span className="fin-empty-icon"><Icon name="tag" size={40} /></span>
             <p className="fin-empty-msg">No fee heads yet. Add a fee head (e.g. "School Fees", "PTA Levy") to start assigning fees.</p>
             {canManageFees && (
               <button className="fin-empty-action" onClick={openFeeHeadForm}>
@@ -992,7 +993,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           <div className="fin-form-handle" />
           <div className="fin-form-header">
             <h3 className="fin-form-title">{isEdit ? 'Edit fee head' : 'Add fee head'}</h3>
-            <button className="fin-form-close" onClick={() => { setFeeHeadFormOpen(false); setEditingFeeHeadId(null) }} aria-label="Close">✕</button>
+            <button className="fin-form-close" onClick={() => { setFeeHeadFormOpen(false); setEditingFeeHeadId(null) }} aria-label="Close"><Icon name="x" size={18} /></button>
           </div>
           <div className="fin-form-body">
             <div className="fin-field">
@@ -1076,7 +1077,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           <div className="fin-form-handle" />
           <div className="fin-form-header">
             <h3 className="fin-form-title">Add fee assignment</h3>
-            <button className="fin-form-close" onClick={() => setAssignmentFormOpen(false)} aria-label="Close">✕</button>
+            <button className="fin-form-close" onClick={() => setAssignmentFormOpen(false)} aria-label="Close"><Icon name="x" size={18} /></button>
           </div>
           <div className="fin-form-body">
             <div className="fin-field">
@@ -1158,8 +1159,9 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                       onClick={() => setAssignmentForm(prev => ({
                         ...prev, student_id: '', student_name: '', student_search: '',
                       }))}
+                      aria-label="Clear selected student"
                     >
-                      ✕
+                      <Icon name="x" size={14} />
                     </button>
                   </div>
                 ) : (
@@ -1237,7 +1239,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
               <p className="fin-detail-name">{b.student_name}</p>
               <p className="fin-detail-class">{b.class_path_label ?? 'No class assigned'}</p>
             </div>
-            <button className="fin-form-close" onClick={closeDetail} aria-label="Close">✕</button>
+            <button className="fin-form-close" onClick={closeDetail} aria-label="Close"><Icon name="x" size={18} /></button>
           </div>
 
           {/* Detail tabs */}
@@ -1321,7 +1323,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           <p className="fin-form-error" role="alert">{detailDataError}</p>
         ) : detailPayments.length === 0 ? (
           <div className="fin-empty-state fin-empty-state--detail">
-            <span className="fin-empty-icon">💳</span>
+            <span className="fin-empty-icon"><Icon name="credit-card" size={40} /></span>
             <p className="fin-empty-msg">No payments recorded yet.</p>
           </div>
         ) : (
@@ -1478,7 +1480,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           <p className="fin-form-error" role="alert">{detailDataError}</p>
         ) : detailDiscounts.length === 0 ? (
           <div className="fin-empty-state fin-empty-state--detail">
-            <span className="fin-empty-icon">🏷️</span>
+            <span className="fin-empty-icon"><Icon name="tag" size={40} /></span>
             <p className="fin-empty-msg">No discounts applied.</p>
           </div>
         ) : (

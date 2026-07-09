@@ -34,6 +34,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
+import { Icon } from '../components/icons'
 import {
   loadGuardians,
   loadGuardian,
@@ -415,8 +416,8 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
             <div className="grd-section">
               <h2 className="grd-guardian-name">{selected.full_name}</h2>
               {selected.relationship && <p className="grd-meta">{selected.relationship}</p>}
-              {selected.phone && <p className="grd-meta">📞 {selected.phone}</p>}
-              {selected.email && <p className="grd-meta">✉️ {selected.email}</p>}
+              {selected.phone && <p className="grd-meta"><Icon name="phone" size={14} /> {selected.phone}</p>}
+              {selected.email && <p className="grd-meta"><Icon name="mail" size={14} /> {selected.email}</p>}
             </div>
           )}
 
@@ -450,7 +451,7 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
 
             {identity && identity.is_active && !provOpen && (
               <div className="grd-access-active">
-                <span className="grd-access-badge grd-access-badge--on">🔑 Login code</span>
+                <span className="grd-access-badge grd-access-badge--on"><Icon name="key" size={14} /> Login code</span>
                 {/* Per owner request: no more "Show code" click-to-reveal. The
                    code is already on `identity` from openDetail()'s loadGuardian
                    call — display it directly if the signed-in actor is allowed
@@ -579,11 +580,11 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
                         onClick={() => handleToggleAccess(s)}
                         title={s.has_platform_access ? 'Remove portal access for this student' : 'Grant portal access for this student'}
                       >
-                        {s.has_platform_access ? '🔓 Access on' : '🔒 No access'}
+                        {s.has_platform_access ? <><Icon name="lock-open" size={14} /> Access on</> : <><Icon name="lock" size={14} /> No access</>}
                       </button>
                     )}
                     {canEditGuardianRecords && (
-                      <button className="grd-unlink-btn" onClick={() => setUnlinkTarget(s)} title="Unlink student">✕</button>
+                      <button className="grd-unlink-btn" onClick={() => setUnlinkTarget(s)} title="Unlink student" aria-label="Unlink student"><Icon name="x" size={14} /></button>
                     )}
                   </div>
                 </li>
@@ -628,7 +629,7 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
 
       {listState === 'empty' && (
         <div className="grd-empty-state">
-          <span className="grd-empty-icon">👨‍👩‍👧</span>
+          <span className="grd-empty-icon"><Icon name="users" size={40} /></span>
           <p className="grd-empty-msg">{search ? `No guardians matching "${search}"` : 'No guardians yet.'}</p>
           {canManageGuardians && !search && (
             <button className="grd-btn-primary" onClick={() => setPanel('add')}>Add first guardian</button>

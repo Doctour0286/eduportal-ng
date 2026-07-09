@@ -36,6 +36,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useSchoolStore } from '../stores/schoolStore';
 import { useAuthStore } from '../stores/authStore';
+import { Icon } from '../components/icons';
 import {
   loadTimetableData,
   loadCurrentSession,
@@ -98,8 +99,8 @@ interface StatCardProps {
   label: string;
   value: string | number;
   sub?: string;
-  icon: string;
-  loading: boolean;
+  icon: React.ReactNode;
+  loading?: boolean;
   accent?: 'green' | 'blue' | 'amber' | 'purple';
 }
 
@@ -148,7 +149,7 @@ function ActionBadge({ item, onClick }: { item: ActionItem; onClick: () => void 
 // ─── Quick Action Button (identical component contract to AdminDashboard.tsx's) ─
 
 interface QuickActionProps {
-  icon: string;
+  icon: React.ReactNode;
   label: string;
   onClick: () => void;
 }
@@ -195,7 +196,7 @@ function AnnouncementCard({ ann }: { ann: DashAnnouncement }) {
 // needs the same shell later, that's the point to extract it, not before. ────
 
 interface CollapsibleCardProps {
-  icon: string;
+  icon: React.ReactNode;
   title: string;
   summary?: string;               // right-aligned chip text, shown collapsed or expanded
   summaryTone?: 'normal' | 'warning' | 'urgent';
@@ -606,7 +607,7 @@ export default function TeacherDashboard({
   if (error) {
     return (
       <div className="dash-error-state">
-        <div className="dash-error-icon">⚠️</div>
+        <div className="dash-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></div>
         <div className="dash-error-msg">{error}</div>
         <button
           className="btn btn--primary"
@@ -655,7 +656,7 @@ export default function TeacherDashboard({
             label="Classes"
             value={stats?.classCount ?? 0}
             sub="this session"
-            icon="🏫"
+            icon={<Icon name="school" />}
             loading={dataLoading}
             accent="blue"
           />
@@ -663,7 +664,7 @@ export default function TeacherDashboard({
             label="Subjects"
             value={stats?.subjectCount ?? 0}
             sub="you teach"
-            icon="📘"
+            icon={<Icon name="book-open" />}
             loading={dataLoading}
             accent="purple"
           />
@@ -671,7 +672,7 @@ export default function TeacherDashboard({
             label="Pending scores"
             value={stats?.pendingScoreCount ?? 0}
             sub="awaiting approval"
-            icon="📝"
+            icon={<Icon name="pencil" />}
             loading={dataLoading}
             accent={(stats?.pendingScoreCount ?? 0) > 0 ? 'amber' : 'green'}
           />
@@ -687,7 +688,7 @@ export default function TeacherDashboard({
 
           {/* My Schedule Today */}
           <CollapsibleCard
-            icon="🕒"
+            icon={<Icon name="clock" />}
             title="My Schedule Today"
             summary={
               dataLoading
@@ -706,7 +707,7 @@ export default function TeacherDashboard({
               <Skeleton className="dash-ann-skel" />
             ) : todaysEntries.length === 0 ? (
               <div className="dash-empty-state">
-                <div className="dash-empty-icon">🕒</div>
+                <div className="dash-empty-icon"><Icon name="clock" /></div>
                 <div className="dash-empty-msg">
                   {todayLabel ? `No class scheduled for you, ${todayLabel}` : 'No lesson scheduled today'}
                 </div>
@@ -742,7 +743,7 @@ export default function TeacherDashboard({
 
           {/* My Timetable View */}
           <CollapsibleCard
-            icon="📅"
+            icon={<Icon name="calendar" />}
             title="My Timetable View"
             summary={dataLoading ? undefined : `${assignments.length} assignment${assignments.length === 1 ? '' : 's'}`}
             expanded={timetableExpanded}
@@ -752,7 +753,7 @@ export default function TeacherDashboard({
               <Skeleton className="dash-ann-skel" />
             ) : weekGrouped.length === 0 ? (
               <div className="dash-empty-state">
-                <div className="dash-empty-icon">📅</div>
+                <div className="dash-empty-icon"><Icon name="calendar" /></div>
                 <div className="dash-empty-msg">No timetable entries yet this session</div>
               </div>
             ) : (
@@ -788,7 +789,7 @@ export default function TeacherDashboard({
 
           {/* Pending Scores */}
           <CollapsibleCard
-            icon="📝"
+            icon={<Icon name="pencil" />}
             title="Pending Scores"
             summary={
               dataLoading
@@ -805,7 +806,7 @@ export default function TeacherDashboard({
               <Skeleton className="dash-ann-skel" />
             ) : pendingScoreGroups.length === 0 ? (
               <div className="dash-empty-state">
-                <div className="dash-empty-icon">✅</div>
+                <div className="dash-empty-icon"><Icon name="circle-check" style={{ color: 'var(--color-success, #16a34a)' }} /></div>
                 <div className="dash-empty-msg">No scores waiting for approval</div>
               </div>
             ) : (
@@ -834,7 +835,7 @@ export default function TeacherDashboard({
               school-wide switch is on AND this teacher hasn't hidden it. */}
           {showPayslipCard && (
             <CollapsibleCard
-              icon="💰"
+              icon={<Icon name="wallet" />}
               title="My Payslip"
               summary={
                 payslipExpanded && payslipsLoading
@@ -858,7 +859,7 @@ export default function TeacherDashboard({
                 <Skeleton className="dash-ann-skel" />
               ) : myPayslips.length === 0 ? (
                 <div className="dash-empty-state">
-                  <div className="dash-empty-icon">💰</div>
+                  <div className="dash-empty-icon"><Icon name="wallet" /></div>
                   <div className="dash-empty-msg">No payslips on file yet</div>
                 </div>
               ) : (
@@ -911,17 +912,17 @@ export default function TeacherDashboard({
         <div className="dash-section-label">Quick actions</div>
         <div className="dash-quick-grid">
           <QuickAction
-            icon="📋"
+            icon={<Icon name="clipboard-list" />}
             label="Mark attendance"
             onClick={() => onNavigate('attendance')}
           />
           <QuickAction
-            icon="📅"
+            icon={<Icon name="calendar" />}
             label="View timetable"
             onClick={() => onNavigate('timetable')}
           />
           <QuickAction
-            icon="📝"
+            icon={<Icon name="pencil" />}
             label="Enter scores"
             onClick={() => onNavigate('results')}
           />
@@ -941,7 +942,7 @@ export default function TeacherDashboard({
           </div>
         ) : announcements.length === 0 ? (
           <div className="dash-empty-state">
-            <div className="dash-empty-icon">📢</div>
+            <div className="dash-empty-icon"><Icon name="megaphone" /></div>
             <div className="dash-empty-msg">No announcements yet</div>
           </div>
         ) : (
