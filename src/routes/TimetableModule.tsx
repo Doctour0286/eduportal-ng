@@ -38,6 +38,20 @@
  *     since edit mode's own onClick branch returns early and this new
  *     behavior only fires when !editMode.
  *
+ * Live period widget (Session 26, PRD Problem 6.4):
+ *   - <LivePeriodWidget /> renders above the grid wrapper — a collapsed
+ *     live banner (dot/status/countdown) that expands into a per-class
+ *     "what's happening right now" grid plus a short upcoming list.
+ *   - It derives all of its own state from getCurrentPeriodState(), ticked
+ *     once a second purely off Date.now() — no network calls.
+ *   - Session 26 step 6: the grid's reserved-but-unused
+ *     .tt-col--now-col/.tt-cell--now-col classes (from Session 24) are wired
+ *     here using that SAME LivePeriodState via onStateChange, rather than a
+ *     second derivation — the widget and the now-col highlight can never
+ *     disagree about which period is current. This is deliberately separate
+ *     from the pre-existing liveState/getCurrentPeriod() ticker below, which
+ *     continues to drive .tt-cell--live / .tt-live-dot as before.
+ *
  * All CSS uses the `tt-` prefix (no collisions with dash-* or Phase 5 styles).
  * The one exception is Modal.tsx's own `.modal-*` classes (shared,
  * app-wide component — see Problem 6.5).
@@ -61,10 +75,12 @@ import {
   type Period,
   type TimetableEntry,
   type TeachingAssignment,
+  type LivePeriodState,
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/icons'
+import { LivePeriodWidget } from '../components/LivePeriodWidget'
 
 // ─── Prop types ───────────────────────────────────────────────────────────────
 
@@ -117,6 +133,14 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
     periodId: null,
     dayOfWeek: new Date().getDay(),
   })
+
+  // ── Shared live-period state (Session 26) ───────────────────────────────
+  // Populated by <LivePeriodWidget />'s onStateChange (it owns the 1s ticker
+  // off getCurrentPeriodState()). The grid's now-col highlight reads from
+  // this same object rather than re-deriving it, so the widget and the
+  // now-col highlight can never disagree about which period is current.
+  // null until the widget's first tick fires.
+  const [currentPeriodState, setCurrentPeriodState] = useState<LivePeriodState | null>(null)
 
   // ── Scroll ref for "Jump to today" ────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -545,6 +569,18 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
         )}
       </div>
 
+      {/* ── Live period widget (Session 26) ────────────────────────────────── */}
+      {/* Hidden in edit mode — a live "what's happening now" readout doesn't
+          make sense while the admin is editing the grid underneath it, and
+          it would otherwise sit awkwardly above the assignment tray. */}
+      {!editMode && ttData && (
+        <LivePeriodWidget
+          data={ttData}
+          classNodes={classNodes}
+          onStateChange={setCurrentPeriodState}
+        />
+      )}
+
       {/* ── Grid ────────────────────────────────────────────────────────────── */}
       <div className="tt-grid-wrapper" ref={scrollRef}>
         <TimetableGrid
@@ -553,6 +589,7 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
           selectedClassId={selectedClassId}
           selectedStaffId={selectedStaffId}
           liveState={liveState}
+          nowColState={editMode ? null : currentPeriodState}
           editMode={editMode}
           armedChip={armedChip}
           pendingClearId={pendingClearId}
@@ -750,6 +787,11 @@ interface GridProps {
   selectedClassId: string | null
   selectedStaffId: string | null
   liveState: { periodId: string | null; dayOfWeek: number }
+  /** Session 26 step 6: drives .tt-col--now-col / .tt-cell--now-col, sourced
+   *  from the same LivePeriodState the <LivePeriodWidget /> above renders
+   *  from (via onStateChange) — not a second derivation. null while the
+   *  widget hasn't ticked yet, or when hidden in edit mode. */
+  nowColState: LivePeriodState | null
   // Edit mode extras
   editMode: boolean
   armedChip: ArmedChip
@@ -767,6 +809,7 @@ function TimetableGrid({
   selectedClassId,
   selectedStaffId,
   liveState,
+  nowColState,
   editMode,
   armedChip,
   pendingClearId,
@@ -835,10 +878,17 @@ function TimetableGrid({
       {/* One column per school day */}
       {weekDays.map(wd => {
         const isToday = wd.day_of_week === today && wd.day_of_week === liveState.dayOfWeek
+        // Session 26 step 6: now-col only lights up the column that's
+        // actually in session right now (in_period/break), same day the
+        // widget itself is showing — sourced from nowColState, not a second
+        // day check, so it can never drift from the widget above.
+        const isNowCol = !!nowColState
+          && (nowColState.status === 'in_period' || nowColState.status === 'break')
+          && nowColState.dayOfWeek === wd.day_of_week
         return (
           <div
             key={wd.day_of_week}
-            className={`tt-col${isToday ? ' tt-col--today' : ''}`}
+            className={`tt-col${isToday ? ' tt-col--today' : ''}${isNowCol ? ' tt-col--now-col' : ''}`}
             data-day={wd.day_of_week}
           >
             {/* Day header */}
@@ -853,6 +903,7 @@ function TimetableGrid({
             {periods.map(p => {
               const entry = grid[wd.day_of_week]?.[p.id]
               const isLive = isToday && liveState.periodId === p.id
+              const isNowColCell = isNowCol && nowColState?.currentPeriod?.id === p.id
               const cellKey = `${wd.day_of_week}|${p.id}`
               const isSaving = cellState[cellKey] === 'saving'
               const isCellError = cellState[cellKey] === 'error'
@@ -886,6 +937,7 @@ function TimetableGrid({
                       'tt-cell',
                       'tt-cell--empty',
                       isLive ? 'tt-cell--live' : '',
+                      isNowColCell ? 'tt-cell--now-col' : '',
                       editMode && armedChip !== null ? 'tt-cell--droppable' : '',
                       isCellError ? 'tt-cell--error' : '',
                     ].filter(Boolean).join(' ')}
@@ -909,6 +961,7 @@ function TimetableGrid({
                     'tt-cell',
                     'tt-cell--lesson',
                     isLive ? 'tt-cell--live' : '',
+                    isNowColCell ? 'tt-cell--now-col' : '',
                     isConflict ? 'tt-cell--conflict' : '',
                     isPendingClear ? 'tt-cell--pending-clear' : '',
                     isEntryError ? 'tt-cell--error' : '',

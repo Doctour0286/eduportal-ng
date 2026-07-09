@@ -3044,14 +3044,215 @@ body {
   border-left: 3px solid #22c55e !important;
 }
 
-/* ─── "Now" column highlight — reserved, not yet wired ───────────────────────
-   PRD Session 24 step 3: reserve the reference app's th.now-col/
-   td.now-col pattern (a persistent highlight across the entire column
-   of whichever period is running right now, distinct from .tt-cell--
-   live's single-cell highlight) without wiring it — Session 26's live
-   period widget supplies the resolved current-period state this needs.
-   Per this session's own gold-token decision, the brand color is
-   reused rather than introducing a new accent. */
+/* ─── LivePeriodWidget (Session 26, PRD Problem 6.4) ──────────────────────
+   Rendered above the grid in TimetableModule.tsx. Collapsed banner is
+   modeled on .dash-schedule-row/.dash-schedule-live's dot+countdown
+   language (TeacherDashboard, Session 17) so the two widgets read as
+   the same visual idiom rather than two unrelated inventions. Expanded
+   per-class grid and upcoming list are new — no direct dash-* analog
+   covers a multi-class breakdown. Brand color reused throughout per
+   Session 24's gold-token decision (no separate accent token exists). */
+
+.lpw-root {
+  border-radius: var(--radius-lg, var(--radius-md));
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  margin-bottom: var(--space-3);
+  overflow: hidden;
+}
+
+.lpw-root--live {
+  border-color: color-mix(in srgb, var(--color-brand-600, #2563eb) 35%, var(--color-border, #e5e7eb));
+}
+
+.lpw-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.lpw-banner:disabled {
+  cursor: default;
+}
+
+.lpw-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.lpw-dot--live {
+  background: var(--color-brand-600, #2563eb);
+  animation: lpw-pulse 1.6s ease-in-out infinite;
+}
+
+.lpw-dot--idle {
+  background: var(--color-text-tertiary, #9ca3af);
+}
+
+@keyframes lpw-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.85); }
+}
+
+.lpw-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lpw-status {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-primary, #111827);
+}
+
+.lpw-period-name {
+  font-weight: 500;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.lpw-sub {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.lpw-countdown {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-brand-700, var(--color-brand-600));
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.lpw-chevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--color-text-tertiary, #9ca3af);
+  transition: transform 0.15s ease;
+}
+
+.lpw-chevron--open {
+  transform: rotate(180deg);
+}
+
+.lpw-progress-track {
+  height: 3px;
+  background: var(--color-border, #e5e7eb);
+}
+
+.lpw-progress-fill {
+  height: 100%;
+  background: var(--color-brand-600, #2563eb);
+  transition: width 1s linear;
+}
+
+.lpw-expanded {
+  padding: 0 var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  border-top: 1px solid var(--color-border, #e5e7eb);
+  padding-top: var(--space-3);
+}
+
+.lpw-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.lpw-grid-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.lpw-grid-class {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--color-text-primary, #111827);
+  flex-shrink: 0;
+}
+
+.lpw-grid-subject {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary, #6b7280);
+  text-align: right;
+}
+
+.lpw-grid-subject--free {
+  font-style: italic;
+  color: var(--color-text-tertiary, #9ca3af);
+}
+
+.lpw-grid-teacher {
+  color: var(--color-text-tertiary, #9ca3af);
+}
+
+.lpw-upcoming-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-tertiary, #9ca3af);
+}
+
+.lpw-upcoming-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.lpw-upcoming-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.lpw-upcoming-name {
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.lpw-upcoming-time {
+  color: var(--color-text-secondary, #6b7280);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lpw-dot--live { animation: none; }
+  .lpw-chevron { transition: none; }
+  .lpw-progress-fill { transition: none; }
+}
+
+/* ─── "Now" column highlight — wired to LivePeriodWidget (Session 26) ───────
+   PRD Session 24 step 3 reserved th.now-col/td.now-col; Session 26 step 6
+   wires it: TimetableModule.tsx applies these classes using the exact same
+   LivePeriodState the widget above renders from (one shared source of
+   truth via getCurrentPeriodState(), not a second derivation).
+   Per Session 24's own gold-token decision, the brand color is reused
+   rather than introducing a new accent. */
 .tt-col--now-col .tt-cell--day-header,
 .tt-col--now-col .tt-cell--day-header-today {
   background: var(--color-brand-700, var(--color-brand-600));

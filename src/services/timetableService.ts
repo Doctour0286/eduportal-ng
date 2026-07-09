@@ -400,6 +400,170 @@ export function getCurrentPeriod(
   return { periodId: null, dayOfWeek }
 }
 
+// ─── "Current period, across every class" live state (Session 26, PRD 6.4) ──
+// Pure function: given the timetable data already loaded by loadTimetableData()
+// and the current instant, resolves everything LivePeriodWidget needs to render
+// its collapsed banner + expanded per-class grid, with no extra query and no
+// per-second network calls (per §4.1 — tick() re-runs this against Date.now()
+// on an interval, entirely off already-fetched data).
+//
+// Deliberately reuses getCurrentPeriod()'s exact day/time-window logic (same
+// school-day check against weekDays, same HH:MM boundary comparison) rather
+// than re-deriving it — TeacherDashboard.tsx's "today's lesson" header feature
+// (Session 14/17) and this widget must never be able to disagree about what
+// period it currently is, per Session 26's own dependency note.
+
+export type LiveBannerStatus =
+  | 'before_school'   // today is a school day, but before the first non-break period starts
+  | 'in_period'        // a non-break period is running right now
+  | 'break'            // a break period is running right now
+  | 'after_school'     // today is a school day, but after the last period ends
+  | 'non_school_day'   // today is not in school_week_days at all (weekend/off-day)
+
+export interface LiveClassEntry {
+  classNodeId: string
+  className: string
+  entry: TimetableEntry | null   // null = free/unscheduled for this class right now
+}
+
+export interface UpcomingPeriodInfo {
+  period: Period
+  startsInMin: number   // minutes from `now` until this period's start_time
+}
+
+export interface LivePeriodState {
+  status: LiveBannerStatus
+  dayOfWeek: number
+  /** The period object currently in session (running now), if any — set for
+   *  both 'in_period' and 'break' statuses, null otherwise. */
+  currentPeriod: Period | null
+  /** Seconds remaining until currentPeriod.end_time, clamped to >= 0. Null
+   *  when there's no current period to count down against. */
+  secondsRemaining: number | null
+  /** Same shape as secondsRemaining but as a 0–1 fraction of the period's
+   *  total duration, for a progress bar. Null under the same conditions. */
+  progressFraction: number | null
+  /** Per-class snapshot of what's happening in currentPeriod, right now —
+   *  only populated when status is 'in_period' or 'break' (empty array
+   *  otherwise, since there's nothing "current" to show per class). */
+  liveGrid: LiveClassEntry[]
+  /** Up to 5 non-break periods later today, nearest first. Empty on a
+   *  non-school day or once the school day has ended. */
+  upcoming: UpcomingPeriodInfo[]
+}
+
+function toMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+export function getCurrentPeriodState(
+  data: TimetableData,
+  classNodes: ClassNode[],
+  now: Date = new Date(),
+): LivePeriodState {
+  const { weekDays, periods, entries } = data
+  const dayOfWeek = now.getDay()
+  const nowMin = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60
+
+  const isSchoolDay = weekDays.some(wd => wd.day_of_week === dayOfWeek)
+
+  const base: LivePeriodState = {
+    status: 'non_school_day',
+    dayOfWeek,
+    currentPeriod: null,
+    secondsRemaining: null,
+    progressFraction: null,
+    liveGrid: [],
+    upcoming: [],
+  }
+
+  if (!isSchoolDay || periods.length === 0) {
+    return base
+  }
+
+  // Sort by sort_order defensively — callers may hand us an unsorted array.
+  const sorted = [...periods].sort((a, b) => a.sort_order - b.sort_order)
+  const nonBreak = sorted.filter(p => !p.is_break)
+
+  if (nonBreak.length === 0) {
+    return { ...base, status: 'non_school_day' }
+  }
+
+  const firstStart = toMinutes(nonBreak[0].start_time)
+  const lastEnd = toMinutes(nonBreak[nonBreak.length - 1].end_time)
+
+  if (nowMin < firstStart) {
+    return {
+      ...base,
+      status: 'before_school',
+      upcoming: buildUpcoming(nonBreak, nowMin),
+    }
+  }
+
+  if (nowMin >= lastEnd) {
+    return { ...base, status: 'after_school' }
+  }
+
+  // Find whichever period (break or not) contains `now` — sorted list, so the
+  // whole school day is covered contiguously as long as periods are adjacent.
+  const active = sorted.find(p => {
+    const start = toMinutes(p.start_time)
+    const end = toMinutes(p.end_time)
+    return nowMin >= start && nowMin < end
+  })
+
+  if (!active) {
+    // Gap between two periods that isn't itself modeled as a break row —
+    // treat like "after school" for the countdown/grid, but keep upcoming
+    // periods visible since the day isn't over.
+    return {
+      ...base,
+      status: 'after_school',
+      upcoming: buildUpcoming(nonBreak, nowMin),
+    }
+  }
+
+  const start = toMinutes(active.start_time)
+  const end = toMinutes(active.end_time)
+  const totalMin = Math.max(end - start, 1)
+  const remainingMin = Math.max(end - nowMin, 0)
+  const secondsRemaining = Math.round(remainingMin * 60)
+  const progressFraction = Math.min(Math.max((nowMin - start) / totalMin, 0), 1)
+
+  // Per-class live grid — only meaningful for a real (non-break) period.
+  let liveGrid: LiveClassEntry[] = []
+  if (!active.is_break) {
+    const leaves = classNodes.filter(n => n.is_leaf_enrollable)
+    liveGrid = leaves.map(n => ({
+      classNodeId: n.id,
+      className: n.path_label ?? n.name,
+      entry: entries.find(e =>
+        e.class_node_id === n.id &&
+        e.day_of_week === dayOfWeek &&
+        e.period_id === active.id,
+      ) ?? null,
+    }))
+  }
+
+  return {
+    status: active.is_break ? 'break' : 'in_period',
+    dayOfWeek,
+    currentPeriod: active,
+    secondsRemaining,
+    progressFraction,
+    liveGrid,
+    upcoming: buildUpcoming(nonBreak, nowMin),
+  }
+}
+
+function buildUpcoming(nonBreak: Period[], nowMin: number): UpcomingPeriodInfo[] {
+  return nonBreak
+    .filter(p => toMinutes(p.start_time) > nowMin)
+    .slice(0, 5)
+    .map(p => ({ period: p, startsInMin: Math.round(toMinutes(p.start_time) - nowMin) }))
+}
+
 // ─── Day name helper ──────────────────────────────────────────────────────────
 
 const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']

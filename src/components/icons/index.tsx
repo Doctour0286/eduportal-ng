@@ -100,6 +100,8 @@ export type IconName =
   // TimetableModule.tsx
   | 'door-open'
   | 'printer'
+  // LivePeriodWidget.tsx (Session 26)
+  | 'chevron-down'
   // LibraryModule.tsx
   | 'refresh-cw'
   | 'file-text'
@@ -451,6 +453,10 @@ const ICONS: Record<IconName, React.ReactNode> = {
       <path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6" />
       <rect x="6" y="14" width="12" height="8" rx="1" />
     </>
+  ),
+  // Lucide: "chevron-down" — LivePeriodWidget expand/collapse toggle.
+  'chevron-down': (
+    <path d="m6 9 6 6 6-6" />
   ),
   // Lucide: "refresh-cw" — LibraryModule "Borrowed" stat card.
   'refresh-cw': (
