@@ -79,6 +79,16 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { loadPayrollVisibilitySettings, setMyPayslipCardHidden } from '../services/hrService'
+import {
+  loadStaffPreferences,
+  saveStaffPreferences,
+  DEFAULT_STAFF_PREFERENCES,
+  type StaffPreferences,
+  type SoundTypePref,
+  type AlertScopePref,
+} from '../services/settingsService'
+import { playAlarmTone, requestNotificationPermission, notificationsSupported, getNotificationPermission } from '../services/alarmService'
+import type { ThemeMode } from '../services/themeService'
 import { Icon } from '../components/icons'
 
 const MIN_PASSWORD_LENGTH = 8
@@ -148,7 +158,24 @@ function PasswordInput({
   )
 }
 
-export default function AccountPreferencesScreen() {
+export default function AccountPreferencesScreen({
+  themeMode,
+  setThemeMode,
+}: {
+  /** Session/dark-mode (§12, 2026-07-09) — resolved and persisted at
+   *  App.tsx's level (loadThemePreference/saveThemePreference against
+   *  app_identity_preferences), not self-resolved here the way
+   *  AlarmSettingsSection resolves staffId, because dark mode applies
+   *  app-wide (data-theme on <html>, brand re-derivation) the instant it
+   *  changes — that has to happen in the one place already coordinating
+   *  both of those (App.tsx), not independently in a leaf component that
+   *  only renders when this screen happens to be open. This is the one
+   *  section on this screen that takes props rather than resolving
+   *  everything itself; every other section's "no props" shape still
+   *  holds for settings that are genuinely local to this screen. */
+  themeMode: ThemeMode
+  setThemeMode: (mode: ThemeMode) => Promise<{ error: string | null }>
+}) {
   const actorType = useAuthStore((s) => s.actorType)
 
   return (
@@ -160,10 +187,10 @@ export default function AccountPreferencesScreen() {
 
       <PasswordSection />
       {actorType === 'staff' && <PayslipVisibilitySection />}
-      <PlaceholderSection icon={<Icon name="palette" size={18} />} label="Theme" note="Light/dark mode — coming soon" />
+      <ThemeSection themeMode={themeMode} setThemeMode={setThemeMode} />
       <PlaceholderSection icon={<Icon name="globe" size={18} />} label="Language" note="Coming soon" />
       <PlaceholderSection icon={<Icon name="font-size" size={18} />} label="Font size" note="Coming soon" />
-      <PlaceholderSection icon={<Icon name="alarm-clock" size={18} />} label="Alarm" note="Coming soon" />
+      {actorType === 'staff' && <AlarmSettingsSection />}
     </div>
   )
 }
@@ -488,6 +515,382 @@ function PayslipVisibilitySection() {
             </div>
           </form>
         </>
+      )}
+    </section>
+  )
+}
+
+// ─── Theme section ──────────────────────────────────────────────────────────
+// §12 (2026-07-09) — dark mode, decided in scope for every actor type, so
+// unlike AlarmSettingsSection this doesn't self-resolve via staffId (which
+// is null for guardians/students). themeMode/setThemeMode are passed down
+// from App.tsx, which is already the one place coordinating data-theme on
+// <html> and the brand-scale re-derivation that also has to happen the
+// instant this changes — duplicating that coordination here would mean
+// two places independently deciding "what theme is it," which is exactly
+// the kind of disagreement Session 23's original --color-brand-600 bug
+// was caused by (see themeService.ts's header comment).
+//
+// No debounced autosave here (contrast AlarmSettingsSection's 500ms
+// timer) — there's only one field, a toggle, not several independently-
+// editable ones a person might adjust in quick succession, so saving
+// immediately on click is simpler and just as correct.
+function ThemeSection({
+  themeMode,
+  setThemeMode,
+}: {
+  themeMode: ThemeMode
+  setThemeMode: (mode: ThemeMode) => Promise<{ error: string | null }>
+}) {
+  const [open, setOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const isDark = themeMode === 'dark'
+
+  async function handleToggle() {
+    setSaving(true)
+    setSaveError(null)
+    const nextMode: ThemeMode = isDark ? 'light' : 'dark'
+    const res = await setThemeMode(nextMode)
+    setSaving(false)
+    if (res.error) setSaveError(res.error)
+  }
+
+  return (
+    <section className="acctprefs-section">
+      <button
+        className="acctprefs-section-toggle"
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <h2 className="acctprefs-section-title">
+          <span className="acctprefs-section-icon"><Icon name="palette" size={18} /></span>
+          Theme
+        </h2>
+        <span className="acctprefs-section-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {!open && (
+        <p className="acctprefs-placeholder-note">{isDark ? 'Dark' : 'Light'}</p>
+      )}
+
+      {open && (
+        <div className="acctprefs-form">
+          {saveError && <p className="acctprefs-error" role="alert">{saveError}</p>}
+
+          <label className="acctprefs-row">
+            <span className="acctprefs-row-label">Dark mode</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isDark}
+              disabled={saving}
+              className={`acctprefs-toggle-track${isDark ? ' acctprefs-toggle-track--on' : ''}`}
+              onClick={handleToggle}
+            >
+              <span className="acctprefs-toggle-thumb" />
+            </button>
+          </label>
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ─── Alarm settings section ──────────────────────────────────────────────────
+// Session 28 (PRD Problem 6.6). Same self-resolving shape as
+// PayslipVisibilitySection above: no props, staffId/schoolId pulled from
+// useAuthStore, only mounted for actorType === 'staff' (see parent
+// component) since alert_scope's 'mine' vs 'all' distinction — and indeed
+// the whole staff_preferences row — is meaningless for guardians/students/
+// platform_admins (migration_session_28.sql, alert_scope column comment).
+//
+// Unlike Password/Payslip, this section has no re-auth step — alarm volume
+// and sound type are not sensitive data, so there's no "confirm it's you"
+// friction here, matching the migration's own choice not to audit-log this
+// table either (both decisions rest on the same "low-stakes personal
+// preference" reasoning).
+//
+// Starts collapsed like every other section on this screen (Session 19
+// precedent), but for a different reason here: not security, just so the
+// screen doesn't front-load nine controls nobody asked to see yet. Loads
+// current prefs on mount regardless of open/closed state (cheap single
+// read, and needed so the collapsed summary line can say what's on file).
+//
+// "Test sound" calls playAlarmTone directly (not playAlarmToneRepeated) —
+// per alarmService.ts's own doc comment, a test always plays once
+// regardless of the saved repeat count, since the point of a test is "what
+// does this sound like," not "what will actually happen at period end."
+// The button itself is the real user gesture alarmService.ts requires
+// before AudioContext will play at all — this is the first place in the
+// app a teacher can ever hear one of these tones.
+
+const SOUND_TYPE_OPTIONS: { value: SoundTypePref; label: string }[] = [
+  { value: 'chime', label: 'Chime' },
+  { value: 'bell', label: 'Bell' },
+  { value: 'buzzer', label: 'Buzzer' },
+  { value: 'digital', label: 'Digital' },
+]
+
+const ALERT_SCOPE_OPTIONS: { value: AlertScopePref; label: string }[] = [
+  { value: 'mine', label: 'My periods only' },
+  { value: 'all', label: 'Every period, school-wide' },
+]
+
+function AlarmSettingsSection() {
+  const staffId = useAuthStore((s) => s.actorRecordId)
+  const schoolId = useAuthStore((s) => s.schoolId)
+
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [prefs, setPrefs] = useState<StaffPreferences>(DEFAULT_STAFF_PREFERENCES)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  // Read-only reflection of the browser's own Notification permission —
+  // not something this component can set directly (only requestPermission()
+  // inside a real click can), just displayed so a teacher who's toggled
+  // browser_notif on but was denied (or hasn't decided) sees why nothing
+  // shows up, instead of the setting silently doing nothing forever.
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(
+    () => getNotificationPermission(),
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      if (!staffId) return
+      setLoading(true)
+      const res = await loadStaffPreferences(staffId)
+      if (!cancelled) {
+        setPrefs(res.data)
+        setLoadError(res.error)
+        setLoading(false)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [staffId])
+
+  // Debounced autosave — every toggle/select/slider change updates local
+  // state immediately (so the UI feels instant) and schedules a save
+  // shortly after; rapid changes (e.g. dragging the volume slider) collapse
+  // into a single write rather than one per pixel of drag.
+  useEffect(() => {
+    if (loading || !staffId || !schoolId) return
+    setSaving(true)
+    setSaveError(null)
+    const timer = setTimeout(async () => {
+      const res = await saveStaffPreferences(schoolId, staffId, prefs)
+      setSaving(false)
+      if (res.error) {
+        setSaveError(res.error)
+      } else {
+        setSavedAt(Date.now())
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs, staffId, schoolId])
+
+  function update<K extends keyof StaffPreferences>(key: K, value: StaffPreferences[K]) {
+    setPrefs((p) => ({ ...p, [key]: value }))
+  }
+
+  // The click that turns this ON is itself the real user gesture the
+  // Notification API requires to prompt at all — deferring the request to
+  // whenever the first alarm actually fires (inside LivePeriodWidget's tick
+  // loop) would not be a gesture, and the browser would just refuse to ask.
+  // Turning it off never needs a permission request, only the preference
+  // write, so only the "turning on" branch calls requestNotificationPermission.
+  async function handleBrowserNotifToggle() {
+    const turningOn = !prefs.browser_notif
+    update('browser_notif', turningOn)
+    if (turningOn) {
+      const result = await requestNotificationPermission()
+      setNotifPermission(result)
+    }
+  }
+
+  if (loading) {
+    return null
+  }
+
+  return (
+    <section className="acctprefs-section">
+      <button
+        className="acctprefs-section-toggle"
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <h2 className="acctprefs-section-title">
+          <span className="acctprefs-section-icon"><Icon name="alarm-clock" size={18} /></span>
+          Alarm
+        </h2>
+        <span className="acctprefs-section-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {!open && (
+        <p className="acctprefs-placeholder-note">
+          {prefs.sound_enabled
+            ? `${SOUND_TYPE_OPTIONS.find(o => o.value === prefs.sound_type)?.label ?? prefs.sound_type} sound, ${prefs.alert_scope === 'mine' ? 'your periods only' : 'every period'}.`
+            : 'Sound is off.'}
+        </p>
+      )}
+
+      {open && (
+        <div className="acctprefs-form">
+          {loadError && <p className="acctprefs-error" role="alert">{loadError}</p>}
+
+          <label className="acctprefs-row">
+            <span className="acctprefs-row-label">Play a sound at period end</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={prefs.sound_enabled}
+              className={`acctprefs-toggle-track${prefs.sound_enabled ? ' acctprefs-toggle-track--on' : ''}`}
+              onClick={() => update('sound_enabled', !prefs.sound_enabled)}
+            >
+              <span className="acctprefs-toggle-thumb" />
+            </button>
+          </label>
+
+          <label className="acctprefs-field">
+            <span className="acctprefs-label">Sound</span>
+            <select
+              className="acctprefs-select"
+              value={prefs.sound_type}
+              disabled={!prefs.sound_enabled}
+              onChange={(e) => update('sound_type', e.target.value as SoundTypePref)}
+            >
+              {SOUND_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="acctprefs-slider-row">
+            <span className="acctprefs-label">Volume — {Math.round(prefs.sound_vol * 100)}%</span>
+            <input
+              type="range"
+              className="acctprefs-slider"
+              min={0}
+              max={1}
+              step={0.05}
+              value={prefs.sound_vol}
+              disabled={!prefs.sound_enabled}
+              onChange={(e) => update('sound_vol', parseFloat(e.target.value))}
+            />
+          </div>
+
+          <label className="acctprefs-field">
+            <span className="acctprefs-label">Repeat</span>
+            <select
+              className="acctprefs-select"
+              value={prefs.sound_repeat}
+              disabled={!prefs.sound_enabled}
+              onChange={(e) => update('sound_repeat', parseInt(e.target.value, 10))}
+            >
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>{n} time{n > 1 ? 's' : ''}</option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="button"
+            className="acctprefs-test-btn"
+            disabled={!prefs.sound_enabled}
+            onClick={() => playAlarmTone(prefs.sound_type, 'end', prefs.sound_vol)}
+          >
+            Test sound
+          </button>
+
+          <hr className="acctprefs-divider" />
+
+          <label className="acctprefs-row">
+            <span className="acctprefs-row-label">
+              Early warning
+              <span className="acctprefs-row-sublabel">A shorter heads-up sound before the period actually ends</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={prefs.early_warning}
+              className={`acctprefs-toggle-track${prefs.early_warning ? ' acctprefs-toggle-track--on' : ''}`}
+              disabled={!prefs.sound_enabled}
+              onClick={() => update('early_warning', !prefs.early_warning)}
+            >
+              <span className="acctprefs-toggle-thumb" />
+            </button>
+          </label>
+
+          {prefs.early_warning && (
+            <label className="acctprefs-field">
+              <span className="acctprefs-label">Warn me</span>
+              <select
+                className="acctprefs-select"
+                value={prefs.warn_lead_min}
+                disabled={!prefs.sound_enabled}
+                onChange={(e) => update('warn_lead_min', parseInt(e.target.value, 10))}
+              >
+                {[1, 2, 3, 5, 10, 15].map((n) => (
+                  <option key={n} value={n}>{n} minute{n > 1 ? 's' : ''} before</option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <hr className="acctprefs-divider" />
+
+          <label className="acctprefs-field">
+            <span className="acctprefs-label">Alert me for</span>
+            <select
+              className="acctprefs-select"
+              value={prefs.alert_scope}
+              onChange={(e) => update('alert_scope', e.target.value as AlertScopePref)}
+            >
+              {ALERT_SCOPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="acctprefs-row">
+            <span className="acctprefs-row-label">
+              Browser notification
+              <span className="acctprefs-row-sublabel">Also show a system notification, not just a sound</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={prefs.browser_notif}
+              className={`acctprefs-toggle-track${prefs.browser_notif ? ' acctprefs-toggle-track--on' : ''}`}
+              onClick={handleBrowserNotifToggle}
+            >
+              <span className="acctprefs-toggle-thumb" />
+            </button>
+          </label>
+
+          {prefs.browser_notif && !notificationsSupported() && (
+            <p className="acctprefs-placeholder-note">
+              This browser doesn't support notifications — you'll still hear the sound.
+            </p>
+          )}
+          {prefs.browser_notif && notificationsSupported() && notifPermission === 'denied' && (
+            <p className="acctprefs-placeholder-note">
+              Notifications are blocked for this site in your browser settings — you'll still hear the sound.
+            </p>
+          )}
+
+          {saveError && <p className="acctprefs-error" role="alert">{saveError}</p>}
+          {!saveError && saving && <p className="acctprefs-placeholder-note">Saving…</p>}
+          {!saveError && !saving && savedAt && <p className="acctprefs-saved-note">Saved</p>}
+        </div>
       )}
     </section>
   )

@@ -209,12 +209,15 @@
 
   /* ────────────────────────────────────────────────────────────
      Session 23 (closure pass, 2026-07-08) — fuller reference
-     token vocabulary, light-theme only. Dark mode is explicitly
-     OUT of scope for this pass — deferred to Session 28, bundled
-     with the settings-persistence-model decision (per-device vs.
-     per-account), per owner direction. No [data-theme="dark"]
-     block, no theme_mode schema/storage, nothing dark-mode-
-     related is added here. See §12 for the recorded deferral.
+     token vocabulary, light-theme (:root) values below. Dark mode
+     was deferred out of this pass at the time — see §12's original
+     2026-07-08 deferral note — but has since been decided in scope
+     (§12, 2026-07-09) and is now implemented as its own
+     [data-theme="dark"] block immediately after this :root block
+     closes, once the settings-persistence bundle it was waiting on
+     (app_identity_preferences.theme_mode, per-account) was resolved.
+     This comment is left in place, corrected, rather than deleted,
+     so the history of the deferral itself isn't silently erased.
      ──────────────────────────────────────────────────────────── */
 
   /* Parchment neutral scale — the reference app's warm off-white
@@ -279,6 +282,135 @@
   --motion-slow:   0.3s;
 }
 
+/* ────────────────────────────────────────────────────────────────
+   Dark mode (§12, decided 2026-07-09 — bundled decision resolved:
+   per-account storage via app_identity_preferences.theme_mode,
+   see migration_dark_mode.sql / migration_dark_mode_fix.sql and
+   settingsService.ts's loadThemePreference/saveThemePreference).
+
+   [data-theme="dark"] attribute set on <html> by App.tsx at boot
+   (from the loaded theme_mode) and on toggle — see App.tsx and
+   AccountPreferencesScreen.tsx's Theme section.
+
+   --color-brand-* is NOT redeclared here. It's already
+   theme-aware: themeService.ts's applyBrandTheme(hex, mode) derives
+   the full brand scale fresh against the correct surface color
+   every time mode changes (DARK_SURFACE_HEX = #111827, matching
+   --color-neutral-900 below) and writes it as inline :root custom
+   properties, which this selector's own declarations would only
+   fight with if duplicated here. Same principle already applies to
+   --color-gold-*: checked directly (see PR notes) that gold-500
+   measures 7.33:1 against #111827 -- actually clearer on dark than
+   on light (2.42:1, expected -- gold is documented as a small-accent
+   role, never body text) -- so per §12's "gold is a fixed accent,
+   never derived" decision, it is intentionally NOT redeclared here
+   either. Both stay exactly as :root defines them in every theme.
+
+   Neutral scale: inverted, not redesigned. Verified first (grep
+   across every call site) that the existing scale is used with a
+   single consistent direction -- 50/100/200/300 are backgrounds/
+   borders (154 sites), 400-900 are text (78 sites), with zero sites
+   using one shade for both roles. That consistency is exactly what
+   makes a straight inversion safe: every existing call site
+   (`var(--color-neutral-50)` for a light background, `var(--color-
+   neutral-900)` for dark text) keeps working unchanged and just
+   resolves differently under this attribute, the same "declare
+   the token, don't touch 250+ call sites" philosophy Session 23
+   already used for the rest of this file.
+   ──────────────────────────────────────────────────────────────── */
+[data-theme="dark"] {
+  /* Legacy base pair (Phase 0/5) */
+  --color-bg:             #0b0f19;
+  --color-bg-page:        #0b0f19;
+  --color-bg-subtle:      #131a2a;
+  --color-surface:        #111827;
+  --color-surface-raised: #1a2333;
+  --color-border:         #2a3548;
+  --color-text:           #f1f5f9;
+  --color-text-muted:     #94a3b8;
+  --color-text-inverse:   #0f172a;
+  /* --color-white intentionally NOT flipped -- several call sites use
+     it for "always-white" roles (e.g. text on a colored solid fill)
+     that must stay literally white regardless of theme, same reason
+     --color-brand-on/--color-gold-on are computed per-fill rather
+     than reusing a flipped neutral. */
+
+  /* Neutral scale -- straight inversion (50<->900, 100<->800, etc.),
+     safe per the usage audit above. */
+  --color-neutral-50:     #111827;
+  --color-neutral-100:    #1a2333;
+  --color-neutral-200:    #2a3548;
+  --color-neutral-300:    #3d4a61;
+  --color-neutral-400:    #64748b;
+  --color-neutral-500:    #94a3b8;
+  --color-neutral-600:    #cbd5e1;
+  --color-neutral-700:    #e2e8f0;
+  --color-neutral-800:    #f1f5f9;
+  --color-neutral-900:    #f8fafc;
+
+  /* Text roles -- same inversion logic as the neutral scale these
+     mirror (they were declared as literal copies of neutral-900/
+     500/400 in :root, so they invert the same direction). */
+  --color-text-primary:   #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-tertiary:  #94a3b8;
+  --color-text-subtle:    #94a3b8;
+
+  /* Status "subtle" background tiers -- these are light background
+     fills in :root (e.g. --color-success-subtle behind a success
+     badge's text). Flipped to dark, desaturated-toward-surface
+     versions of the same hue rather than the light-mode value
+     verbatim, for the same reason brand tints mix toward the
+     surface now (themeService.ts) -- a pastel near-white chip would
+     look jarring sitting on a dark surface. The solid 500-800 tones
+     are NOT redeclared: unlike the subtle tiers they're already
+     saturated enough to read reasonably on either surface, and
+     redeclaring them risks drifting from the light-mode value for
+     a status color where consistency (a teacher recognizing "red
+     always means this") matters more than surface-optimized
+     contrast. */
+  --color-success-subtle: #0f2a1c;
+  --color-success-100:    #14532d;
+
+  --color-danger-subtle:  #2a1414;
+  --color-danger-50:      #2a1414;
+  --color-danger-100:     #451a1a;
+
+  --color-warning-subtle: #2a2011;
+  --color-warning-50:     #2a2011;
+  --color-warning-100:    #451a03;
+  --color-warning-200:    #78350f;
+
+  /* Parchment scale -- inverted for consistency with the rest of
+     this block, though nothing in the codebase reads it yet
+     (verified: its only current references are its own :root
+     declarations) -- declared now so a future consumer gets a
+     correct dark value automatically rather than this being
+     silently missed later. */
+  --color-parchment-50:  #2e2619;
+  --color-parchment-100: #4a3e29;
+  --color-parchment-200: #6b5a39;
+  --color-parchment-300: #8a7549;
+  --color-parchment-400: #ad9563;
+  --color-parchment-500: #cbb789;
+  --color-parchment-600: #e3d5b8;
+  --color-parchment-700: #f0e8d8;
+  --color-parchment-800: #f8f3ea;
+  --color-parchment-900: #fdfbf7;
+
+  /* Shadows -- a black-alpha shadow reads as elevation against a
+     light surface but is nearly invisible dark-on-dark. Lightened
+     and slightly increased in opacity so elevation is still legible
+     against #111827-family surfaces; --shadow-xl included even
+     though its own light-mode declaration lives outside this
+     session's original :root edit, for the same completeness
+     reason as parchment above. */
+  --shadow-sm:  0 1px 2px 0 rgb(255 255 255 / 0.04);
+  --shadow-md:  0 4px 6px -1px rgb(255 255 255 / 0.08);
+  --shadow-lg:  0 10px 15px -3px rgb(255 255 255 / 0.08);
+  --shadow-xl:  0 20px 25px -5px rgb(255 255 255 / 0.10), 0 8px 10px -6px rgb(255 255 255 / 0.08);
+}
+
 /* RTL support — flips layout for Arabic */
 [dir="rtl"] {
   --font-sans: 'Noto Sans Arabic', system-ui, sans-serif;
@@ -335,7 +467,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
-  background: white;
+  background: var(--color-surface);
   border-bottom: 1px solid var(--color-neutral-200, #e5e7eb);
   position: sticky;
   top: 0;
@@ -761,7 +893,7 @@ body {
   font-size: 1rem;
   border: 1.5px solid var(--color-neutral-300, #d1d5db);
   border-radius: 10px;
-  background: white;
+  background: var(--color-surface);
   color: var(--color-neutral-900, #111827);
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -859,7 +991,7 @@ body {
   font-size: 0.9375rem;
   border: 1.5px solid var(--color-neutral-300, #d1d5db);
   border-radius: 10px;
-  background: white;
+  background: var(--color-surface);
   color: var(--color-neutral-900, #111827);
   outline: none;
   resize: vertical;
@@ -1031,7 +1163,7 @@ body {
 }
 
 .wizard-header {
-  background: white;
+  background: var(--color-surface);
   padding: 1rem 1.25rem 1rem;
   border-bottom: 1px solid var(--color-neutral-200, #e5e7eb);
   position: sticky;
@@ -1086,7 +1218,7 @@ body {
   height: 20px;
   border-radius: 50%;
   border: 2px solid var(--color-neutral-300, #d1d5db);
-  background: white;
+  background: var(--color-surface);
   cursor: pointer;
   padding: 0;
   transition: all 0.15s;
@@ -1175,7 +1307,7 @@ body {
   border: 2px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 10px;
   cursor: pointer;
-  background: white;
+  background: var(--color-surface);
   transition: all 0.15s;
   font-size: 0.875rem;
   font-weight: 500;
@@ -1204,7 +1336,7 @@ body {
   align-items: flex-start;
   gap: 1rem;
   padding: 1rem;
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 12px;
 }
@@ -1269,7 +1401,7 @@ body {
   min-height: 44px;
   border-radius: 22px;
   border: 2px solid var(--color-neutral-200, #e5e7eb);
-  background: white;
+  background: var(--color-surface);
   font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
@@ -1362,7 +1494,7 @@ body {
   padding: 0.625rem;
   border: 1.5px solid var(--color-neutral-300, #d1d5db);
   border-radius: 10px;
-  background: white;
+  background: var(--color-surface);
   min-height: 56px;
   cursor: text;
 }
@@ -1411,7 +1543,7 @@ body {
   top: 100%;
   left: 0;
   right: 0;
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 10px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.12);
@@ -1452,7 +1584,7 @@ body {
   min-height: 36px;
   border-radius: 20px;
   border: 1.5px dashed var(--color-neutral-300, #d1d5db);
-  background: white;
+  background: var(--color-surface);
   font-size: 0.8125rem;
   color: var(--color-neutral-600, #4b5563);
   cursor: pointer;
@@ -1470,7 +1602,7 @@ body {
 ═══════════════════════════════════════════════════════════════════ */
 
 .class-add-form {
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 12px;
   padding: 1rem;
@@ -1480,7 +1612,7 @@ body {
 }
 
 .class-tree {
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 12px;
   overflow: hidden;
@@ -1571,7 +1703,7 @@ body {
 }
 
 .role-add-form {
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 12px;
   padding: 1rem;
@@ -1645,7 +1777,7 @@ body {
 }
 
 .staff-added-row {
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-brand-200);
   border-radius: 10px;
   padding: 0.875rem;
@@ -1683,7 +1815,7 @@ body {
 }
 
 .staff-add-form {
-  background: white;
+  background: var(--color-surface);
   border: 1.5px solid var(--color-neutral-200, #e5e7eb);
   border-radius: 12px;
   padding: 1rem;
@@ -1704,7 +1836,7 @@ body {
 
 .bottom-nav {
   display: flex;
-  background: white;
+  background: var(--color-surface);
   border-top: 1px solid var(--color-neutral-200, #e5e7eb);
   padding-bottom: env(safe-area-inset-bottom, 0);
   position: sticky;
@@ -1768,7 +1900,7 @@ body {
   align-items: center;
   gap: 0.875rem;
   padding: 0.875rem 1rem;
-  background: white;
+  background: var(--color-surface);
   border: none;
   width: 100%;
   cursor: pointer;
@@ -3059,6 +3191,11 @@ body {
   border: 1px solid var(--color-border, #e5e7eb);
   margin-bottom: var(--space-3);
   overflow: hidden;
+  /* .app-header is position:sticky at top:0 (56px min-height) — scrollIntoView
+     has no notion of sticky headers, so without this the widget's top (and
+     the first grid row once expanded) ends up scrolled underneath it instead
+     of below it. */
+  scroll-margin-top: 64px;
 }
 
 .lpw-root--live {
@@ -3166,6 +3303,17 @@ body {
   gap: var(--space-4);
   border-top: 1px solid var(--color-border, #e5e7eb);
   padding-top: var(--space-3);
+  /* Backup for very short viewports: even after LivePeriodWidget scrolls
+     itself into view on expand, a long per-class grid + upcoming list can
+     still exceed the visible height. Cap it and let it scroll internally
+     rather than being clipped with no way to reach the rest. Extra bottom
+     padding keeps the final row from sitting flush against the edge, which
+     otherwise reads as "cut off" even once it's fully scrolled into view. */
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(var(--space-4) + var(--space-2));
+  scroll-padding-block: var(--space-2);
 }
 
 .lpw-grid {
@@ -10483,7 +10631,7 @@ body {
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--color-text-primary, #111827);
-  background: #ffffff;
+  background: var(--color-surface);
   border: 1px solid var(--color-border, #e5e7eb);
   border-radius: var(--radius-sm, 4px);
   padding: var(--space-1, 4px) var(--space-2, 8px);
@@ -14719,6 +14867,145 @@ body {
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* ── Alarm settings (Session 28, PRD Problem 6.6) ─────────────────────────────
+   Reuses .set-toggle-*'s exact track/thumb shape and transitions (already
+   proven in SettingsModule.tsx) but ported under the acctprefs- prefix so
+   this file stays self-contained per its own header's "no props, resolves
+   its own data" convention — reaching into set-* directly would blur the
+   file boundary SettingsModule.tsx vs AccountPreferencesScreen.tsx are
+   meant to keep (admin settings vs self-service settings). Select styling
+   likewise mirrors .set-select but namespaced the same way. */
+
+.acctprefs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  min-height: 44px;
+}
+
+.acctprefs-row-label {
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-primary);
+  flex: 1;
+}
+
+.acctprefs-row-sublabel {
+  display: block;
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--color-text-secondary, #6b7280);
+  margin-top: 2px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.acctprefs-toggle-track {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--color-border, #e5e7eb);
+  transition: background 0.2s;
+  flex-shrink: 0;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+}
+
+.acctprefs-toggle-track--on {
+  background: var(--color-brand-600, #2563eb);
+}
+
+.acctprefs-toggle-track:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.acctprefs-toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.2s;
+}
+
+.acctprefs-toggle-track--on .acctprefs-toggle-thumb {
+  transform: translateX(18px);
+}
+
+.acctprefs-select {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  padding-right: var(--space-8, 32px);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: var(--radius-md, 8px);
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-primary);
+  background: var(--color-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 44px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.acctprefs-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.acctprefs-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+  padding: var(--space-2, 8px) 0;
+}
+
+.acctprefs-slider {
+  width: 100%;
+  accent-color: var(--color-brand-600, #2563eb);
+}
+
+.acctprefs-slider:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.acctprefs-divider {
+  height: 1px;
+  background: var(--color-border, #e5e7eb);
+  border: none;
+  margin: var(--space-3, 12px) 0;
+}
+
+.acctprefs-test-btn {
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 600;
+  color: var(--color-brand-600, #2563eb);
+  background: var(--color-brand-50, #eff6ff);
+  border: 1px solid var(--color-brand-100, #dbeafe);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.acctprefs-test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.acctprefs-saved-note {
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--color-success, #16a34a);
+  margin: 0;
+}
+
 /* ── Students stat strip (PRD Session 22, Problem 5.4) ───────────────────────
    Mirrors .att-summary-bar/.att-sum's chip shape/spacing exactly for §4.7
    cross-module consistency, but colors follow this file's own

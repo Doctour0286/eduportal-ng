@@ -17,7 +17,8 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { useAuthStore } from './stores/authStore'
 import { useSchoolStore } from './stores/schoolStore'
-import { applyBrandTheme } from './services/themeService'
+import { applyBrandTheme, type ThemeMode } from './services/themeService'
+import { loadThemePreference, saveThemePreference } from './services/settingsService'
 import { LoginPage } from './routes/LoginPage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
@@ -111,6 +112,12 @@ export default function App() {
   // HRModule so a non-admin staff member can submit/see their own leave requests.
   // Null for guardians/students/platform_admins with no staff row.
   const [currentStaffId, setCurrentStaffId] = useState<string | null>(null)
+  // Dark mode (§12, 2026-07-09) — per-account, via app_identity_preferences,
+  // works for every actor type (not staffId-gated the way currentStaffId
+  // is). Defaults to 'light' until the real preference loads, matching
+  // DEFAULT_STAFF_PREFERENCES' own "sensible default before the first
+  // read resolves" shape elsewhere in this file.
+  const [themeMode, setThemeModeState] = useState<ThemeMode>('light')
   // Account popover (user-icon header button)
   const [accountPopoverOpen, setAccountPopoverOpen] = useState(false)
   // More sheet (replaces full-screen More tab)
@@ -234,6 +241,67 @@ export default function App() {
     return () => { cancelled = true }
   }, [session?.user?.id])
 
+  // Load this signed-in user's theme_mode preference once a session exists.
+  // Works for every actor type (staff/guardian/student/platform_admin) —
+  // unlike currentStaffId above, this isn't staff-gated, since
+  // app_identity_preferences has a row for anyone with a session, not just
+  // staff (§12, 2026-07-09: dark mode decided in scope for all actor
+  // types, which is exactly why it couldn't live on staff_preferences —
+  // see migration_dark_mode.sql). loadThemePreference() self-resolves the
+  // auth user via supabase.auth.getUser() rather than taking session.user.id
+  // as a param — same "no props, resolve from the current session" shape
+  // AccountPreferencesScreen.tsx's own sections already use.
+  useEffect(() => {
+    if (!session?.user?.id) {
+      setThemeModeState('light')
+      return
+    }
+    let cancelled = false
+    loadThemePreference().then(({ data }) => {
+      if (cancelled) return
+      setThemeModeState(data)
+    })
+    return () => { cancelled = true }
+  }, [session?.user?.id])
+
+  // Reflects themeMode onto the DOM as data-theme, which index.css's
+  // [data-theme="dark"] block reads. Separate from the load effect above
+  // so a same-session toggle (setThemeMode below) re-applies immediately
+  // without waiting on a network round trip.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', themeMode)
+  }, [themeMode])
+
+  // Re-derive the brand scale whenever either input changes — the school's
+  // theme_color (set once `school` loads) or themeMode (set once the
+  // preference loads, or on toggle). Both applyBrandTheme call sites
+  // further down (initial school load, onboarding re-fetch) pass
+  // `themeMode` too, but neither of them re-fires on a LATER themeMode
+  // change on its own — a school load event and a theme toggle are
+  // independent triggers, so this effect is what actually re-derives the
+  // scale when someone flips the toggle after the school already loaded.
+  // Deliberately re-reads school.theme_color from useSchoolStore rather
+  // than closing over the schools-query response directly, since that's
+  // the same store TeacherDashboard/AdminDashboard already treat as the
+  // ground truth for "the currently loaded school."
+  useEffect(() => {
+    const currentSchool = useSchoolStore.getState().school
+    if (currentSchool?.theme_color) {
+      applyBrandTheme(currentSchool.theme_color, themeMode)
+    }
+  }, [themeMode])
+
+  // Exposed to AccountPreferencesScreen.tsx's Theme section via a prop
+  // threaded through the account_preferences route below — saves to
+  // app_identity_preferences (fire-and-forget from this function's own
+  // perspective; the section itself surfaces the error) and updates local
+  // state immediately so data-theme (and the brand re-derivation effect
+  // above) reflect the change without waiting on the save round trip.
+  async function setThemeMode(mode: ThemeMode): Promise<{ error: string | null }> {
+    setThemeModeState(mode)
+    return saveThemePreference(mode)
+  }
+
   // Resolve the first role name for the signed-in staff member.
   // Used in the account popover. Non-staff actors get a fixed label derived
   // from their actor type. Runs only when actorRecordId is set.
@@ -309,7 +377,7 @@ export default function App() {
           // admin revisits Settings" gap flagged when this session's
           // Settings-side fix was made.
           if (data.theme_color) {
-            applyBrandTheme(data.theme_color)
+            applyBrandTheme(data.theme_color, themeMode)
           }
         }
       })
@@ -436,7 +504,7 @@ export default function App() {
             // and re-save. Same applyBrandTheme() call as the initial
             // school-load effect above, for the same reason.
             if (data.theme_color) {
-              applyBrandTheme(data.theme_color)
+              applyBrandTheme(data.theme_color, themeMode)
             }
           }
           setForceShowOnboarding(false)
@@ -564,6 +632,8 @@ export default function App() {
           authUserId={session.user.id}
           currentStaffId={currentStaffId}
           actorRecordId={actorRecordId}
+          themeMode={themeMode}
+          setThemeMode={setThemeMode}
           intent={pendingIntent}
           onNavigate={onNavigate}
         />
@@ -642,6 +712,8 @@ function TabContent({
   authUserId,
   currentStaffId,
   actorRecordId,
+  themeMode,
+  setThemeMode,
   intent,
   onNavigate,
 }: {
@@ -653,6 +725,8 @@ function TabContent({
   authUserId: string
   currentStaffId: string | null
   actorRecordId: string | null
+  themeMode: ThemeMode
+  setThemeMode: (mode: ThemeMode) => Promise<{ error: string | null }>
   intent: NavIntent
   onNavigate: (tab: NavTab, intent?: NavIntent) => void
 }) {
@@ -816,7 +890,7 @@ function TabContent({
   }
 
   if (tab === 'settings') {
-    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} />
+    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} />
   }
 
   if (tab === 'guardians') {
@@ -824,7 +898,7 @@ function TabContent({
   }
 
   if (tab === 'account_preferences') {
-    return <AccountPreferencesScreen />
+    return <AccountPreferencesScreen themeMode={themeMode} setThemeMode={setThemeMode} />
   }
 
   // Note: 'more' is intentionally NOT handled here. Per Problem 2.2b, "More" is

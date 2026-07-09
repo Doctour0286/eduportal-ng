@@ -52,6 +52,22 @@
  * bottom) is intentionally the only non-pure export, so a future React
  * Native port can import everything else in this file unchanged and supply
  * its own platform-specific "apply" step.
+ *
+ * DARK MODE (added post-Session-28, §12 2026-07-09): the description above
+ * ("tints toward white," "darkened... against white") is the LIGHT-mode
+ * behavior specifically, still the default (`surfaceHex = '#ffffff'`) so
+ * every pre-existing call site is unaffected. `deriveBrandScale` and
+ * `darkenToContrast` now take that surface color as a real parameter
+ * instead of assuming white: tints mix toward the surface, shades mix
+ * away from it, and the legibility guard darkens-or-lightens toward
+ * whichever pole actually gains contrast against that surface — mixing
+ * toward black only ever helps against a light surface; against a dark
+ * one the same admin-picked hex needs to move toward white instead, or
+ * the guard would make contrast worse, not better. `on`/`on700`/`on800`
+ * are unchanged — those judge contrast for text painted ON TOP OF a
+ * solid brand fill, a different question from "does the brand color read
+ * against the page surface," and stay checked against pure white/black
+ * regardless of mode.
  */
 
 export interface BrandScale {
@@ -168,53 +184,82 @@ export function contrastRatio(hexA: string, hexB: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-/** Darkens `hex` toward black by the minimum amount needed to clear
- *  `minContrast` against white. Binary search over the mix fraction rather
- *  than a fixed step, so the result is the least possible departure from
- *  the admin's original pick — matching this session's "preserve intent,
- *  fix only the failing case" decision, not a blanket desaturation. */
-function darkenToContrast(hex: string, minContrast: number): string {
+/** Pushes `hex` toward whichever pole (black or white) actually increases
+ *  its contrast against `surfaceHex`, by the minimum amount needed to
+ *  clear `minContrast`. Binary search over the mix fraction rather than a
+ *  fixed step, so the result is the least possible departure from the
+ *  admin's original pick — matching this session's "preserve intent, fix
+ *  only the failing case" decision, not a blanket desaturation.
+ *
+ *  Surface-aware by necessity, not just by preference: mixing toward black
+ *  only ever gains contrast against a LIGHT surface (white text stays
+ *  fixed, the color gets darker, the gap widens). Against a DARK surface
+ *  the same black-ward mix does the opposite — it moves the color closer
+ *  to the dark surface and contrast gets worse, not better. The pole has
+ *  to be chosen relative to the surface, not assumed to always be black. */
+function darkenToContrast(hex: string, minContrast: number, surfaceHex: string): string {
   const rgb = hexToRgb(hex);
+  const surfaceIsDark = relativeLuminance(hexToRgb(surfaceHex)) < 0.5;
+  const pole: RGB = surfaceIsDark ? WHITE : BLACK;
   let lo = 0;
   let hi = 1;
   for (let i = 0; i < 30; i++) {
     const mid = (lo + hi) / 2;
-    const candidate = mix(rgb, BLACK, mid);
-    if (contrastRatio(rgbToHex(candidate), '#ffffff') >= minContrast) {
+    const candidate = mix(rgb, pole, mid);
+    if (contrastRatio(rgbToHex(candidate), surfaceHex) >= minContrast) {
       hi = mid;
     } else {
       lo = mid;
     }
   }
-  return rgbToHex(mix(rgb, BLACK, hi));
+  return rgbToHex(mix(rgb, pole, hi));
 }
 
 /**
  * Pure function: given the admin's picked brand hex, derive the full
  * scale. No DOM access — safe to call from a service, a test, or a future
  * React Native theme provider equally.
+ *
+ * `surfaceHex` — the background the derived scale will actually sit on.
+ * Defaults to '#ffffff', so every existing light-mode call site (App.tsx's
+ * two boot-time calls, SettingsModule.tsx's save handler) keeps its exact
+ * prior behavior with zero code changes on their end. Pass the dark
+ * surface color (DARK_SURFACE_HEX below) to derive a scale that's
+ * legible and visually coherent against a dark background instead —
+ * a brand hue picked and verified against white can still fail contrast,
+ * or just look harshly oversaturated, against near-black (see this
+ * file's header note on why no single fixed "safe partner color" exists).
  */
-export function deriveBrandScale(pickedHex: string): BrandScale {
+export function deriveBrandScale(pickedHex: string, surfaceHex: string = '#ffffff'): BrandScale {
   const raw = pickedHex;
+  const surfaceIsDark = relativeLuminance(hexToRgb(surfaceHex)) < 0.5;
 
-  const rawContrast = contrastRatio(raw, '#ffffff');
+  const rawContrast = contrastRatio(raw, surfaceHex);
   const wasAdjustedForContrast = rawContrast < MIN_TEXT_CONTRAST;
   const workingBase = wasAdjustedForContrast
-    ? darkenToContrast(raw, MIN_TEXT_CONTRAST)
+    ? darkenToContrast(raw, MIN_TEXT_CONTRAST, surfaceHex)
     : raw;
   const workingRgb = hexToRgb(workingBase);
 
-  // Tints derived from the WORKING base, not the raw pick — if the raw
-  // pick needed darkening for legibility, its tints should visually agree
-  // with the color actually used for text/buttons, not the original.
-  const tint50 = rgbToHex(mix(workingRgb, WHITE, 0.94));
-  const tint100 = rgbToHex(mix(workingRgb, WHITE, 0.88));
-  const tint200 = rgbToHex(mix(workingRgb, WHITE, 0.72));
-  const tint300 = rgbToHex(mix(workingRgb, WHITE, 0.52));
-  const tint400 = rgbToHex(mix(workingRgb, WHITE, 0.28));
+  // Tints/shades are always relative to the surface, not fixed poles —
+  // matching real theming-engine practice (Adobe Leonardo, Confrere's
+  // runtime palette generator). A "tint" is a subtle version of the brand
+  // color relative to whatever it sits on: mixing toward white when the
+  // surface is dark produces a jarring near-white chip on a dark UI,
+  // not a subtle one. So tints mix TOWARD the surface (subtle, blends
+  // in) and shades mix AWAY from the surface (deeper into the color,
+  // for hover/active states and text-on-tint roles) — in both modes.
+  const tintPole = hexToRgb(surfaceHex);
+  const shadePole: RGB = surfaceIsDark ? WHITE : BLACK;
 
-  const shade700 = rgbToHex(mix(workingRgb, BLACK, 0.2));
-  const shade800 = rgbToHex(mix(workingRgb, BLACK, 0.36));
+  const tint50 = rgbToHex(mix(workingRgb, tintPole, 0.94));
+  const tint100 = rgbToHex(mix(workingRgb, tintPole, 0.88));
+  const tint200 = rgbToHex(mix(workingRgb, tintPole, 0.72));
+  const tint300 = rgbToHex(mix(workingRgb, tintPole, 0.52));
+  const tint400 = rgbToHex(mix(workingRgb, tintPole, 0.28));
+
+  const shade700 = rgbToHex(mix(workingRgb, shadePole, 0.2));
+  const shade800 = rgbToHex(mix(workingRgb, shadePole, 0.36));
 
   const contrastVsWhite = contrastRatio(workingBase, '#ffffff');
   const contrastVsBlack = contrastRatio(workingBase, '#000000');
@@ -223,7 +268,10 @@ export function deriveBrandScale(pickedHex: string): BrandScale {
   // Computed independently per shade, not inherited from `on` — a shade
   // darker than 600 can flip which of black/white actually wins, and
   // reusing `on` blindly was the exact bug this fixes (see BrandScale's
-  // on700/on800 doc comment above).
+  // on700/on800 doc comment above). Still checked against pure white/
+  // black here, not surfaceHex — on/on700/on800 are for text/icons
+  // painted ON TOP OF a solid brand fill, a different contrast question
+  // than "does the brand color read against the page surface."
   const contrast700VsWhite = contrastRatio(shade700, '#ffffff');
   const contrast700VsBlack = contrastRatio(shade700, '#000000');
   const on700 = contrast700VsWhite >= contrast700VsBlack ? '#ffffff' : '#000000';
@@ -251,6 +299,18 @@ export function deriveBrandScale(pickedHex: string): BrandScale {
 }
 
 /**
+ * Dark-mode page surface color. Not an arbitrary invented dark — matches
+ * index.css's own existing --color-neutral-900 (#111827), so the derived
+ * brand scale stays internally consistent with the rest of the app's
+ * already-shipped dark-adjacent color rather than introducing a second,
+ * disagreeing "dark" the way --color-brand-600's un-declared :root value
+ * caused Problem 6.1 in the first place (see this file's header note).
+ */
+export const DARK_SURFACE_HEX = '#111827';
+
+export type ThemeMode = 'light' | 'dark';
+
+/**
  * The only DOM-touching export in this file. Applies a derived scale to
  * `document.documentElement` as real CSS custom properties, matching
  * SettingsModule.tsx's existing single-property call
@@ -258,14 +318,23 @@ export function deriveBrandScale(pickedHex: string): BrandScale {
  * site) but now setting the FULL scale in one call instead of just the
  * one property most of index.css was never actually reading correctly.
  *
+ * `mode` defaults to 'light', so every existing call site (App.tsx's two
+ * boot-time calls, SettingsModule.tsx's save handler) keeps its exact
+ * prior behavior unless explicitly passed 'dark'. Callers that need dark
+ * mode should pass the current theme_mode explicitly and re-call this
+ * whenever that mode toggles, since the derived scale itself changes
+ * with the surface it's computed against — it's not just a CSS
+ * data-attribute switch, the actual color math is different.
+ *
  * Kept as a thin, separately-exported wrapper (not folded into
  * deriveBrandScale) specifically so a React Native theme provider can
  * import deriveBrandScale directly and supply its own platform-specific
  * application step, per §5 — this function is the part that does NOT
  * port as-is, and is named/isolated so that's obvious at a glance.
  */
-export function applyBrandTheme(pickedHex: string): BrandScale {
-  const scale = deriveBrandScale(pickedHex);
+export function applyBrandTheme(pickedHex: string, mode: ThemeMode = 'light'): BrandScale {
+  const surfaceHex = mode === 'dark' ? DARK_SURFACE_HEX : '#ffffff';
+  const scale = deriveBrandScale(pickedHex, surfaceHex);
   const root = document.documentElement.style;
   root.setProperty('--color-brand-raw', scale.raw);
   root.setProperty('--color-brand-50', scale[50]);

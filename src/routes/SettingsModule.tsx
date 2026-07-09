@@ -33,7 +33,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { applyBrandTheme } from '../services/themeService'
+import { applyBrandTheme, type ThemeMode } from '../services/themeService'
 import { Icon } from '../components/icons'
 import {
   loadSchoolSettings,       updateSchoolSettings,
@@ -85,7 +85,11 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export default function SettingsModule({ schoolId, isAdmin }: { schoolId: string; isAdmin: boolean }) {
+export default function SettingsModule({ schoolId, isAdmin, themeMode }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode }) {
+  // themeMode is only consumed by SchoolTab (the brand-color picker), but
+  // is accepted here and passed down since this is the module's entry
+  // point — matches the pattern App.tsx already uses for other props
+  // that only one sub-tab actually needs (e.g. schoolId itself).
   const [activeTab, setActiveTab] = useState<SettingsTab>('school')
 
   if (!isAdmin) return null
@@ -114,7 +118,7 @@ export default function SettingsModule({ schoolId, isAdmin }: { schoolId: string
       </div>
 
       <div className="set-body">
-        {activeTab === 'school'    && <SchoolTab   schoolId={schoolId} />}
+        {activeTab === 'school'    && <SchoolTab   schoolId={schoolId} themeMode={themeMode} />}
         {activeTab === 'calendar'  && <CalendarTab schoolId={schoolId} />}
         {activeTab === 'schedule'  && <ScheduleTab schoolId={schoolId} />}
         {activeTab === 'classes'   && <ClassesTab  schoolId={schoolId} />}
@@ -213,7 +217,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 
 // ─── Tab: School ──────────────────────────────────────────────────────────────
 
-function SchoolTab({ schoolId }: { schoolId: string }) {
+function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: ThemeMode }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [_settings, setSettings] = useState<SchoolSettings | null>(null)
@@ -280,8 +284,8 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
     // guessed at), but it does mean the moment an admin's own Settings
     // tab mounts, the full accessible scale — not just the one raw
     // property the old code set — is correctly re-derived and live.
-    if (s.theme_color) applyBrandTheme(s.theme_color)
-  }, [schoolId])
+    if (s.theme_color) applyBrandTheme(s.theme_color, themeMode)
+  }, [schoolId, themeMode])
 
   useEffect(() => { load() }, [load])
 
@@ -320,7 +324,7 @@ function SchoolTab({ schoolId }: { schoolId: string }) {
       // from this one picked color, so every consumer across the app
       // updates consistently instead of the old single-property write.
       if (themeColor) {
-        const scale = applyBrandTheme(themeColor)
+        const scale = applyBrandTheme(themeColor, themeMode)
         // Surfaced, not acted on: if the admin's exact pick was too
         // light/washed-out to hit 4.5:1 contrast as text/button color,
         // the WORKING brand-600 has been quietly darkened for

@@ -23,15 +23,75 @@
  * `prefers-reduced-motion` is respected globally in index.css — the live dot
  * pulse and expand/collapse both fall back to non-animated states there, not
  * here, so this component doesn't need to branch on it directly.
+ *
+ * Bugfix (this session): expanding the panel used to leave long content
+ * clipped below the fold with no scroll cue, since opening it doesn't
+ * change scroll position on its own. On expand we now scroll the widget's
+ * own root into view; index.css also caps `.lpw-expanded`'s height with
+ * internal overflow as a backup for very short viewports. Separately, three
+ * JSX text nodes were using literal `\uXXXX` escape sequences instead of
+ * real characters — JSX doesn't interpret those in bare text (only inside
+ * JS string literals), so they were rendering as visible backslash-u
+ * codes instead of an em dash / middle dot. Replaced with the actual
+ * unicode characters.
+ *
+ * Alarm wiring (Session 28, PRD Problem 6.6): fires a tone via
+ * alarmService.ts at two moments, purely by watching the same ticked
+ * `LivePeriodState` this component already re-derives every second —
+ * no separate timer, no new network call:
+ *   - "warn" tone once, when `secondsRemaining` first drops to or below
+ *     `warnLeadMin * 60` for the currently-live period (only if
+ *     `early_warning` is on).
+ *   - "end" tone once, the first tick where `currentPeriod.id` has
+ *     changed away from the id we were just tracking as live (covers both
+ *     "period ended, break/next period started" and "period ended, school
+ *     day ended").
+ * Both are latched per period id (`firedWarnFor`/`firedEndFor` refs) so a
+ * re-render or a state object that happens to repeat a value never
+ * double-fires — each period's warn/end tone plays exactly once per actual
+ * occurrence, not once per tick that happens to match the condition.
+ *
+ * `alert_scope: 'all'` vs `'mine'` (staff_preferences, migration_session_28)
+ * IS implemented, using data this component already receives — no new
+ * query. `TimetableEntry` (timetableService.ts) carries `staff_id`
+ * end-to-end from `teaching_assignments`, even though `LiveClassEntry`
+ * (the per-class display row rendered below) only surfaces `staff_name`
+ * for the UI. For the 'mine' check we go straight to `data.entries`
+ * instead — the same array `getCurrentPeriodState()` itself reads from —
+ * filtering on `day_of_week`/`period_id` matching the live/warning period
+ * and `staff_id === staffId`. A teacher with no lesson in the current
+ * period (a free period, or a period taught by someone else in every
+ * class) simply doesn't trigger a 'mine'-scoped alarm for it, which is the
+ * intended meaning of the setting (migration_session_28.sql's alert_scope
+ * column comment).
+ *
+ * Browser notifications (this session, closing a real gap): staff_preferences
+ * .browser_notif was stored and toggleable in Settings but nothing acted on
+ * it. Both firing points below now also call alarmService.ts's
+ * showAlarmNotification() when browser_notif is on — gated the same way as
+ * the tone itself (same alert_scope check, same once-per-occurrence latch;
+ * no separate notification-specific latch, since a notification with no
+ * accompanying tone would be a confusing half-alarm). showAlarmNotification()
+ * itself no-ops silently if permission was never granted — permission must
+ * be requested from a real user gesture elsewhere (the Settings screen's
+ * own browser_notif toggle, not from here, since this tick loop is never a
+ * user gesture and the browser would just refuse to prompt).
+ * firedEndFor's ref shape was widened from a bare period id to
+ * `{ id, label }`, since by the time the "end" tone/notification fires,
+ * `next.currentPeriod` has already moved on to whatever comes after — the
+ * ended period's own label has to be captured at the moment it was still
+ * live, not looked up after the fact.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   getCurrentPeriodState,
   type TimetableData,
   type ClassNode,
   type LivePeriodState,
 } from '../services/timetableService'
+import { playAlarmToneRepeated, showAlarmNotification } from '../services/alarmService'
+import type { StaffPreferences } from '../services/settingsService'
 import { Icon } from './icons'
 
 interface LivePeriodWidgetProps {
@@ -41,6 +101,23 @@ interface LivePeriodWidgetProps {
    *  grid's now-col highlight to the exact same state (Session 26 step 6) —
    *  one shared source of truth, not a second derivation. */
   onStateChange?: (state: LivePeriodState) => void
+  /**
+   * Session 28 — this teacher's own staff_preferences row (or null/undefined
+   * if not yet loaded, or if the viewer isn't staff at all — guardians,
+   * students, and platform_admins have no row per migration_session_28.sql).
+   * Omitting this prop entirely disables alarm firing with no other change
+   * in behavior — existing callers that haven't been updated yet keep
+   * working exactly as before Session 28.
+   */
+  staffPrefs?: StaffPreferences | null
+  /**
+   * Session 28 — the same staff.id staffPrefs was loaded for (App.tsx's
+   * currentStaffId, threaded through TimetableModule). Only used to
+   * evaluate `alert_scope: 'mine'` against `data.entries[].staff_id`; has
+   * no effect when staffPrefs.alert_scope is 'all', and no effect at all if
+   * staffPrefs is omitted.
+   */
+  staffId?: string | null
 }
 
 const STATUS_TEXT: Record<LivePeriodState['status'], string> = {
@@ -66,9 +143,27 @@ function formatClock(t: string): string {
   return `${h}:${mStr} ${ampm}`
 }
 
-export function LivePeriodWidget({ data, classNodes, onStateChange }: LivePeriodWidgetProps) {
+export function LivePeriodWidget({ data, classNodes, onStateChange, staffPrefs, staffId }: LivePeriodWidgetProps) {
   const [state, setState] = useState<LivePeriodState>(() => getCurrentPeriodState(data, classNodes))
   const [expanded, setExpanded] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Session 28 — latches so each period's warn/end tone fires exactly once
+  // per real occurrence, not once per tick that happens to still match the
+  // firing condition. Keyed by period id; reset naturally as ids change.
+  const firedWarnFor = useRef<string | null>(null)
+  const firedEndFor = useRef<{ id: string; label: string } | null>(null)
+
+  // On mobile the expanded panel (per-class grid + upcoming list) can be
+  // taller than the viewport below the banner, so opening it doesn't
+  // visually "move" anything — the content just renders off-screen with no
+  // cue to scroll. Bring the widget's top into view whenever it opens so
+  // the newly-revealed content is actually reachable.
+  useEffect(() => {
+    if (expanded) {
+      rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [expanded])
 
   // Tick every second off Date.now() — no network calls, purely re-derives
   // from data/classNodes already in memory (§4.1).
@@ -77,18 +172,93 @@ export function LivePeriodWidget({ data, classNodes, onStateChange }: LivePeriod
       const next = getCurrentPeriodState(data, classNodes)
       setState(next)
       onStateChange?.(next)
+      fireAlarmsIfNeeded(next)
     }
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, classNodes])
+  }, [data, classNodes, staffPrefs])
+
+  // Session 28 — true if `staffId` has a real (non-free) lesson in the given
+  // day/period, per data.entries (the same array getCurrentPeriodState()
+  // itself reads from — TimetableEntry.staff_id is populated end-to-end
+  // from teaching_assignments in timetableService.ts's loadTimetableData()).
+  // Used only to evaluate alert_scope: 'mine'; always true when scope is
+  // 'all' or staffId is unavailable (handled by the caller before this runs).
+  function teachesThisPeriod(dayOfWeek: number, periodId: string): boolean {
+    if (!staffId) return false
+    return data.entries.some(e =>
+      e.day_of_week === dayOfWeek &&
+      e.period_id === periodId &&
+      e.staff_id === staffId,
+    )
+  }
+
+  // Session 28 — pure side-effect helper, kept out of the tick callback body
+  // itself only for readability; still runs on every 1s tick, same as
+  // setState/onStateChange above.
+  function fireAlarmsIfNeeded(next: LivePeriodState) {
+    if (!staffPrefs || !staffPrefs.sound_enabled) return
+    const scopedToMine = staffPrefs.alert_scope === 'mine'
+
+    const nextIsLive = next.status === 'in_period' || next.status === 'break'
+    const nextPeriodId = next.currentPeriod?.id ?? null
+
+    // "End" tone: the period id we were tracking as live has changed to
+    // something else (a new period/break started, or school ended/broke).
+    // Guard on firedEndFor to fire exactly once per period id, not once
+    // per tick after the change. Scope check runs against the day/period
+    // that just ended (firedEndFor.current + next.dayOfWeek — the day
+    // can't change mid-period, so reusing next.dayOfWeek here is safe),
+    // not the one we're moving into — "mine" means "a period I taught just
+    // ended," regardless of whose period comes next.
+    const previousLivePeriod = firedEndFor.current
+    if (previousLivePeriod && previousLivePeriod.id !== nextPeriodId) {
+      if (!scopedToMine || teachesThisPeriod(next.dayOfWeek, previousLivePeriod.id)) {
+        playAlarmToneRepeated(staffPrefs.sound_type, 'end', staffPrefs.sound_vol, staffPrefs.sound_repeat)
+        if (staffPrefs.browser_notif) {
+          showAlarmNotification(previousLivePeriod.label, 'end')
+        }
+      }
+    }
+    firedEndFor.current = nextIsLive && nextPeriodId && next.currentPeriod
+      ? { id: nextPeriodId, label: next.currentPeriod.label }
+      : null
+
+    // "Warn" tone: only while genuinely live, only if early_warning is on,
+    // only once per period id, only the first tick where secondsRemaining
+    // has actually dropped to/below the configured lead time, and — when
+    // scoped to 'mine' — only if this teacher actually teaches the live
+    // period itself.
+    if (
+      staffPrefs.early_warning &&
+      nextIsLive &&
+      nextPeriodId &&
+      next.secondsRemaining !== null &&
+      next.secondsRemaining <= staffPrefs.warn_lead_min * 60 &&
+      firedWarnFor.current !== nextPeriodId &&
+      (!scopedToMine || teachesThisPeriod(next.dayOfWeek, nextPeriodId))
+    ) {
+      firedWarnFor.current = nextPeriodId
+      playAlarmToneRepeated(staffPrefs.sound_type, 'warn', staffPrefs.sound_vol, 1)
+      if (staffPrefs.browser_notif && next.currentPeriod) {
+        showAlarmNotification(next.currentPeriod.label, 'warn')
+      }
+    }
+    // Once the period id itself changes (whether to another live period, a
+    // break, or nothing), the old latch no longer applies — clear it so a
+    // later live period with the same id (tomorrow) can warn again too.
+    if (firedWarnFor.current && firedWarnFor.current !== nextPeriodId) {
+      firedWarnFor.current = null
+    }
+  }
 
   const isLive = state.status === 'in_period' || state.status === 'break'
   const canExpand = isLive
 
   return (
-    <div className={`lpw-root${isLive ? ' lpw-root--live' : ''}`}>
+    <div ref={rootRef} className={`lpw-root${isLive ? ' lpw-root--live' : ''}`}>
       {/* ── Collapsed banner ────────────────────────────────────────────── */}
       <button
         type="button"
@@ -106,7 +276,7 @@ export function LivePeriodWidget({ data, classNodes, onStateChange }: LivePeriod
           <span className="lpw-status">
             {STATUS_TEXT[state.status]}
             {isLive && state.currentPeriod && (
-              <span className="lpw-period-name"> \u2014 {state.currentPeriod.label}</span>
+              <span className="lpw-period-name"> — {state.currentPeriod.label}</span>
             )}
           </span>
 
@@ -153,7 +323,7 @@ export function LivePeriodWidget({ data, classNodes, onStateChange }: LivePeriod
                     <span className="lpw-grid-subject">
                       {row.entry.subject_name ?? 'Free period'}
                       {row.entry.staff_name && (
-                        <span className="lpw-grid-teacher"> \u00b7 {row.entry.staff_name}</span>
+                        <span className="lpw-grid-teacher"> · {row.entry.staff_name}</span>
                       )}
                     </span>
                   ) : (
@@ -172,7 +342,7 @@ export function LivePeriodWidget({ data, classNodes, onStateChange }: LivePeriod
                   <li key={u.period.id} className="lpw-upcoming-item">
                     <span className="lpw-upcoming-name">{u.period.label}</span>
                     <span className="lpw-upcoming-time">
-                      {formatClock(u.period.start_time)} \u00b7 in {u.startsInMin} min
+                      {formatClock(u.period.start_time)} · in {u.startsInMin} min
                     </span>
                   </li>
                 ))}

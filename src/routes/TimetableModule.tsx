@@ -78,6 +78,7 @@ import {
   type LivePeriodState,
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
+import { loadStaffPreferences, type StaffPreferences } from '../services/settingsService'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/icons'
 import { LivePeriodWidget } from '../components/LivePeriodWidget'
@@ -88,6 +89,17 @@ interface TimetableModuleProps {
   schoolId: string
   schoolName: string
   isAdmin: boolean
+  /**
+   * Session 28 (PRD Problem 6.6) — the signed-in teacher's own staff.id, used
+   * only to load their staff_preferences row (alarm/display settings) and to
+   * resolve `alert_scope: 'mine'` inside <LivePeriodWidget />. null for
+   * guardians/students/platform_admins (no staff_preferences row exists for
+   * those actor types — see migration_session_28.sql) and while App.tsx is
+   * still resolving identity at boot. Optional so existing callers that
+   * haven't been updated yet (if any) don't break — alarms simply stay off
+   * without it, same as before this session.
+   */
+  currentStaffId?: string | null
 }
 
 // ─── View mode ────────────────────────────────────────────────────────────────
@@ -103,7 +115,7 @@ type ArmedChip = null | 'free' | string
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export default function TimetableModule({ schoolId, schoolName, isAdmin }: TimetableModuleProps) {
+export default function TimetableModule({ schoolId, schoolName, isAdmin, currentStaffId = null }: TimetableModuleProps) {
   // ── Core data ────────────────────────────────────────────────────────────────
   const [sessionId, setSessionId]     = useState<string | null>(null)
   const [sessionName, setSessionName] = useState<string>('')
@@ -141,6 +153,33 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
   // now-col highlight can never disagree about which period is current.
   // null until the widget's first tick fires.
   const [currentPeriodState, setCurrentPeriodState] = useState<LivePeriodState | null>(null)
+
+  // ── Alarm/display preferences (Session 28, PRD Problem 6.6) ────────────
+  // Loaded once per mount (and again if currentStaffId itself changes —
+  // shouldn't happen mid-session in practice, but cheap to handle) and
+  // handed straight to <LivePeriodWidget />, which owns all the actual
+  // firing logic. null while loading, while there's no signed-in staff
+  // member (guardians/students/platform_admins never get a row — see
+  // migration_session_28.sql), or if the load fails; LivePeriodWidget
+  // treats null the same as "alarms off," never as an error to surface
+  // here — a failed preferences read shouldn't block the timetable itself.
+  const [staffPrefs, setStaffPrefs] = useState<StaffPreferences | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!currentStaffId) {
+      setStaffPrefs(null)
+      return
+    }
+    async function load() {
+      const res = await loadStaffPreferences(currentStaffId!)
+      if (!cancelled && !res.error) {
+        setStaffPrefs(res.data)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [currentStaffId])
 
   // ── Scroll ref for "Jump to today" ────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -578,6 +617,8 @@ export default function TimetableModule({ schoolId, schoolName, isAdmin }: Timet
           data={ttData}
           classNodes={classNodes}
           onStateChange={setCurrentPeriodState}
+          staffPrefs={staffPrefs}
+          staffId={currentStaffId}
         />
       )}
 

@@ -160,6 +160,174 @@ export interface StaffListItem {
   roles: string[]
 }
 
+// Session 28 (PRD Problem 6.6, §12) — per-account alarm/display prefs.
+// One row per staff member, [SELF] RLS (see migration_session_28.sql) — a
+// staff member only ever reads/writes their own row. Kept in this file
+// (rather than a brand-new service) since AccountPreferencesScreen.tsx
+// already imports hrService for the sibling Payslip section — same
+// "self-service settings" shape, just a different table.
+export type ClockFormatPref = '12h' | '24h'
+export type DefaultViewPref = 'class' | 'teacher'
+export type SoundTypePref = 'chime' | 'bell' | 'buzzer' | 'digital'
+export type AlertScopePref = 'mine' | 'all'
+
+export interface StaffPreferences {
+  clock_format: ClockFormatPref
+  default_day: number | null
+  default_view: DefaultViewPref
+  show_seconds: boolean
+  highlight_col: boolean
+
+  sound_enabled: boolean
+  sound_type: SoundTypePref
+  sound_vol: number
+  sound_repeat: number
+  early_warning: boolean
+  warn_lead_min: number
+  browser_notif: boolean
+  alert_scope: AlertScopePref
+}
+
+// Matches the table's own column defaults (migration_session_28.sql) —
+// returned when a staff member has no row yet (brand-new account, or one
+// that existed before this migration ran), so callers never have to
+// special-case "no preferences saved yet" themselves.
+export const DEFAULT_STAFF_PREFERENCES: StaffPreferences = {
+  clock_format: '12h',
+  default_day: null,
+  default_view: 'class',
+  show_seconds: false,
+  highlight_col: true,
+
+  sound_enabled: true,
+  sound_type: 'chime',
+  sound_vol: 0.70,
+  sound_repeat: 1,
+  early_warning: false,
+  warn_lead_min: 2,
+  browser_notif: false,
+  alert_scope: 'mine',
+}
+
+const STAFF_PREFERENCES_COLUMNS =
+  'clock_format, default_day, default_view, show_seconds, highlight_col, ' +
+  'sound_enabled, sound_type, sound_vol, sound_repeat, early_warning, warn_lead_min, browser_notif, alert_scope'
+
+/**
+ * Loads this staff member's preferences, falling back to
+ * DEFAULT_STAFF_PREFERENCES if no row exists yet (maybeSingle — a missing
+ * row is an expected, non-error state here, not a fault). staffId must be
+ * the caller's own actorRecordId (resolved via authStore), never a
+ * client-chosen id — RLS also enforces this server-side ([SELF] policy);
+ * this is just the client-side mirror of that same rule so a mismatched
+ * staffId fails softly (empty read) rather than surfacing a confusing RLS
+ * error.
+ */
+export async function loadStaffPreferences(staffId: string): Promise<{ data: StaffPreferences; error: string | null }> {
+  const { data, error } = await supabase
+    .from('staff_preferences')
+    .select(STAFF_PREFERENCES_COLUMNS)
+    .eq('staff_id', staffId)
+    .maybeSingle()
+
+  if (error) return { data: DEFAULT_STAFF_PREFERENCES, error: error.message }
+  return {
+    data: data ? (data as StaffPreferences) : DEFAULT_STAFF_PREFERENCES,
+    error: null,
+  }
+}
+
+/**
+ * Upserts this staff member's preferences (onConflict: staff_id, matching
+ * the table's `staff_preferences_one_row_per_staff` unique constraint) —
+ * one round trip whether this is the first save (insert) or the hundredth
+ * (update), same shape as savePublicConfig above. schoolId is required on
+ * insert (school_id is NOT NULL) even though it isn't part of the RLS
+ * predicate, so it's threaded here purely to satisfy the column, not for
+ * any access-control purpose.
+ */
+export async function saveStaffPreferences(
+  schoolId: string,
+  staffId: string,
+  prefs: Partial<StaffPreferences>
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('staff_preferences')
+    .upsert(
+      { school_id: schoolId, staff_id: staffId, ...prefs, updated_at: new Date().toISOString() },
+      { onConflict: 'staff_id' }
+    )
+
+  return { error: error?.message ?? null }
+}
+
+// ─── Theme preference (all actor types) ────────────────────────────────────
+// Dark mode (§12, decided 2026-07-09) needs to work for every signed-in
+// actor type — staff, guardian, student — not just staff, so it can't live
+// on staff_preferences (which has no row at all for guardians/students, by
+// design: migration_session_28.sql). Lives instead in its own
+// app_identity_preferences table (migration_dark_mode.sql), one row per
+// auth.users(id), [SELF] RLS keyed directly on auth.uid() — no props, no
+// staffId/actorRecordId needed, matching AccountPreferencesScreen.tsx's own
+// "every section resolves what it needs from the current session" shape.
+//
+// Session 28 originally reserved a `theme` column on staff_preferences for
+// this; migration_dark_mode.sql drops it as dead (verified unused) now that
+// this is the real, all-actor-types home instead.
+export type ThemeModePref = 'light' | 'dark'
+
+const DEFAULT_THEME_MODE: ThemeModePref = 'light'
+
+/**
+ * Loads the current signed-in user's theme preference. Resolves
+ * auth_user_id itself via supabase.auth.getUser() rather than taking it as
+ * a param — nothing else in the app currently exposes app_identities.id or
+ * the raw auth user id through authStore, and adding it there just for this
+ * would widen that store's surface for a cosmetic setting. maybeSingle: no
+ * row yet (brand-new account, or one that existed before this migration
+ * ran) is an expected, non-error state, matching loadStaffPreferences'
+ * shape — falls back to 'light' rather than surfacing an error for it.
+ */
+export async function loadThemePreference(): Promise<{ data: ThemeModePref; error: string | null }> {
+  const { data: userData, error: userError } = await supabase.auth.getUser()
+  if (userError || !userData.user) {
+    return { data: DEFAULT_THEME_MODE, error: userError?.message ?? 'Not signed in' }
+  }
+
+  const { data, error } = await supabase
+    .from('app_identity_preferences')
+    .select('theme_mode')
+    .eq('auth_user_id', userData.user.id)
+    .maybeSingle()
+
+  if (error) return { data: DEFAULT_THEME_MODE, error: error.message }
+  return {
+    data: (data?.theme_mode as ThemeModePref | undefined) ?? DEFAULT_THEME_MODE,
+    error: null,
+  }
+}
+
+/**
+ * Upserts the current signed-in user's theme preference (onConflict:
+ * auth_user_id, matching the table's app_identity_preferences_one_row_per_user
+ * unique constraint) — same one-round-trip shape as saveStaffPreferences.
+ */
+export async function saveThemePreference(themeMode: ThemeModePref): Promise<{ error: string | null }> {
+  const { data: userData, error: userError } = await supabase.auth.getUser()
+  if (userError || !userData.user) {
+    return { error: userError?.message ?? 'Not signed in' }
+  }
+
+  const { error } = await supabase
+    .from('app_identity_preferences')
+    .upsert(
+      { auth_user_id: userData.user.id, theme_mode: themeMode, updated_at: new Date().toISOString() },
+      { onConflict: 'auth_user_id' }
+    )
+
+  return { error: error?.message ?? null }
+}
+
 // ─── School branding & config ─────────────────────────────────────────────────
 
 export async function loadSchoolSettings(schoolId: string): Promise<{ data: SchoolSettings | null; error: string | null }> {
