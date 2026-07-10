@@ -59,6 +59,30 @@
  * denominators. The 30-day per-student history strip below each name is
  * calendar-aware too — a weekend/holiday with no record renders as a faded
  * "no school" dot, visually distinct from a genuine missed mark.
+ *
+ * Whole-school register (2026-07-10, Session 32 follow-up, owner request:
+ * "mark random attendance across the entire school"): a third selection
+ * kind alongside selectedClass/selectedGroup — selectedAllSchool, picked
+ * via a dedicated "All classes (whole school)" pill in tier 2. Reuses the
+ * same combined-register-grouped-by-arm rendering Session 31 built for
+ * selectedGroup (no separate flat-merge code path), sourcing its leaf-id
+ * list from the already-loaded `classes` array (every leaf in the school)
+ * rather than a new query. Same collapse-on-select and search behavior as
+ * every other selection kind — nothing about those two features is
+ * selection-kind-specific.
+ *
+ * After-hours edit lock (2026-07-10, Session 31, owner request): once a
+ * given date's school hours end (per attendanceService.ts's
+ * getSchoolHoursEndMoment(), the latest non-break period's end_time),
+ * changing an EXISTING mark for that date is blocked — permanently, not
+ * just until the next day, per the owner's explicit "permanent history"
+ * framing. A student with no mark yet can still receive a first mark at any
+ * time, however late — the lock only governs edits to a mark that already
+ * exists (see handleStatusTap's own comment for the exact reasoning). This
+ * followed directly from a real bug fix: retapping a second status used to
+ * silently revert (see attendanceService.ts's header for the confirmed root
+ * cause — a stray set_updated_at trigger with no matching column — and
+ * migration_session_31_attendance_updated_at.sql for the fix).
  */
 
 
@@ -69,6 +93,7 @@ import {
   loadCurrentSession,
   loadCurrentTerm,
   loadAllLeafClasses,
+  loadParentClassGroups,
   loadStudentsForClass,
   loadAttendanceRecords,
   loadAttendanceHistory,
@@ -80,6 +105,8 @@ import {
   getSchoolAttendanceAnalytics,
   resolveAnalyticsScopeRange,
   isSchoolDay,
+  getSchoolHoursEndMoment,
+  isWithinEditWindow,
   todayDateString,
   type ClassNode,
   type Student,
@@ -91,6 +118,7 @@ import {
   type AttendanceAnalyticsScope,
   type SchoolAttendanceAnalytics,
   type SchoolDayCheck,
+  type ParentClassGroup,
 } from '../services/attendanceService'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -192,9 +220,47 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [analyticsError,   setAnalyticsError]   = useState<string>('')
 
   // ── Class selector ────────────────────────────────────────────────────────
+  // Two-tier picker (owner request, Session 31: "filter by a parent class as
+  // a whole"), matching StudentsModule.tsx's Session 12 pill pattern rather
+  // than inventing a new interaction. selectedClass keeps its original
+  // meaning (a single leaf class picked) unchanged — every one of its
+  // existing ~20 read/write call sites still works exactly as before when a
+  // single class is picked. selectedGroup is new and mutually exclusive with
+  // it: picking "whole parent" sets selectedGroup and clears selectedClass;
+  // picking a single class does the reverse. Only one of the two is ever
+  // non-null at a time — see selectClass()/selectGroup() below, the only two
+  // places either setter is called together.
   const [classes,         setClasses]         = useState<ClassNode[]>([])
   const [selectedClass,   setSelectedClass]   = useState<ClassNode | null>(null)
   const [classLoadState,  setClassLoadState]  = useState<LoadState>('booting')
+  const [parentGroups,        setParentGroups]        = useState<ParentClassGroup[]>([])
+  const [selectedParentId,    setSelectedParentId]    = useState<string | null>(null)
+  const [selectedGroup,       setSelectedGroup]       = useState<ParentClassGroup | null>(null)
+  // Session 32 follow-up (owner: "mark random attendance across the entire
+  // school") — a third, school-wide selection kind, mutually exclusive with
+  // both selectedClass and selectedGroup (see selectAllSchool() below, the
+  // only place that sets it true alongside clearing the other two). No new
+  // query needed: `classes` (above) already holds every leaf in the school
+  // from the boot load, so this is effectively "the biggest possible
+  // selectedGroup" without a real ParentClassGroup object behind it — a
+  // plain boolean is simpler than inventing a synthetic group with no real
+  // parent_id to key off.
+  const [selectedAllSchool,   setSelectedAllSchool] = useState(false)
+  // Collapse-on-select (owner request, Session 31 follow-up: economize phone
+  // screen space) — once a class/group is picked, the two pill rows above
+  // fold into one compact summary bar; tapping it re-expands the pills to
+  // change the selection. Starts expanded (true) so first-time pickers still
+  // see the full picker with nothing chosen yet.
+  const [pickerExpanded,      setPickerExpanded]      = useState(true)
+  // Search-within-register (owner request, same follow-up: "mark students
+  // randomly" — jump straight to one name in a big class/combined register
+  // rather than scrolling). Scoped to the currently selected class/group's
+  // already-loaded student list, not an app-wide student search — a fresh
+  // query per keystroke against the DB would be wasted cost for data that's
+  // already sitting in `students`. Cleared on every class/group change (see
+  // selectClass/selectGroup below) so a stale filter never survives across
+  // a class switch.
+  const [studentSearch,       setStudentSearch]       = useState('')
 
   // ── Students ──────────────────────────────────────────────────────────────
   const [students,     setStudents]     = useState<Student[]>([])
@@ -211,6 +277,14 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [schoolDayCheck,     setSchoolDayCheck]     = useState<SchoolDayCheck | null>(null)
   const [schoolDayLoading,   setSchoolDayLoading]   = useState(false)
   const [schoolDayCheckErr,  setSchoolDayCheckErr]  = useState<string>('')
+
+  // ── After-hours edit lock (PRD row 31 / owner request, Session 31) ────────
+  // The moment selectedDate's school hours end, per getSchoolHoursEndMoment()
+  // — null while unresolved/unconfigured (fails open, see that function's own
+  // doc comment). Re-fetched whenever selectedDate changes; deliberately NOT
+  // re-fetched on a timer, since re-render already happens naturally on every
+  // status tap/save and that's the only time this value is actually read.
+  const [editWindowEnd, setEditWindowEnd] = useState<Date | null>(null)
 
   // ── Attendance data ───────────────────────────────────────────────────────
   const [attMap,      setAttMap]      = useState<AttendanceMap>(new Map())
@@ -243,9 +317,10 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     async function boot() {
       setClassLoadState('loading')
 
-      const [sessionRes, classRes] = await Promise.all([
+      const [sessionRes, classRes, groupsRes] = await Promise.all([
         loadCurrentSession(),
         loadAllLeafClasses(),
+        loadParentClassGroups(),
       ])
 
       if (cancelled) return
@@ -274,6 +349,15 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       const leafClasses = classRes.data
       setClasses(leafClasses)
       setClassLoadState(leafClasses.length === 0 ? 'empty' : 'ready')
+
+      // Parent groups are additive UI sugar for the two-tier picker — fail
+      // soft (empty list, no error state) rather than blocking the whole
+      // class-load boot on this, since a school with no parent-level class
+      // nodes at all (a flat class list) is a legitimate, common shape and
+      // should just show single-class pills with no parent tier above them.
+      if (groupsRes.ok) {
+        setParentGroups(groupsRes.data)
+      }
 
       // Current term — best-effort. A school that doesn't use terms, or has
       // no term row covering today, just falls back to the session range in
@@ -347,10 +431,76 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     }
   }, [])
 
+  // ── Two-tier selection helpers ────────────────────────────────────────────
+  // Single source of truth for "what's actually picked right now," whichever
+  // tier it came from — every downstream effect/handler below reads THIS,
+  // not selectedClass/selectedGroup directly, so there's exactly one place
+  // that knows how to combine the two mutually-exclusive selection shapes.
+  // Declared here, before any effect that reads it (moved after an initial
+  // draft placed it lower and tripped a genuine "used before declaration"
+  // error against the students-load effect right below — caught by a
+  // tsc pass before this ever reached the device, not left for on-device
+  // testing to find).
+  const effectiveClassIds: string[] = selectedAllSchool
+    ? classes.map(c => c.id)
+    : selectedGroup
+      ? selectedGroup.leafIds
+      : selectedClass
+        ? [selectedClass.id]
+        : []
+  const effectiveSelectionKey: string | null = selectedAllSchool
+    ? 'all-school'
+    : selectedGroup
+      ? `group:${selectedGroup.id}`
+      : selectedClass
+        ? `class:${selectedClass.id}`
+        : null
+  // path_label already carries "Parent · Class" (attachPathLabels' own
+  // fixed output, Session 31) — reused directly here rather than
+  // re-deriving the parent name a second way, so the collapsed summary
+  // bar shows which grade a class belongs to, not just the bare class
+  // name (owner follow-up: "the label that remains should indicate the
+  // parent class as well"). Falls back to .name for any orphan leaf with
+  // no parent, where path_label and name are already identical.
+  const effectiveLabel: string = selectedAllSchool
+    ? 'All classes (whole school)'
+    : selectedGroup
+      ? `${selectedGroup.name} (all classes)`
+      : selectedClass?.path_label ?? selectedClass?.name ?? ''
+  const hasSelection = effectiveClassIds.length > 0
+
+  function selectClass(c: ClassNode | null) {
+    setSelectedGroup(null)
+    setSelectedAllSchool(false)
+    setSelectedClass(c)
+    setStudentSearch('')
+    setPickerExpanded(c === null)
+  }
+
+  function selectGroup(g: ParentClassGroup | null) {
+    setSelectedClass(null)
+    setSelectedAllSchool(false)
+    setSelectedGroup(g)
+    setStudentSearch('')
+    setPickerExpanded(g === null)
+  }
+
+  // Session 32 follow-up — "mark random attendance across the entire
+  // school": the whole-school equivalent of selectGroup(), same shape
+  // (clear the other two selection kinds, reset search, collapse the
+  // picker) but with no ParentClassGroup object to store.
+  function selectAllSchool() {
+    setSelectedClass(null)
+    setSelectedGroup(null)
+    setSelectedAllSchool(true)
+    setStudentSearch('')
+    setPickerExpanded(false)
+  }
+
   // ─── Load students when class changes ───────────────────────────────────────
 
   useEffect(() => {
-    if (!selectedClass) return
+    if (!hasSelection) return
     let cancelled = false
 
     async function loadClassData() {
@@ -360,7 +510,12 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       setHistoryOpen(new Set())
       setHistoryData(new Map())
 
-      const studentsRes = await loadStudentsForClass(selectedClass!.id)
+      // Single id when one class is picked, array when a whole parent is —
+      // loadStudentsForClass's own .eq()/.in() branch (Session 31) handles
+      // both from the same call, so no branching needed here.
+      const studentsRes = await loadStudentsForClass(
+        effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
+      )
 
       if (cancelled) return
 
@@ -381,7 +536,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
     loadClassData()
     return () => { cancelled = true }
-  }, [selectedClass])
+  }, [effectiveSelectionKey])
 
   // Derived: does the currently selected date look like a real school day?
   // Fails open (true) while loading, on error, or before the first check has
@@ -390,6 +545,14 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const isSelectedDateSchoolDay = schoolDayLoading || !schoolDayCheck || schoolDayCheckErr
     ? true
     : schoolDayCheck.isSchoolDay
+
+  // Derived: has selectedDate's school-hours-end moment passed? Pure check
+  // against editWindowEnd (see the effect below that resolves it) — this is
+  // read fresh on every render, so it naturally flips from unlocked to
+  // locked the instant the real-world clock crosses that moment, without
+  // needing its own timer (the component already re-renders on other state
+  // changes at a normal human-interaction cadence, which is all this needs).
+  const isDateLocked = !isWithinEditWindow(editWindowEnd)
 
   // ─── School-day check when date / class changes ─────────────────────────────
   // Runs alongside loadRecords() below rather than inside it: this check must
@@ -400,7 +563,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   // is its own concern, not a side effect of the records load succeeding).
 
   useEffect(() => {
-    if (!selectedClass) {
+    if (!hasSelection) {
       setSchoolDayCheck(null)
       return
     }
@@ -429,15 +592,36 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
     checkDay()
     return () => { cancelled = true }
-  }, [selectedClass, selectedDate, schoolId])
+  }, [effectiveSelectionKey, selectedDate, schoolId])
+
+  // ─── After-hours edit-lock window when date changes ─────────────────────────
+  // Deliberately keyed on [selectedDate, schoolId] only, not selectedClass —
+  // periods.end_time is school-wide (no class_node_id on that table per §7.10's
+  // schema), so re-fetching on a class change alone would be a wasted query for
+  // a value that can't have changed. Fails open (null) on error — see
+  // getSchoolHoursEndMoment()'s own doc comment for why that's the right
+  // default here, same reasoning as the school-day check above.
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadEditWindow() {
+      const result = await getSchoolHoursEndMoment(selectedDate, schoolId)
+      if (cancelled) return
+      setEditWindowEnd(result.ok ? result.data : null)
+    }
+
+    loadEditWindow()
+    return () => { cancelled = true }
+  }, [selectedDate, schoolId])
 
   // ─── Load attendance records when date / class changes ─────────────────────
 
   const loadRecords = useCallback(async () => {
-    if (!selectedClass || loadState === 'loading' || loadState === 'booting') return
+    if (!hasSelection || loadState === 'loading' || loadState === 'booting') return
 
     const recordsRes = await loadAttendanceRecords({
-      classNodeId: selectedClass.id,
+      classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
       date: selectedDate,
     })
 
@@ -448,7 +632,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     }
 
     setAttMap(buildAttendanceMap(recordsRes.data))
-  }, [selectedClass, selectedDate, loadState])
+  }, [effectiveSelectionKey, selectedDate, loadState])
 
   useEffect(() => {
     if (loadState === 'ready') loadRecords()
@@ -461,12 +645,21 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     status: AttendanceStatus,
     markedBy: string,
   ) => {
-    if (!selectedClass || !sessionId) return
+    if (!hasSelection || !sessionId) return
 
     // Don't re-tap same status that's already saved
     const key = student.id
     const current = attMap.get(key)
     if (current?.status === status) return
+
+    // After-hours edit lock (owner request, Session 31): a FIRST mark on a
+    // previously-unmarked student is always allowed, however late — this
+    // only blocks CHANGING a mark that already exists, once selectedDate's
+    // school hours have passed. `current` being truthy is exactly "a mark
+    // already exists for this student today," so that's the right and only
+    // condition to gate on here — deliberately not gating on isDateLocked
+    // alone, which would also wrongly block a legitimate late first mark.
+    if (current && isDateLocked) return
 
     // 1. Optimistic update
     const optimisticRecord: AttendanceRecord = {
@@ -487,10 +680,17 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     setSavingIds(prev => new Set(prev).add(student.id))
 
     // 3. Background write
+    // Uses student.class_node_id, NOT selectedClass.id (Session 31 fix,
+    // whole-parent view): each student belongs to exactly one leaf class
+    // regardless of what's selected in the picker above — for a single-class
+    // selection these are identical, but for a combined parent-group
+    // register they can differ per row, and getting this wrong would
+    // silently mis-file every write from a combined register under the
+    // wrong class.
     const params: AttendanceUpsertParams = {
       schoolId,
       studentId: student.id,
-      classNodeId: selectedClass.id,
+      classNodeId: student.class_node_id,
       markedBy,
       date: selectedDate,
       status,
@@ -536,7 +736,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       }
       errorTimers.current.set(student.id, timer)
     }
-  }, [selectedClass, sessionId, selectedDate, attMap, schoolId])
+  }, [hasSelection, sessionId, selectedDate, attMap, schoolId, isDateLocked])
 
   // ─── Batch mark-all ────────────────────────────────────────────────────────
 
@@ -544,13 +744,26 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     status: AttendanceStatus,
     markedBy: string,
   ) => {
-    if (!selectedClass || !sessionId || students.length === 0) return
+    if (!hasSelection || !sessionId || students.length === 0) return
+
+    // After-hours edit lock, same rule as handleStatusTap: a student with no
+    // existing mark is always eligible for mark-all (a batch action is still
+    // just "first marks" for them); a student who's already marked is only
+    // eligible if selectedDate isn't locked yet. Silently skipping locked
+    // students here (rather than aborting the whole batch) matches the
+    // per-tap behavior — one locked student shouldn't block marking everyone
+    // else who's still eligible.
+    const eligibleStudents = students.filter(s => {
+      const current = attMap.get(s.id)
+      return !current || !isDateLocked
+    })
+    if (eligibleStudents.length === 0) return
 
     setBatchSaving(true)
 
-    // Optimistic: update all rows immediately
+    // Optimistic: update all eligible rows immediately
     const nextMap: AttendanceMap = new Map(attMap)
-    students.forEach(s => {
+    eligibleStudents.forEach(s => {
       nextMap.set(s.id, {
         id: nextMap.get(s.id)?.id ?? crypto.randomUUID(),
         student_id: s.id,
@@ -562,10 +775,12 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     })
     setAttMap(nextMap)
 
-    const records: AttendanceUpsertParams[] = students.map(s => ({
+    // Each student's own class_node_id, not selectedClass.id — same
+    // reasoning as handleStatusTap's write path above.
+    const records: AttendanceUpsertParams[] = eligibleStudents.map(s => ({
       schoolId,
       studentId: s.id,
-      classNodeId: selectedClass.id,
+      classNodeId: s.class_node_id,
       markedBy,
       date: selectedDate,
       status,
@@ -576,7 +791,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
     if (result.queued) {
       const qIds = new Set(queuedIds)
-      students.forEach(s => qIds.add(s.id))
+      eligibleStudents.forEach(s => qIds.add(s.id))
       setQueuedIds(qIds)
       return
     }
@@ -585,7 +800,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       // Revert to previous map on batch failure
       setAttMap(attMap)
     }
-  }, [selectedClass, sessionId, students, selectedDate, attMap, schoolId, queuedIds])
+  }, [hasSelection, sessionId, students, selectedDate, attMap, schoolId, queuedIds, isDateLocked])
 
   // ─── History strip toggle ──────────────────────────────────────────────────
 
@@ -607,7 +822,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (!historyData.has(student.id)) {
       setHistoryLoading(prev => new Set(prev).add(student.id))
 
-      const result = await loadAttendanceHistory(selectedClass!.id, schoolId)
+      // student.class_node_id, not selectedClass.id — same Session 31
+      // reasoning as the write paths above; also narrower/cheaper than
+      // passing the whole effectiveClassIds array for a single student's
+      // history strip.
+      const result = await loadAttendanceHistory(student.class_node_id, schoolId)
       if (result.ok) {
         const map = new Map(historyData)
         result.data.forEach(h => map.set(h.student_id, h))
@@ -620,7 +839,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         return next
       })
     }
-  }, [historyOpen, historyData, selectedClass, schoolId])
+  }, [historyOpen, historyData, schoolId])
 
   // ─── Summary counts ────────────────────────────────────────────────────────
 
@@ -745,22 +964,116 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         </div>
       )
     }
+    // ── Two-tier pill picker (Session 31, owner-locked design) ─────────────
+    // Tier 1: parent pills (only rendered when parentGroups is non-empty —
+    // a school with a flat, one-level class list has nothing to group by,
+    // so this tier is skipped entirely and tier 2 shows every leaf, exactly
+    // matching the old <select>'s behavior for that shape of school).
+    // Tier 2: class pills, filtered to the selected parent's leaves once one
+    // is picked — plus a "whole parent" pill as one more option at that
+    // tier (owner-approved Option 2 from this feature's own design pass),
+    // never mixed into the same list as individual classes as a synthetic
+    // <option> would be in a native <select>.
+    // A leaf with no parent_id (parent_id: null) never appears grouped under
+    // any parentGroups entry — it always shows in tier 2's "all classes"
+    // view (no parent selected) so it's never unreachable.
+    //
+    // Session 32 follow-up (owner: match/better StudentsModule's own
+    // parent-vs-class visual distinction) — tier 1 pills now carry
+    // att-pill--parent (compact, uppercase, surface-tinted, left accent
+    // bar when active) so which level you're tapping is visually obvious,
+    // not just positionally. Tier 2 stays plain .att-pill.
+    const visibleLeaves = selectedParentId
+      ? classes.filter(c => c.parent_id === selectedParentId)
+      : classes
+    const activeParent = parentGroups.find(g => g.id === selectedParentId) ?? null
+
+    // ── Collapsed summary bar (Session 31 follow-up: economize phone
+    // screen space) — once something's picked and the picker isn't
+    // explicitly reopened, show one compact row with the current selection
+    // and a "Change" affordance instead of both pill rows. This is the
+    // common case on a repeat visit (a teacher almost always wants the same
+    // class they marked last time), so collapsing by default here is what
+    // actually saves space day to day, not just on first pick.
+    if (hasSelection && !pickerExpanded) {
+      return (
+        <div className="att-selector-wrap">
+          <button
+            type="button"
+            className="att-selector-summary"
+            onClick={() => setPickerExpanded(true)}
+          >
+            <span className="att-selector-summary-label">{effectiveLabel}</span>
+            <span className="att-selector-summary-change">
+              Change <Icon name="chevron-down" size={14} />
+            </span>
+          </button>
+        </div>
+      )
+    }
+
     return (
       <div className="att-selector-wrap">
         <label className="att-selector-label">Class</label>
-        <select
-          className="att-selector"
-          value={selectedClass?.id ?? ''}
-          onChange={e => {
-            const found = classes.find(c => c.id === e.target.value) ?? null
-            setSelectedClass(found)
-          }}
-        >
-          <option value="">— pick a class —</option>
-          {classes.map(c => (
-            <option key={c.id} value={c.id}>{c.path_label}</option>
+
+        {parentGroups.length > 0 && (
+          <div className="att-pill-row att-pill-row--parent" role="tablist" aria-label="Filter by grade">
+            <button
+              type="button"
+              className={`att-pill att-pill--parent${selectedParentId === null ? ' att-pill--active' : ''}`}
+              onClick={() => setSelectedParentId(null)}
+            >
+              All
+            </button>
+            {parentGroups.map(g => (
+              <button
+                key={g.id}
+                type="button"
+                className={`att-pill att-pill--parent${selectedParentId === g.id ? ' att-pill--active' : ''}`}
+                onClick={() => setSelectedParentId(g.id)}
+              >
+                {g.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="att-pill-row att-pill-row--class">
+          {/* Session 32 follow-up — whole-school "All classes" pill, the
+              school-wide sibling of the "All of {parent}" pill below. Only
+              shown when tier 1 isn't narrowed to one parent (selectedParentId
+              === null) — once a specific grade is selected, "all classes"
+              at the school level doesn't make sense as an option in that
+              same row; the "All" pill in tier 1 is how you get back there. */}
+          {selectedParentId === null && (
+            <button
+              type="button"
+              className={`att-pill att-pill--group${selectedAllSchool ? ' att-pill--active' : ''}`}
+              onClick={selectAllSchool}
+            >
+              <Icon name="school" size={14} /> All classes (whole school)
+            </button>
+          )}
+          {activeParent && (
+            <button
+              type="button"
+              className={`att-pill att-pill--group${selectedGroup?.id === activeParent.id ? ' att-pill--active' : ''}`}
+              onClick={() => selectGroup(activeParent)}
+            >
+              <Icon name="users" size={14} /> All of {activeParent.name}
+            </button>
+          )}
+          {visibleLeaves.map(c => (
+            <button
+              key={c.id}
+              type="button"
+              className={`att-pill${selectedClass?.id === c.id ? ' att-pill--active' : ''}`}
+              onClick={() => selectClass(c)}
+            >
+              {activeParent ? c.name : c.path_label}
+            </button>
           ))}
-        </select>
+        </div>
       </div>
     )
   }
@@ -793,6 +1106,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     )
   }
 
+  // Deliberately NOT disabled by isDateLocked — handleBatchMark() already
+  // filters to only students still eligible (unmarked, or marked-but-not-yet-
+  // locked) per the same after-hours rule renderStudentRow's buttons use.
+  // Hiding this whole bar once the date locks would wrongly block "mark all
+  // present" from catching any student someone forgot to mark that day.
   function renderBatchBar() {
     if (students.length === 0 || !markedBy || !canMark) return null
     return (
@@ -879,6 +1197,10 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     const errMsg    = errorIds.get(student.id)
     const isQueued  = queuedIds.has(student.id)
     const isHistOpen = historyOpen.has(student.id)
+    // After-hours edit lock (Session 31): only relevant once a mark already
+    // exists — an unmarked student is never locked, per the owner's explicit
+    // "first mark always allowed" rule (see handleStatusTap's own comment).
+    const isRowLocked = !!record && isDateLocked
 
     return (
       <div key={student.id} className="att-student-row">
@@ -918,10 +1240,23 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
                 <Icon name="cloud" size={14} />
               </span>
             )}
+            {/* Visible lock notice, not a silently-disabled button (§4.3) —
+                the whole point of Session 31's fix was making a rejected tap
+                visible instead of a mysterious revert. */}
+            {isRowLocked && !isSaving && (
+              <span
+                className="att-locked-badge"
+                title="This day's school hours have ended — the mark is now permanent."
+                role="img"
+                aria-label="Locked: this day's school hours have ended, the mark is now permanent"
+              >
+                <Icon name="lock" size={14} />
+              </span>
+            )}
             {STATUS_ORDER.map(status => (
               <button
                 key={status}
-                disabled={isSaving || !markedBy || !canMark}
+                disabled={isSaving || !markedBy || !canMark || isRowLocked}
                 className={[
                   'att-btn',
                   STATUS_CONFIG[status].cls,
@@ -943,7 +1278,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   }
 
   function renderRegister() {
-    if (!selectedClass) return null
+    if (!hasSelection) return null
 
     // ── School-day gate (PRD Tier 5 / Problem 5.2 / Session 19) ─────────────
     // Checked before the normal load-state branches below: a holiday/break
@@ -995,20 +1330,113 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       return (
         <div className="att-empty-state">
           <span className="att-empty-icon"><Icon name="users" size={40} /></span>
-          <p className="att-empty-msg">No students enrolled in {selectedClass.name} yet.</p>
+          <p className="att-empty-msg">No students enrolled in {effectiveLabel} yet.</p>
           {isAdmin && <p className="att-empty-sub">Add students in the Students module.</p>}
         </div>
       )
     }
 
+    // ── Search-within-register (owner request, Session 31 follow-up:
+    // "mark students randomly" — jump straight to one name rather than
+    // scrolling a long or combined register). Client-side filter over the
+    // already-loaded `students` array — cheap, and correct scope per the
+    // owner's own choice: search only within what's currently on screen,
+    // not an app-wide student search. Applied to both the flat and grouped
+    // (whole-parent) branches below via the same `matchesSearch` filter,
+    // so search behaves identically regardless of which view is active.
+    const trimmedSearch = studentSearch.trim().toLowerCase()
+    const matchesSearch = (s: Student) =>
+      trimmedSearch === '' || s.full_name.toLowerCase().includes(trimmedSearch)
+
+    const searchBar = students.length > 5 && (
+      <div className="att-search-wrap">
+        <span className="att-search-icon" aria-hidden="true">
+          <Icon name="search" size={16} />
+        </span>
+        <input
+          type="text"
+          className="att-search-input"
+          placeholder={`Search in ${effectiveLabel}...`}
+          value={studentSearch}
+          onChange={e => setStudentSearch(e.target.value)}
+        />
+        {studentSearch !== '' && (
+          <button
+            type="button"
+            className="att-search-clear"
+            aria-label="Clear search"
+            onClick={() => setStudentSearch('')}
+          >
+            <Icon name="x" size={14} />
+          </button>
+        )}
+      </div>
+    )
+
+    // Whole-parent view (Session 31, owner-locked design: "one combined
+    // register, grouped by arm with sub-headings" — not a flat merge, see
+    // this file's own header comment for the full reasoning): group the
+    // already-loaded flat student list by class_node_id and render one
+    // sub-heading per leaf class, in the same order `classes` (the leaf
+    // list) is already sorted in, rather than re-deriving a separate order.
+    // Session 32 follow-up extends this same grouped treatment to the new
+    // whole-school selection — a school-wide register is the same shape of
+    // problem as a whole-parent one (a flat merge across many classes would
+    // be unreadable), just with every leaf in the school as the arm list
+    // instead of one parent's leafIds.
+    if (selectedGroup || selectedAllSchool) {
+      const armLeafIds = selectedAllSchool
+        ? classes.map(c => c.id)
+        : selectedGroup!.leafIds
+      const byClassId = new Map<string, Student[]>()
+      students.filter(matchesSearch).forEach(s => {
+        const arr = byClassId.get(s.class_node_id) ?? []
+        arr.push(s)
+        byClassId.set(s.class_node_id, arr)
+      })
+      const arms = armLeafIds
+        .filter(id => byClassId.has(id))
+        .map(id => ({
+          id,
+          name: classes.find(c => c.id === id)?.path_label ?? classes.find(c => c.id === id)?.name ?? 'Class',
+          students: byClassId.get(id)!,
+        }))
+
+      return (
+        <div className="att-register">
+          {searchBar}
+          {markedBy && !canMark && (
+            <div className="att-permission-notice">
+              You don't have permission to mark attendance. You can view this register, but changes won't be saved. Contact your admin if this seems wrong.
+            </div>
+          )}
+          {trimmedSearch !== '' && arms.length === 0 && (
+            <p className="att-empty-sub">No students match "{studentSearch}".</p>
+          )}
+          {arms.map(arm => (
+            <div key={arm.id} className="att-arm-group">
+              <h3 className="att-arm-heading">{arm.name}</h3>
+              {arm.students.map(renderStudentRow)}
+            </div>
+          ))}
+        </div>
+      )
+    }
+
+    const filteredStudents = students.filter(matchesSearch)
+
     return (
       <div className="att-register">
+        {searchBar}
         {markedBy && !canMark && (
           <div className="att-permission-notice">
             You don't have permission to mark attendance. You can view this class's register, but changes won't be saved. Contact your admin if this seems wrong.
           </div>
         )}
-        {students.map(renderStudentRow)}
+        {trimmedSearch !== '' && filteredStudents.length === 0 && (
+          <p className="att-empty-sub">No students match "{studentSearch}".</p>
+        )}
+        {filteredStudents.map(renderStudentRow)}
       </div>
     )
   }
@@ -1033,20 +1461,20 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         {renderClassSelector()}
 
         {/* Date + period row — only show once a class is picked */}
-        {selectedClass && renderDateBar()}
+        {hasSelection && renderDateBar()}
 
         {/* Summary bar — hidden on a confirmed non-school day (Session 19):
             "0 present" reads as a real gap on a holiday when it isn't one. */}
-        {selectedClass && isSelectedDateSchoolDay && renderSummaryBar()}
+        {hasSelection && isSelectedDateSchoolDay && renderSummaryBar()}
 
         {/* Batch mark-all — same reasoning: marking attendance on a holiday
             shouldn't be offered as an action in the first place. */}
-        {selectedClass && loadState === 'ready' && isSelectedDateSchoolDay && renderBatchBar()}
+        {hasSelection && loadState === 'ready' && isSelectedDateSchoolDay && renderBatchBar()}
       </div>
 
       {/* Register */}
       <div className="att-body">
-        {!selectedClass && classLoadState === 'ready' && (
+        {!hasSelection && classLoadState === 'ready' && (
           <div className="att-empty-state att-empty-state--prompt">
             <span className="att-empty-icon"><Icon name="clipboard-list" size={40} /></span>
             <p className="att-empty-msg">Select a class above to start marking attendance.</p>

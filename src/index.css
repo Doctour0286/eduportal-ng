@@ -535,6 +535,73 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Compact identity chip (PRD Problem 6.8) — matches the reference app's
+   .header-user-chip: name-initial avatar + role label, hidden below a
+   width where it would crowd the account button (phones stay icon-only,
+   as before this change). */
+.app-header-user-chip {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.625rem 0.25rem 0.25rem;
+  border-radius: var(--radius-full);
+  background: var(--color-neutral-100, #f3f4f6);
+  flex-shrink: 0;
+}
+
+@media (min-width: 480px) {
+  .app-header-user-chip {
+    display: flex;
+  }
+}
+
+.app-header-user-chip-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
+  background: var(--color-brand-600);
+  color: white;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.app-header-user-chip-role {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-neutral-600, #4b5563);
+  white-space: nowrap;
+}
+
+/* Status-badge slot (PRD Problem 6.8) — reusable, not conflict-specific;
+   sits on the account button itself (top-right dot-with-count), same
+   pattern as the reference app's own header badge placement. */
+.app-header-account-btn {
+  position: relative;
+}
+
+.app-header-status-badge {
+  position: absolute;
+  top: -0.25rem;
+  right: -0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.25rem;
+  border-radius: var(--radius-full);
+  background: var(--color-danger, #dc2626);
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 1;
+  border: 2px solid var(--color-surface);
+}
+
 .app-main {
   flex: 1;
   overflow-y: auto;
@@ -4304,14 +4371,239 @@ body {
 }
 
 .att-selector:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 .att-selector-skel {
   height: 44px;
   border-radius: var(--radius-md);
+}
+
+/* ── Collapsed class-selector summary bar (Session 31 follow-up) ──────────
+   Replaces both pill rows once a selection is made, saving vertical space
+   on phone — the common repeat-visit case. Deliberately reuses
+   .att-selector's own border/radius/min-height so it reads as "the same
+   control, just collapsed" rather than a new visual element. */
+
+.att-selector-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.att-selector-summary:focus-visible {
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
+  outline-offset: 2px;
+}
+
+.att-selector-summary-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.att-selector-summary-change {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--color-brand-600, var(--color-primary));
+  font-weight: 600;
+  flex-shrink: 0;
+  padding-left: var(--space-2);
+}
+
+/* ── Two-tier pill class picker (Session 31) ──────────────────────────────
+   Matches this file's existing chip/pill shape language (.att-sum's
+   radius-full + weight-600 palette) rather than inventing a new visual
+   vocabulary for what's conceptually the same "small selectable chip"
+   idea. Two stacked rows share the same .att-pill/.att-pill-row classes —
+   the parent tier and the class tier only differ in which array feeds
+   them, not in how a pill itself looks. */
+
+.att-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.att-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  min-height: 36px;
+  white-space: nowrap;
+  font-family: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.att-pill:hover {
+  border-color: var(--color-brand-600, var(--color-primary));
+}
+
+.att-pill:focus-visible {
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
+  outline-offset: 2px;
+}
+
+.att-pill--active {
+  background: var(--color-brand-600, var(--color-primary));
+  border-color: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
+}
+
+/* ── Tier distinction (owner request: "subtle difference between the
+   parent classes and the children classes at every level," matching or
+   bettering StudentsModule's own .stu-pill vs .stu-class-pill split) ─────
+   Previously both rows shared identical .att-pill styling with nothing
+   distinguishing "this narrows the view" (tier 1, grade/parent) from
+   "this is what actually gets selected" (tier 2, class/group) — this
+   file's own prior comment even said so explicitly. Fixed the same way
+   StudentsModule already does it (surface background + solid-fill active
+   state for tier 1, vs plain bg + normal active state for tier 2), then
+   taken one step further: tier-1 pills are slightly smaller/denser with
+   a letter-spaced uppercase label (reads as "structural/navigational"
+   rather than "a selectable item"), and the active parent pill gets a
+   small left accent bar so which grade is narrowing the view stays
+   visible even at a glance, not just via the fill color. */
+
+.att-pill-row--parent {
+  margin-bottom: 2px;
+}
+
+.att-pill--parent {
+  min-height: 30px;
+  padding: 3px var(--space-2) 3px 10px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border-left: 3px solid transparent;
+}
+
+.att-pill--parent:hover {
+  color: var(--color-text);
+}
+
+.att-pill--parent.att-pill--active {
+  background: var(--color-brand-600, var(--color-primary));
+  border-color: var(--color-brand-600, var(--color-primary));
+  border-left-color: var(--color-brand-on, #fff);
+  color: var(--color-brand-on, #fff);
+}
+
+.att-pill-row--class {
+  padding-top: var(--space-1);
+}
+
+/* "All of {parent}" pill — same active/hover states as a normal pill, just
+   visually distinguished at rest (dashed border) so it doesn't get mistaken
+   for one more individual class in the row it sits in front of. */
+.att-pill--group {
+  border-style: dashed;
+}
+
+.att-pill--group.att-pill--active {
+  border-style: solid;
+}
+
+/* ── Combined-register arm sub-headings (Session 31, whole-parent view) ───
+   Owner-locked design: one combined register, grouped by arm rather than a
+   flat 100+-row merge — see AttendanceModule.tsx's renderRegister() for the
+   full reasoning. Deliberately understated (no card/border) since this is a
+   grouping label within one continuous scrollable register, not a separate
+   section of the page. */
+
+.att-arm-group + .att-arm-group {
+  margin-top: var(--space-4);
+}
+
+.att-arm-heading {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: var(--space-2) 0;
+  margin: 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ── Search-within-register (Session 31 follow-up: "mark students
+   randomly" — jump to one name instead of scrolling) ─────────────────────
+   Only rendered when students.length > 5 (see renderRegister) — a small
+   class doesn't need a search box above it. Matches .att-date-input's
+   border/radius/min-height so it sits comfortably in the same header
+   cluster as the date bar above it. */
+
+.att-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  margin-bottom: var(--space-3);
+  min-height: 44px;
+}
+
+.att-search-icon {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.att-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: var(--text-sm);
+  font-family: inherit;
+  color: var(--color-text);
+  min-width: 0;
+}
+
+.att-search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.att-search-clear {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+  padding: var(--space-1);
+  min-width: 32px;
+  min-height: 32px;
 }
 
 /* ── Date + period bar ──────────────────────────────────────────────────────── */
@@ -4336,7 +4628,7 @@ body {
 }
 
 .att-date-input:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
 }
 
@@ -4353,7 +4645,7 @@ body {
 }
 
 .att-period-select:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
 }
 
@@ -4431,7 +4723,7 @@ body {
 
 .att-analytics-tab--active {
   background: var(--color-surface);
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
@@ -4498,18 +4790,34 @@ body {
   margin: 0;
 }
 
+/* Constrained to the card's own width so a long-range trend (term/session
+   scope, or the whole-school view added later — both can produce 100+
+   daily points) can never push the row past the card or the screen edge,
+   the way an unconstrained flex row previously could (owner-reported,
+   2026-07-10). Bars compress down to a smaller floor first (see
+   .att-sparkline-bar's own reduced min-width below); only once that floor
+   is actually reached does the row become horizontally scrollable rather
+   than overflowing or clipping — matches the general best-practice
+   pattern for many-bar CSS-only bar charts (constrain container width,
+   let items shrink, scroll only as the last resort). */
 .att-sparkline {
   display: flex;
   align-items: flex-end;
-  gap: 3px;
+  gap: 2px;
   height: 40px;
   padding-top: var(--space-2);
+  padding-bottom: 2px;
   border-top: 1px solid var(--color-border);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .att-sparkline-bar {
-  flex: 1;
-  min-width: 3px;
+  flex: 1 1 0;
+  min-width: 2px;
   max-width: 10px;
   /* Was --color-primary-light (#eff6ff — near-white), effectively invisible
      against the card background; flagged 2026-07-07, owner-confirmed the
@@ -4726,6 +5034,16 @@ body {
   text-align: center;
 }
 
+.att-locked-badge {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  width: 20px;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* ── History strip ────────────────────────────────────────────────────────────── */
 
 .att-history-strip {
@@ -4937,9 +5255,9 @@ body {
   margin-top: var(--space-2);
   padding: var(--space-2) var(--space-5);
   border-radius: var(--radius-md);
-  border: 1.5px solid var(--color-primary);
+  border: 1.5px solid var(--color-brand-600, var(--color-primary));
   background: transparent;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-sm);
   font-weight: 600;
   font-family: inherit;
@@ -5576,8 +5894,8 @@ body {
 .stu-add-btn {
   min-height: 36px;
   padding: var(--space-1) var(--space-3);
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
   border: none;
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
@@ -5619,19 +5937,157 @@ body {
 }
 
 .stu-class-pill:hover {
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
   color: var(--color-text);
 }
 
 .stu-class-pill:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
 }
 
 .stu-class-pill--active {
-  background: var(--color-primary-subtle);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  border-color: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-600, var(--color-primary));
+}
+
+/* ── Collapsed class-selector summary bar (Session 32, matching
+   AttendanceModule's own follow-up) ───────────────────────────────────────
+   Replaces both pill tiers once a selection is made, saving vertical space
+   on phone. Reuses .stu-search's own border/radius/min-height feel so it
+   reads as part of the same filter control, not a new element. */
+
+.stu-selector-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.stu-selector-summary:focus-visible {
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
+  outline-offset: 2px;
+}
+
+.stu-selector-summary-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stu-selector-summary-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--color-brand-600, var(--color-primary));
+  font-weight: 600;
+  flex-shrink: 0;
+  padding-left: var(--space-2);
+}
+
+/* ── Two-tier pill class picker (Session 32) ──────────────────────────────
+   Parent/grade tier — same shape as .stu-class-pill (this file's own
+   established chip language) but its own classname since it's a
+   semantically different tier (narrows tier 2, isn't itself a student
+   filter until a specific class or "All of X" is tapped within it). */
+
+.stu-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.stu-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  min-height: 36px;
+  white-space: nowrap;
+  font-family: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.stu-pill:hover {
+  border-color: var(--color-brand-600, var(--color-primary));
+}
+
+.stu-pill:focus-visible {
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
+  outline-offset: 2px;
+}
+
+.stu-pill--active {
+  background: var(--color-brand-600, var(--color-primary));
+  border-color: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
+}
+
+/* ── Tier-1 parity pass (matching AttendanceModule's own .att-pill--parent
+   "even better" treatment, applied here so both modules read consistently
+   rather than Attendance alone getting the enhanced tier cue). Tier 1
+   (.stu-pill, grade/parent) becomes visibly more "structural/navigational"
+   than tier 2 (.stu-class-pill, the actual student filter): smaller,
+   denser, uppercase+letter-spaced label, and a left accent bar on the
+   active pill so which grade is narrowing the view reads at a glance,
+   not just from the fill color. Tier 2 is deliberately left as the plain,
+   larger, sentence-case treatment it already had. */
+.stu-pill {
+  min-height: 30px;
+  padding: 3px var(--space-2) 3px 10px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--color-surface);
+  border-left: 3px solid transparent;
+}
+
+.stu-pill:hover {
+  color: var(--color-text);
+}
+
+.stu-pill--active {
+  background: var(--color-brand-600, var(--color-primary));
+  border-color: var(--color-brand-600, var(--color-primary));
+  border-left-color: #fff;
+  color: var(--color-brand-on, #fff);
+}
+
+.stu-pill-row {
+  margin-bottom: 2px;
+}
+
+/* "All of {parent}" pill within the class tier — same active/hover states
+   as a normal .stu-class-pill, dashed border at rest so it doesn't read as
+   one more individual class in the row it sits in front of (matches
+   AttendanceModule's .att-pill--group precedent). */
+.stu-class-pill--group {
+  border-style: dashed;
+}
+
+.stu-class-pill--group.stu-class-pill--active {
+  border-style: solid;
 }
 
 /* ── Role picker (Edit subtab, Session 13) ────────────────────────────────
@@ -5667,12 +6123,12 @@ body {
 }
 
 .stu-role-pill:hover {
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
   color: var(--color-text);
 }
 
 .stu-role-pill:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
 }
 
@@ -5682,9 +6138,9 @@ body {
 }
 
 .stu-role-pill--active {
-  background: var(--color-primary-subtle);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  border-color: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-search {
@@ -5700,9 +6156,9 @@ body {
 }
 
 .stu-search:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-search::placeholder {
@@ -5768,8 +6224,8 @@ body {
   width: 40px;
   height: 40px;
   border-radius: var(--radius-full);
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-base);
   font-weight: 700;
   display: flex;
@@ -5871,8 +6327,8 @@ body {
 .stu-empty-action {
   min-height: 40px;
   padding: var(--space-2) var(--space-4);
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
   border: none;
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
@@ -6046,9 +6502,9 @@ body {
 }
 
 .stu-input:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-select {
@@ -6069,9 +6525,9 @@ body {
 }
 
 .stu-select:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 /* Session 14 — new multi-line fields (address, medical notes) in the Edit
@@ -6092,9 +6548,9 @@ body {
 }
 
 .stu-textarea:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 /* Session 14 — separates the new "Additional details" field group from the
@@ -6154,8 +6610,8 @@ body {
   min-height: 48px;
   border: none;
   border-radius: var(--radius-md);
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
   font-size: var(--text-base);
   font-weight: 700;
   cursor: pointer;
@@ -6231,8 +6687,8 @@ body {
   width: 48px;
   height: 48px;
   border-radius: var(--radius-full);
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-lg);
   font-weight: 700;
   display: flex;
@@ -6339,7 +6795,7 @@ body {
   margin: 0 0 var(--space-1);
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   cursor: pointer;
 }
 
@@ -6366,8 +6822,8 @@ body {
   width: 64px;
   height: 64px;
   border-radius: var(--radius-full);
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-lg);
   font-weight: 700;
   display: flex;
@@ -6407,7 +6863,7 @@ body {
   margin: 0;
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   cursor: pointer;
 }
 
@@ -6470,8 +6926,8 @@ body {
   text-transform: uppercase;
   padding: 2px var(--space-2);
   border-radius: var(--radius-full);
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
   white-space: nowrap;
 }
 
@@ -6486,8 +6942,8 @@ body {
 }
 
 .stu-status-badge--alumni {
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-status-badge--transferred_out,
@@ -6521,8 +6977,8 @@ body {
 }
 
 .stu-detail-tab--active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
+  border-bottom-color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-detail-body {
@@ -6550,12 +7006,12 @@ body {
   align-self: flex-start;
   min-height: 36px;
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-primary);
+  border: 1px solid var(--color-brand-600, var(--color-primary));
   border-radius: var(--radius-md);
-  background: var(--color-primary-subtle);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   cursor: pointer;
 }
 
@@ -6692,7 +7148,7 @@ body {
   align-self: flex-start;
   background: none;
   border: none;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
@@ -6708,7 +7164,7 @@ body {
 .stu-inline-retry {
   background: none;
   border: none;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   font-weight: 600;
   font-size: var(--text-sm);
   cursor: pointer;
@@ -6772,7 +7228,7 @@ body {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   text-decoration: underline;
   text-decoration-color: transparent;
   transition: text-decoration-color 0.1s;
@@ -6780,7 +7236,7 @@ body {
 
 .stu-guardian-name--link:hover,
 .stu-guardian-name--link:focus-visible {
-  text-decoration-color: var(--color-primary);
+  text-decoration-color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-guardian-meta {
@@ -6864,14 +7320,14 @@ body {
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-md);
   background: none;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
 }
 
 .stu-add-guardian-btn:hover {
-  background: var(--color-primary-subtle);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
 }
 
 /* ── Guardian brief popup ─────────────────────────────────────────────────
@@ -6991,8 +7447,8 @@ body {
   font-weight: 600;
   padding: 2px var(--space-2);
   border-radius: var(--radius-full);
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
   white-space: nowrap;
 }
 
@@ -7003,7 +7459,7 @@ body {
   padding: 0;
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
   cursor: pointer;
   text-decoration: underline;
   text-decoration-color: transparent;
@@ -7012,7 +7468,7 @@ body {
 
 .stu-guardian-brief-edit-link:hover,
 .stu-guardian-brief-edit-link:focus-visible {
-  text-decoration-color: var(--color-primary);
+  text-decoration-color: var(--color-brand-600, var(--color-primary));
 }
 
 /* Portal login card, inside the guardian brief popup.
@@ -7105,7 +7561,7 @@ body {
 }
 
 .stu-status-action-btn--alumni {
-  color: var(--color-primary);
+  color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-status-action-btn--transfer {
@@ -14973,6 +15429,78 @@ body {
   animation: none;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   BADGE TOAST (PRD Problem 6.8 follow-up) — fires when the header's
+   status-badge count increases. New scope, badge-count-increase only,
+   not a general app-wide toast system. Slide/fade convention matches
+   .more-sheet's own reduced-motion handling exactly.
+═══════════════════════════════════════════════════════════════════ */
+
+.app-badge-toast {
+  position: fixed;
+  top: calc(56px + 0.75rem);
+  right: 1rem;
+  left: 1rem;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 22rem;
+  margin-left: auto;
+  padding: 0.75rem 0.875rem;
+  border-radius: var(--radius-lg);
+  background: var(--color-neutral-900, #111827);
+  color: white;
+  box-shadow: var(--shadow-lg);
+  animation: app-badge-toast-slide-in 0.22s ease;
+}
+
+@keyframes app-badge-toast-slide-in {
+  from { transform: translateY(-0.5rem); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+.app-badge-toast--no-motion {
+  animation: none;
+}
+
+.app-badge-toast-icon {
+  display: flex;
+  align-items: center;
+  color: var(--color-warning, #d97706);
+  flex-shrink: 0;
+}
+
+.app-badge-toast-text {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.app-badge-toast-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  min-width: 24px;
+  min-height: 24px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-neutral-400, #9ca3af);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-badge-toast-close:hover {
+  background: rgb(255 255 255 / 0.1);
+  color: white;
+}
+
 .more-sheet-handle {
   flex-shrink: 0;
   width: 100%;
@@ -15400,7 +15928,7 @@ body {
 }
 
 .stu-stat:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 1px;
 }
 
@@ -15430,8 +15958,8 @@ body {
 }
 
 .stu-stat--alumni {
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
 }
 
 .stu-stat--transferred {

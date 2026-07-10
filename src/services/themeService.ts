@@ -116,12 +116,17 @@ export interface BrandScale {
    *  darker than 800 (or a change to the mix fractions above) can't
    *  silently invalidate the assumption. */
   on800: string;
-  /** True if the legibility guard actually altered the admin's pick for
-   *  the working 600. Surfaced so a future Settings UI can show the admin
-   *  a small "adjusted for readability" note rather than silently
-   *  diverging from the swatch they clicked — flagged here, not built,
-   *  since no such UI copy exists yet; do not invent it without the
-   *  owner's sign-off on the wording. */
+  /** True if the legibility guard actually altered the color for the
+   *  working 600, checked AFTER the dark-mode desaturation step below
+   *  (so in dark mode this reflects contrast-adjustment on top of the
+   *  desaturated color, not a comparison back to the admin's raw pick).
+   *  Contrast-only signal — does NOT flag "was this color desaturated for
+   *  dark mode," which is a separate, always-applied dark-mode step, not
+   *  a fallback path the way the contrast guard is. Surfaced so a future
+   *  Settings UI can show the admin a small "adjusted for readability"
+   *  note rather than silently diverging from the swatch they clicked —
+   *  flagged here, not built, since no such UI copy exists yet; do not
+   *  invent it without the owner's sign-off on the wording. */
   wasAdjustedForContrast: boolean;
 }
 
@@ -161,6 +166,50 @@ function mix(c1: RGB, c2: RGB, t: number): RGB {
     c1[0] + (c2[0] - c1[0]) * t,
     c1[1] + (c2[1] - c1[1]) * t,
     c1[2] + (c2[2] - c1[2]) * t,
+  ];
+}
+
+/** HSL conversions — needed for a genuine perceptual desaturation pass
+ *  (see `desaturateForDarkSurface` below). RGB-space `mix()` alone cannot
+ *  do this: mixing an RGB color toward black or white changes lightness
+ *  but leaves saturation essentially unchanged (a vivid red mixed toward
+ *  white just becomes a vivid pink, not a calmer one) — HSL is the
+ *  minimum color space where "reduce saturation, preserve hue" is a
+ *  direct, single-channel operation. */
+type HSL = [number, number, number]; // [0-360, 0-1, 0-1]
+
+function rgbToHsl([r, g, b]: RGB): HSL {
+  const rn = r / 255, gn = g / 255, bn = b / 255;
+  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h: number;
+  if (max === rn) h = ((gn - bn) / d + (gn < bn ? 6 : 0));
+  else if (max === gn) h = (bn - rn) / d + 2;
+  else h = (rn - gn) / d + 4;
+  return [h * 60, s, l];
+}
+
+function hslToRgb([h, s, l]: HSL): RGB {
+  if (s === 0) return [l * 255, l * 255, l * 255];
+  const hue2rgb = (p: number, q: number, t: number) => {
+    let tt = t;
+    if (tt < 0) tt += 1;
+    if (tt > 1) tt -= 1;
+    if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+    if (tt < 1 / 2) return q;
+    if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const hn = h / 360;
+  return [
+    hue2rgb(p, q, hn + 1 / 3) * 255,
+    hue2rgb(p, q, hn) * 255,
+    hue2rgb(p, q, hn - 1 / 3) * 255,
   ];
 }
 
@@ -216,6 +265,48 @@ function darkenToContrast(hex: string, minContrast: number, surfaceHex: string):
 }
 
 /**
+ * Dark-mode perceptual correction (added 2026-07-10, owner-reported: "some
+ * colours look terrible on dark mode" — researched before fixing, not
+ * guessed). Root cause: `darkenToContrast`/the tint-shade math above only
+ * ever correct LUMINANCE against the surface — they push a color toward
+ * black or white until the contrast number clears, but never touch
+ * saturation. Converging guidance from dark-mode-specific design sources
+ * (Material Design's own dark-theme guidelines; multiple 2025/2026
+ * accessibility and design-system write-ups) names the same failure mode
+ * this produces: human color perception is not symmetrical between light
+ * and dark grounds — a saturated hue that reads as a calm, professional
+ * accent against white can appear to "vibrate," glow, or look harsh
+ * against a dark surface at the exact same saturation, independent of
+ * whether it also happens to pass a contrast-ratio check. The fix named
+ * consistently across sources is a genuine hue-preserving HSL adjustment:
+ * reduce saturation (roughly 10-40% relative reduction, sources vary but
+ * converge in that band) and shift lightness up into a calmer working
+ * range for accent use against dark surfaces — not a blanket wash-out,
+ * and never a hue shift, since hue is what keeps the color recognizably
+ * "the school's own brand color" rather than a different color entirely.
+ *
+ * Applied ONLY to the dark-mode working base, before the existing
+ * `darkenToContrast` legibility guard runs on the result — so contrast
+ * safety (the non-negotiable WCAG floor) is still checked and enforced
+ * against the calmer, desaturated color, not bypassed by this step. Light
+ * mode is completely unaffected: this function is only ever called when
+ * `surfaceHex` is dark. */
+function desaturateForDarkSurface(hex: string): string {
+  const [h, s, l] = rgbToHsl(hexToRgb(hex));
+  // 30% relative saturation reduction — middle of the 10-40% range named
+  // across sources, not the most aggressive or most conservative edge.
+  const newS = s * 0.7;
+  // Lift lightness toward a comfortable working range for dark-surface
+  // accents (roughly 55-70% is the zone sources describe as "light enough
+  // to read clearly, not so light it washes out or reads as a tint").
+  // Only ever raises lightness (a color the admin picked pale/light
+  // already stays where it is) — never darkens further, since darkening
+  // is the opposite of what a dark surface needs from its accent color.
+  const newL = Math.max(l, 0.6);
+  return rgbToHex(hslToRgb([h, newS, newL]));
+}
+
+/**
  * Pure function: given the admin's picked brand hex, derive the full
  * scale. No DOM access — safe to call from a service, a test, or a future
  * React Native theme provider equally.
@@ -234,11 +325,21 @@ export function deriveBrandScale(pickedHex: string, surfaceHex: string = '#fffff
   const raw = pickedHex;
   const surfaceIsDark = relativeLuminance(hexToRgb(surfaceHex)) < 0.5;
 
-  const rawContrast = contrastRatio(raw, surfaceHex);
+  // Dark-mode perceptual desaturation (see desaturateForDarkSurface's own
+  // doc comment above) runs FIRST, before the contrast guard — so the
+  // guard's binary search still has the final say on WCAG safety, but it
+  // now searches from a calmer starting point instead of the admin's raw,
+  // possibly harshly-saturated pick. `raw` itself is deliberately left
+  // untouched here (still the true admin pick, for swatches/decorative
+  // uses that don't need this correction) — only the working-base
+  // derivation path is affected, and only in dark mode.
+  const contrastBasis = surfaceIsDark ? desaturateForDarkSurface(raw) : raw;
+
+  const rawContrast = contrastRatio(contrastBasis, surfaceHex);
   const wasAdjustedForContrast = rawContrast < MIN_TEXT_CONTRAST;
   const workingBase = wasAdjustedForContrast
-    ? darkenToContrast(raw, MIN_TEXT_CONTRAST, surfaceHex)
-    : raw;
+    ? darkenToContrast(contrastBasis, MIN_TEXT_CONTRAST, surfaceHex)
+    : contrastBasis;
   const workingRgb = hexToRgb(workingBase);
 
   // Tints/shades are always relative to the surface, not fixed poles —

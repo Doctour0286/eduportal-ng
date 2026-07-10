@@ -126,6 +126,22 @@ export default function App() {
   // Resolved role label for the signed-in staff member — fetched once after login.
   // Null until resolved; shown in account popover.
   const [roleLabel, setRoleLabel] = useState<string | null>(null)
+  // Header status-badge slot (PRD Problem 6.8) — reusable, not conflict-specific
+  // like the reference app's own .header-conflict-badge. Per owner decision:
+  // admin/platform_admin only see a real count (pending scores + pending leave
+  // requests — the same two figures AdminDashboard.tsx's own "Needs attention"
+  // section already computes); every other actor type's badge stays empty for
+  // now, not a placeholder zero. Kept as its own lightweight query here rather
+  // than reading AdminDashboard's state, since AdminDashboard isn't always the
+  // mounted child of this header (teacher/guardian home renders a different
+  // component) and the header must work regardless of which one is active.
+  const [headerBadgeCount, setHeaderBadgeCount] = useState<number | null>(null)
+  // Toast (new scope, not previously named in the PRD — owner-scoped this
+  // session to badge-count-increase only, not a general app-wide toast bus).
+  // Tracks the last count seen so a toast fires only when the number goes up
+  // (a new item appeared since the last check), not on every poll/render.
+  const lastBadgeCountRef = useRef<number | null>(null)
+  const [badgeToast, setBadgeToast] = useState<{ count: number; delta: number } | null>(null)
   // onNavigate: switches tab and optionally carries an intent for the target module.
   // Intent is stored separately so the module can read it on mount. Must be declared
   // here, alongside every other hook, never after an early return — a conditional
@@ -336,6 +352,53 @@ export default function App() {
       })
     return () => { cancelled = true }
   }, [actorType, actorRecordId])
+
+  // Header status-badge count (PRD Problem 6.8, admin-only per owner decision).
+  // Same two figures AdminDashboard.tsx's own "Needs attention" section reads
+  // (pending scores + pending leave requests) — kept as a separate lightweight
+  // query here since this header renders regardless of which dashboard
+  // component is mounted as the 'home' tab's child. Non-admin actor types
+  // never run this effect at all — setHeaderBadgeCount is simply never called
+  // for them, so the badge slot stays at its initial null (no fake zero shown).
+  useEffect(() => {
+    const isAdmin = isAdminRole || actorType === 'platform_admin'
+    if (!isAdmin || !school?.id) return
+    let cancelled = false
+
+    async function loadBadgeCount() {
+      const [scoresRes, leaveRes] = await Promise.all([
+        supabase.from('scores').select('id', { count: 'exact', head: true }).is('approved_at', null),
+        supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+      ])
+      if (cancelled) return
+      const total = (scoresRes.count ?? 0) + (leaveRes.count ?? 0)
+      const previous = lastBadgeCountRef.current
+      // Toast only on a real increase — not on first load (previous === null)
+      // and not when the count drops or stays flat, so dismissing/approving
+      // items elsewhere never triggers a spurious toast.
+      if (previous !== null && total > previous) {
+        setBadgeToast({ count: total, delta: total - previous })
+      }
+      lastBadgeCountRef.current = total
+      setHeaderBadgeCount(total)
+    }
+
+    loadBadgeCount()
+    // Poll at a modest interval — good enough for a "new item appeared" nudge
+    // without hammering the two count queries; matches this app's existing
+    // preference for simple polling over a realtime subscription elsewhere.
+    const interval = setInterval(loadBadgeCount, 60_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [isAdminRole, actorType, school?.id])
+
+  // Auto-dismiss the badge toast after a few seconds — matches this file's
+  // reduced-motion-aware transition convention (see the More sheet), not a
+  // new animation system.
+  useEffect(() => {
+    if (!badgeToast) return
+    const timer = setTimeout(() => setBadgeToast(null), 5000)
+    return () => clearTimeout(timer)
+  }, [badgeToast])
 
   // Load school from subdomain
   useEffect(() => {
@@ -558,17 +621,65 @@ export default function App() {
           <span className="app-header-school-name">{school.name}</span>
         </div>
         <div className="app-header-right">
+          {/* Compact identity chip (PRD Problem 6.8) — name initial + resolved
+              role label, matching the reference app's .header-user-chip. Reuses
+              roleLabel, already fetched once after login for the account popover
+              (no second identity query). Renders nothing until roleLabel resolves,
+              same graceful-degradation convention used throughout this file. */}
+          {roleLabel && (
+            <div className="app-header-user-chip" aria-hidden="true">
+              <span className="app-header-user-chip-avatar">
+                {(session?.user?.user_metadata?.full_name as string | undefined)?.[0]?.toUpperCase() ?? '•'}
+              </span>
+              <span className="app-header-user-chip-role">{roleLabel}</span>
+            </div>
+          )}
           <button
-            className="icon-btn"
+            className="icon-btn app-header-account-btn"
             onClick={() => setAccountPopoverOpen(prev => !prev)}
-            aria-label="Account"
+            aria-label={headerBadgeCount ? `Account, ${headerBadgeCount} items need attention` : 'Account'}
             aria-expanded={accountPopoverOpen}
             aria-haspopup="true"
           >
             <Icon name="user" />
+            {/* Reusable status-badge slot (PRD Problem 6.8) — deliberately not
+                conflict-specific like the reference app's own .header-conflict-badge.
+                Wired to admin/platform_admin's pending scores + leave requests count
+                (see the effect above); every other actor type never has
+                setHeaderBadgeCount called, so this stays null and renders nothing. */}
+            {headerBadgeCount !== null && headerBadgeCount > 0 && (
+              <span className="app-header-status-badge">{headerBadgeCount > 99 ? '99+' : headerBadgeCount}</span>
+            )}
           </button>
         </div>
       </header>
+
+      {/* Badge-count toast — fires only when headerBadgeCount increases since
+          the last check (new item appeared), not on every poll. New scope,
+          not previously named in the PRD; owner explicitly scoped this to
+          badge-count-increase only, not a general app-wide toast system.
+          Purely informational — dismiss via its own button or the 5s
+          auto-timeout; does not open the account popover on tap. */}
+      {badgeToast && (
+        <div
+          className={`app-badge-toast${prefersReducedMotion ? ' app-badge-toast--no-motion' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span className="app-badge-toast-icon" aria-hidden="true"><Icon name="bell" size={16} /></span>
+          <span className="app-badge-toast-text">
+            {badgeToast.delta === 1 ? '1 new item needs attention' : `${badgeToast.delta} new items need attention`}
+          </span>
+          <button
+            type="button"
+            className="app-badge-toast-close"
+            onClick={() => setBadgeToast(null)}
+            aria-label="Dismiss notification"
+          >
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Account popover — anchored to top-right, closed on backdrop tap */}
       {accountPopoverOpen && (

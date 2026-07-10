@@ -28,6 +28,27 @@
  *   getSchoolAttendanceAnalytics() — whole-school present/absent/excused/late/not-marked
  *                                    totals + % presence for day/week/term/session scope
  *
+ * After-hours edit lock (2026-07-10, Session 31, owner request — a real bug
+ * fix's follow-on: see this file's set_updated_at trigger fix below):
+ *   getSchoolHoursEndMoment()      — resolves the real end-of-school-day moment for a
+ *                                    date, sourced from `periods.end_time` (school-wide,
+ *                                    latest non-break period)
+ *   isWithinEditWindow()           — pure check: is `now` still before that moment
+ *
+ * Real bug found and fixed this session, not a code-only fix — a DB migration
+ * was required: attendance_records has a `set_updated_at` trigger (attached
+ * presumably by copy-paste alongside the audit trigger) that unconditionally
+ * writes `NEW.updated_at`, but this table never had that column. The first
+ * tap on a student/day is a plain INSERT (trigger never fires, succeeds); any
+ * SECOND tap resolves to ON CONFLICT DO UPDATE, which DOES fire the trigger,
+ * which fails with Postgres 42703 ("record \"new\" has no field
+ * \"updated_at\"") — saveAttendanceRecord() correctly reports {ok:false}, and
+ * the optimistic UI reverts to the first-tapped status. Diagnosed via a live
+ * DevTools network capture showing the exact 42703 response, not guessed.
+ * Fixed via `migration_session_31_attendance_updated_at.sql` (adds the column,
+ * backfilled from created_at) — kept, not dropped, since it also now serves as
+ * this session's edit-window "last changed" signal.
+ *
  * Per-period marking removed (2026-07-03, owner decision): `attendance_settings`
  * had zero rows for any granularity in this school — every one of the 4 leaf
  * classes was already implicitly running on the code-level 'daily' fallback,
@@ -217,6 +238,10 @@ export async function loadCurrentTerm(
 // ─── Class loaders ────────────────────────────────────────────────────────────
 
 // Shared path-label builder — same logic as timetableService.loadClassNodes().
+// Takes the full node set (leaves + their parents) so parent_id lookups can
+// actually resolve — see loadAllLeafClasses()'s own comment for why this
+// matters: a leaf's parent is, by definition, never itself a leaf, so a
+// byId map built only from leaf nodes could never find it.
 function attachPathLabels(nodes: ClassNode[]): ClassNode[] {
   const byId: Record<string, ClassNode> = {}
   nodes.forEach(n => { byId[n.id] = n })
@@ -235,6 +260,20 @@ function attachPathLabels(nodes: ClassNode[]): ClassNode[] {
  * Every user (teacher or admin) picks freely from this list —
  * there is no per-teacher class restriction on attendance.
  * Mirrors timetableService.loadClassNodes() but filtered to is_leaf_enrollable.
+ *
+ * FIXED (2026-07-10, Session 31, owner-reported): path_label was silently
+ * degrading to the bare class name for every single row, contradicting this
+ * function's own doc comment's claimed example ("JSS 1 · JSS 1A"). Root
+ * cause: attachPathLabels()'s byId map was built ONLY from the fetched leaf
+ * nodes — but a leaf's parent_id, by definition (is_leaf_enrollable=true
+ * nodes are never themselves someone else's non-leaf parent in this
+ * school's actual tree shape), can never be found in a map containing only
+ * leaves. Every row silently took the `else` branch. Fixed by fetching the
+ * distinct parent_id set as a second, lightweight query (id+name only) and
+ * passing the COMBINED node list into attachPathLabels() — parents resolve
+ * correctly now, while the function's own return value is still filtered
+ * back down to leaves only, so this stays a drop-in fix with no contract
+ * change for existing callers.
  */
 export async function loadAllLeafClasses(): Promise<Result<ClassNode[]>> {
   try {
@@ -246,7 +285,7 @@ export async function loadAllLeafClasses(): Promise<Result<ClassNode[]>> {
 
     if (error) return { ok: false, error: error.message }
 
-    const nodes: ClassNode[] = (data ?? []).map((n: any) => ({
+    const leaves: ClassNode[] = (data ?? []).map((n: any) => ({
       id: n.id,
       name: n.name,
       parent_id: n.parent_id ?? null,
@@ -254,29 +293,116 @@ export async function loadAllLeafClasses(): Promise<Result<ClassNode[]>> {
       path_label: n.name,   // attachPathLabels fills in the 2-level label
     }))
 
-    return { ok: true, data: attachPathLabels(nodes) }
+    // Second query: fetch just the parents actually referenced, by id.
+    // Distinct + non-null filter keeps this a small, cheap lookup rather
+    // than a second full-table scan.
+    const parentIds = [...new Set(leaves.map(l => l.parent_id).filter((id): id is string => !!id))]
+
+    let parents: ClassNode[] = []
+    if (parentIds.length > 0) {
+      const { data: parentData, error: parentError } = await supabase
+        .from('class_nodes')
+        .select('id, name, parent_id, sort_order')
+        .in('id', parentIds)
+
+      if (parentError) return { ok: false, error: parentError.message }
+
+      parents = (parentData ?? []).map((n: any) => ({
+        id: n.id,
+        name: n.name,
+        parent_id: n.parent_id ?? null,
+        sort_order: n.sort_order,
+        path_label: n.name,
+      }))
+    }
+
+    // attachPathLabels needs BOTH sets to resolve a leaf's parent name, but
+    // only the leaves are returned — parents here exist solely to make the
+    // lookup succeed, not to appear in the class selector's own list.
+    attachPathLabels([...leaves, ...parents])
+
+    return { ok: true, data: leaves }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load classes' }
+  }
+}
+
+/**
+ * One entry per parent class node that has at least one leaf child, plus the
+ * ids of every leaf under it — the data shape the "filter by parent class as
+ * a whole" UI needs (owner request, Session 31). A top-level leaf with no
+ * parent (parent_id null) has nowhere to group under; the UI's own "All
+ * classes" option already covers that case without this list needing a
+ * synthetic entry for it.
+ *
+ * Deliberately a second, separate export rather than folding this into
+ * loadAllLeafClasses()'s return shape — that function's contract (a flat
+ * ClassNode[] of leaves) is relied on elsewhere in this file's own history
+ * (loadStudentsForClass, loadAttendanceRecords, etc. all take one leaf id at
+ * a time); changing its shape would ripple into every one of those call
+ * sites for a feature that's specific to the class-selector UI only.
+ */
+export interface ParentClassGroup {
+  id: string
+  name: string
+  leafIds: string[]
+}
+
+export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]>> {
+  try {
+    const leavesRes = await loadAllLeafClasses()
+    if (!leavesRes.ok) return leavesRes
+
+    const parentIds = [...new Set(leavesRes.data.map(l => l.parent_id).filter((id): id is string => !!id))]
+    if (parentIds.length === 0) return { ok: true, data: [] }
+
+    const { data: parentData, error } = await supabase
+      .from('class_nodes')
+      .select('id, name, sort_order')
+      .in('id', parentIds)
+      .order('sort_order')
+
+    if (error) return { ok: false, error: error.message }
+
+    const groups: ParentClassGroup[] = (parentData ?? []).map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      leafIds: leavesRes.data.filter(l => l.parent_id === p.id).map(l => l.id),
+    }))
+
+    return { ok: true, data: groups }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load class groups' }
   }
 }
 
 // ─── Students ─────────────────────────────────────────────────────────────────
 
 /**
- * Active students enrolled in a specific class node.
- * Ordered alphabetically — consistent with how teachers read a register.
- * Only 'active' status students; alumni/transferred/inactive excluded.
+ * Active students enrolled in a specific class node — or, when given an
+ * array, every leaf class in that array (owner request, Session 31: "filter
+ * by a parent class as a whole" needs one register spanning multiple leaf
+ * classes). Ordered alphabetically within the whole result set — consistent
+ * with how teachers read a register. Only 'active' status students;
+ * alumni/transferred/inactive excluded.
+ *
+ * Existing single-id callers are unaffected — `.eq()` vs `.in()` is chosen
+ * based on the param's actual shape, not a breaking signature change.
  */
 export async function loadStudentsForClass(
-  classNodeId: string,
+  classNodeId: string | string[],
 ): Promise<Result<Student[]>> {
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('students')
       .select('id, full_name, class_node_id')
-      .eq('class_node_id', classNodeId)
       .eq('status', 'active')
-      .order('full_name')
+
+    query = Array.isArray(classNodeId)
+      ? query.in('class_node_id', classNodeId)
+      : query.eq('class_node_id', classNodeId)
+
+    const { data, error } = await query.order('full_name')
 
     if (error) return { ok: false, error: error.message }
     return { ok: true, data: (data ?? []) as Student[] }
@@ -288,21 +414,24 @@ export async function loadStudentsForClass(
 // ─── Attendance records ───────────────────────────────────────────────────────
 
 /**
- * Loads all attendance records for a class on a given date.
+ * Loads all attendance records for a class on a given date — or, when given
+ * an array, every leaf class in that array (Session 31 whole-parent view,
+ * same rationale as loadStudentsForClass: existing single-id callers are
+ * unaffected, `.eq()` vs `.in()` chosen based on the param's actual shape).
  * One row per student per day, enforced by a real DB constraint
  * (school_id, student_id, date) — no period dimension.
  *
  * RLS guarantees school scoping — no explicit school_id filter needed here.
  */
 export async function loadAttendanceRecords(params: {
-  classNodeId: string
+  classNodeId: string | string[]
   date: string          // 'YYYY-MM-DD'
 }): Promise<Result<AttendanceRecord[]>> {
   try {
     // We filter by student.class_node_id via a join — attendance_records doesn't
     // store class_node_id directly (students carry their own enrollment column).
     // The join approach avoids a subquery and lets Supabase optimize with the index.
-    const { data, error } = await supabase
+    let query = supabase
       .from('attendance_records')
       .select(`
         id,
@@ -314,7 +443,12 @@ export async function loadAttendanceRecords(params: {
         students!inner ( class_node_id )
       `)
       .eq('date', params.date)
-      .eq('students.class_node_id', params.classNodeId)
+
+    query = Array.isArray(params.classNodeId)
+      ? query.in('students.class_node_id', params.classNodeId)
+      : query.eq('students.class_node_id', params.classNodeId)
+
+    const { data, error } = await query
 
     if (error) return { ok: false, error: error.message }
 
@@ -336,7 +470,12 @@ export async function loadAttendanceRecords(params: {
 // ─── Attendance history (calendar strip) ─────────────────────────────────────
 
 /**
- * Loads a 30-day rolling attendance history for every student in a class.
+ * Loads a 30-day rolling attendance history for every student in a class —
+ * or, when given an array, every leaf class in that array (Session 31
+ * whole-parent view; same widening rationale as loadStudentsForClass and
+ * loadAttendanceRecords above — this function already delegates the student
+ * lookup to loadStudentsForClass, so it needed no query changes of its own,
+ * only the wider param type to pass through).
  * Used to render the calendar strip beneath each student row.
  *
  * One query for all students in the class over the date range.
@@ -344,7 +483,7 @@ export async function loadAttendanceRecords(params: {
  * Days with no record come back as status: null — the UI renders them as grey.
  */
 export async function loadAttendanceHistory(
-  classNodeId: string,
+  classNodeId: string | string[],
   schoolId: string,
   referenceDate: Date = new Date(),
 ): Promise<Result<StudentAttendanceHistory[]>> {
@@ -696,6 +835,72 @@ export async function countSchoolDaysInRange(
     if (isDay) count++
   }
   return { ok: true, data: count }
+}
+
+/**
+ * Resolves the real moment school hours end on a given date — the register's
+ * after-hours edit lock (owner request, Session 31) needs a genuine
+ * timestamp to compare `now()` against, not a guess.
+ *
+ * Source: the LATEST end_time among this school's non-break `periods` rows
+ * (`is_break = false`) — periods are school-wide, not per-class (§7.10's
+ * schema has no class_node_id on this table), so this is one value per
+ * school, not per register. Combined with `date` in the caller's local
+ * timezone (same convention as every other date helper in this file — no
+ * UTC conversion, matches how a teacher actually experiences "today").
+ *
+ * Returns `null` data (not an error) when the school has zero periods
+ * configured — this is the same "fails open" posture `isSelectedDateSchoolDay`
+ * already uses elsewhere in this app (an unconfigured school shouldn't lock
+ * a register no one has set closing hours for; the lock only activates once
+ * there's a real hours configuration to lock against).
+ */
+export async function getSchoolHoursEndMoment(
+  date: string,        // 'YYYY-MM-DD'
+  schoolId: string,
+): Promise<Result<Date | null>> {
+  try {
+    const { data, error } = await supabase
+      .from('periods')
+      .select('end_time')
+      .eq('school_id', schoolId)
+      .eq('is_break', false)
+      .order('end_time', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (error) return { ok: false, error: error.message }
+    if (!data)  return { ok: true, data: null }   // no periods configured — fails open
+
+    // data.end_time is a Postgres `time` value, e.g. "15:30:00" — combine
+    // with the local date string exactly like buildDateRange()'s own
+    // "force local midnight" pattern, so this never drifts into UTC.
+    const endMoment = new Date(`${date}T${data.end_time}`)
+    return { ok: true, data: endMoment }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load school hours' }
+  }
+}
+
+/**
+ * Whether a specific attendance record is still within its edit window.
+ * Pure — takes the already-resolved hours-end moment rather than fetching it
+ * itself, so callers that already have it in state (one fetch per date, not
+ * one per row) don't pay for a second query per student.
+ *
+ * Owner's exact rule (Session 31): a first mark on a previously-unmarked
+ * student is always allowed, however late — this function only governs
+ * whether an EXISTING record can still be changed. Once that date's school
+ * hours have passed, it locks permanently (not just until the next day —
+ * there is no re-open path by design, per the owner's explicit "permanent
+ * history" framing).
+ */
+export function isWithinEditWindow(
+  hoursEndMoment: Date | null,
+  now: Date = new Date(),
+): boolean {
+  if (!hoursEndMoment) return true   // fails open — see getSchoolHoursEndMoment()
+  return now.getTime() <= hoursEndMoment.getTime()
 }
 
 /**

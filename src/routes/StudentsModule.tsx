@@ -35,6 +35,8 @@ import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
 import {
   loadLeafClasses,
+  loadParentClassGroups,
+  type ParentClassGroup,
   loadStudents,
   loadGuardiansForStudent,
   loadTransferRequest,
@@ -217,8 +219,38 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
   const [photoUrls, setPhotoUrls] = useState<Map<string, string>>(new Map())
 
   // ── Filters ───────────────────────────────────────────────────────────────
-  const [filterClass,  setFilterClass]  = useState<string>('')
+  // Session 32 (owner request: "same kind of intelligent navigation" as
+  // AttendanceModule's whole-parent view) — filterClass stays the
+  // single-leaf-class case exactly as before (untouched contract, every
+  // existing read of filterClass below keeps working); selectedGroup is new
+  // and mutually exclusive with it, set when "All of {parent}" is picked.
+  // parentGroups/selectedParentId are the picker's own tier-1 state (which
+  // grade is currently narrowing tier 2's pill row) — selectedParentId is
+  // NOT the same thing as selectedGroup: picking a parent pill narrows the
+  // class row, it does not by itself select "the whole parent" as the
+  // active filter (that's a separate, explicit "All of X" pill beside it).
+  const [filterClass,     setFilterClass]     = useState<string>('')
+  const [selectedGroup,   setSelectedGroup]   = useState<ParentClassGroup | null>(null)
+  const [parentGroups,    setParentGroups]    = useState<ParentClassGroup[]>([])
+  const [selectedParentId, setSelectedParentId] = useState<string | null>(null)
   const [searchQuery,  setSearchQuery]  = useState('')
+  // Collapse-on-select (matches AttendanceModule's own follow-up) — once a
+  // class or group is picked, fold the picker down to one compact summary
+  // row instead of showing both pill tiers permanently. Defaults to
+  // expanded so a first-time/no-selection state still shows the full
+  // picker, same as before this feature existed.
+  const [pickerExpanded, setPickerExpanded] = useState(true)
+  // Session 32 follow-up (owner: "collapsible on the option of 'All
+  // Classes' [too]") — filterClass === '' is structurally ambiguous on its
+  // own: it means both "nothing picked yet" (initial boot state) AND
+  // "All classes" explicitly chosen (selectAllClasses' own reset target),
+  // and those two need to behave differently for collapse purposes — the
+  // former should stay expanded (there's nothing yet to summarize), the
+  // latter should collapse just like any other real selection. This flag
+  // is the one place that distinction lives; every pill's onClick sets it
+  // true, including selectAllClasses, so "All classes" is a genuine tapped
+  // choice, not just a default.
+  const [hasChosen, setHasChosen] = useState(false)
 
   // Session 22 follow-up (stat-strip drill-down). Which single status the
   // visible list is currently showing — defaults to 'active' so the list's
@@ -522,16 +554,55 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
       setClasses(res.data)
       setClassPathMap(buildClassPathMap(res.data))
       setBootState('ready')
+
+      // Session 32 — fired alongside, not blocking bootState. A failure
+      // here just means the parent-pill tier doesn't appear (flat class
+      // picker, identical to pre-Session-32 behavior) rather than blocking
+      // the whole list from loading over a purely additive filter feature.
+      const groupsRes = await loadParentClassGroups()
+      if (!cancelled && groupsRes.ok) setParentGroups(groupsRes.data)
     }
     boot()
     return () => { cancelled = true }
   }, [])
 
+  // ─── Derived effective selection ────────────────────────────────────────
+  // Session 32 — single place that resolves filterClass vs selectedGroup
+  // into one shape every downstream loader/handler reads, exactly the same
+  // reasoning as AttendanceModule.tsx's own effectiveClassIds/
+  // effectiveSelectionKey/effectiveLabel block. Declared here, BEFORE
+  // loadList/loadStatusCounts below reference it — AttendanceModule's own
+  // Session 31 caught a genuine "used before declaration" TS error from
+  // placing this kind of block too late; placed early here from the start
+  // rather than repeating that mistake.
+  //
+  // '' (empty string) continues to mean "All classes, no filter" for
+  // filterClass, unchanged from before this feature — effectiveClassIds is
+  // `[]` in that case, and every query below already treats an empty/absent
+  // classNodeId as "no class filter" (see loadStudents'/getStudentStatusCounts'
+  // own `if (params.classNodeId)` checks), so this is not a new special case.
+  const effectiveClassIds: string[] = selectedGroup
+    ? selectedGroup.leafIds
+    : filterClass
+      ? [filterClass]
+      : []
+  const effectiveSelectionKey: string = selectedGroup
+    ? `group:${selectedGroup.id}`
+    : `class:${filterClass}`
+  const effectiveLabel: string = selectedGroup
+    ? `${selectedGroup.name} (all classes)`
+    : filterClass
+      ? (classPathMap.get(filterClass) ?? 'this class')
+      : 'All classes'
+
   // ─── Load students whenever class filter changes ───────────────────────────
 
   const loadList = useCallback(async () => {
     setListState('loading')
-    const res = await loadStudents({ classNodeId: filterClass || null, statusFilter })
+    const res = await loadStudents({
+      classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
+      statusFilter,
+    })
     if (!res.ok) {
       setListError(res.error)
       setListState('error')
@@ -560,7 +631,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     enriched
       .filter(s => s.photo_url)
       .forEach(s => { resolvePhoto(s.photo_url) })
-  }, [filterClass, statusFilter, classPathMap])
+  }, [effectiveSelectionKey, statusFilter, classPathMap])
 
   useEffect(() => {
     if (bootState === 'ready') loadList()
@@ -572,9 +643,11 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
   // scoped to just one of them. Only class filter should reset these counts.
 
   const loadStatusCounts = useCallback(async () => {
-    const res = await getStudentStatusCounts({ classNodeId: filterClass || null })
+    const res = await getStudentStatusCounts({
+      classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
+    })
     if (res.ok) setStatusCounts(res.data)
-  }, [filterClass])
+  }, [effectiveSelectionKey])
 
   useEffect(() => {
     if (bootState === 'ready') loadStatusCounts()
@@ -1091,7 +1164,50 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
 
   // ─── Render helpers ────────────────────────────────────────────────────────
 
+  // Session 32 — selection handlers, mirroring AttendanceModule's
+  // selectClass/selectGroup: each clears the other selection shape,
+  // resets search (a filter change invalidates whatever was being
+  // searched for in the previous view), and collapses the picker back
+  // down to the compact summary bar.
+  function selectAllClasses() {
+    setFilterClass('')
+    setSelectedGroup(null)
+    setSearchQuery('')
+    setHasChosen(true)
+    setPickerExpanded(false)
+  }
+  function selectClass(c: ClassNode) {
+    setFilterClass(c.id)
+    setSelectedGroup(null)
+    setSearchQuery('')
+    setHasChosen(true)
+    setPickerExpanded(false)
+  }
+  function selectGroup(g: ParentClassGroup) {
+    setSelectedGroup(g)
+    setFilterClass('')
+    setSearchQuery('')
+    setHasChosen(true)
+    setPickerExpanded(false)
+  }
+
   function renderHeader() {
+    // Session 32 (owner request: "same kind of intelligent navigation" as
+    // AttendanceModule's whole-parent view) — two-tier pill picker:
+    // tier 1 narrows by parent/grade, tier 2 shows that parent's own arms
+    // plus a dashed "All of {parent}" pill for the combined view. Orphan
+    // leaves (no parent_id) always show in tier 2's "All classes" view
+    // (no parent selected), same as before this feature — never
+    // unreachable. hasSelection now reads the explicit hasChosen flag
+    // (Session 32 follow-up), not filterClass/selectedGroup directly —
+    // '' is both "nothing picked yet" and "All classes chosen", and only
+    // the latter should collapse.
+    const hasSelection = hasChosen
+    const visibleLeaves = selectedParentId
+      ? classes.filter(c => c.parent_id === selectedParentId)
+      : classes
+    const activeParent = parentGroups.find(g => g.id === selectedParentId) ?? null
+
     return (
       <div className="stu-header">
         <div className="stu-header-top">
@@ -1105,34 +1221,91 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
 
         {bootState === 'ready' && (
           <div className="stu-filter-bar">
-            {/* SESSION 12 step 4 — dropdown replaced with tappable pills so
-                which class you're viewing (and that other classes exist) is
-                visible at a glance, no open-to-check-options step. */}
-            <div className="stu-class-pills" role="group" aria-label="Filter by class">
+            {/* Collapsed summary bar — once a selection is made, fold both
+                pill tiers into one compact row (economizes phone screen
+                space, matches AttendanceModule's own follow-up). Defaults
+                to expanded when nothing is selected yet. */}
+            {hasSelection && !pickerExpanded ? (
               <button
                 type="button"
-                className={`stu-class-pill${filterClass === '' ? ' stu-class-pill--active' : ''}`}
-                onClick={() => { setFilterClass(''); setSearchQuery('') }}
-                aria-pressed={filterClass === ''}
+                className="stu-selector-summary"
+                onClick={() => setPickerExpanded(true)}
               >
-                All classes
+                <span className="stu-selector-summary-label">{effectiveLabel}</span>
+                <span className="stu-selector-summary-change">
+                  Change <Icon name="chevron-down" size={14} />
+                </span>
               </button>
-              {classes.map(c => (
-                <button
-                  type="button"
-                  key={c.id}
-                  className={`stu-class-pill${filterClass === c.id ? ' stu-class-pill--active' : ''}`}
-                  onClick={() => { setFilterClass(c.id); setSearchQuery('') }}
-                  aria-pressed={filterClass === c.id}
-                >
-                  {c.path_label}
-                </button>
-              ))}
-            </div>
+            ) : (
+              <>
+                {/* SESSION 12 step 4 (extended Session 32) — dropdown
+                    replaced with tappable pills so which class you're
+                    viewing (and that other classes exist) is visible at a
+                    glance, no open-to-check-options step. Two tiers when
+                    parent groups exist; falls back to the original flat
+                    single row when a school has no grouped classes at all
+                    (parentGroups.length === 0), so a flat-tree school sees
+                    no change from before this feature. */}
+                {parentGroups.length > 0 && (
+                  <div className="stu-pill-row" role="tablist" aria-label="Filter by grade">
+                    <button
+                      type="button"
+                      className={`stu-pill${selectedParentId === null ? ' stu-pill--active' : ''}`}
+                      onClick={() => setSelectedParentId(null)}
+                    >
+                      All
+                    </button>
+                    {parentGroups.map(g => (
+                      <button
+                        type="button"
+                        key={g.id}
+                        className={`stu-pill${selectedParentId === g.id ? ' stu-pill--active' : ''}`}
+                        onClick={() => setSelectedParentId(g.id)}
+                      >
+                        {g.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="stu-class-pills" role="group" aria-label="Filter by class">
+                  <button
+                    type="button"
+                    className={`stu-class-pill${filterClass === '' && !selectedGroup ? ' stu-class-pill--active' : ''}`}
+                    onClick={selectAllClasses}
+                    aria-pressed={filterClass === '' && !selectedGroup}
+                  >
+                    All classes
+                  </button>
+                  {activeParent && (
+                    <button
+                      type="button"
+                      className={`stu-class-pill stu-class-pill--group${selectedGroup?.id === activeParent.id ? ' stu-class-pill--active' : ''}`}
+                      onClick={() => selectGroup(activeParent)}
+                      aria-pressed={selectedGroup?.id === activeParent.id}
+                    >
+                      All of {activeParent.name}
+                    </button>
+                  )}
+                  {visibleLeaves.map(c => (
+                    <button
+                      type="button"
+                      key={c.id}
+                      className={`stu-class-pill${filterClass === c.id ? ' stu-class-pill--active' : ''}`}
+                      onClick={() => selectClass(c)}
+                      aria-pressed={filterClass === c.id}
+                    >
+                      {activeParent ? c.name : c.path_label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
             <input
               type="search"
               className="stu-search"
-              placeholder="Search by name…"
+              placeholder={`Search in ${effectiveLabel}…`}
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
@@ -1179,7 +1352,7 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
         <div className="stu-empty-state">
           <span className="stu-empty-icon"><Icon name="users" /></span>
           <p className="stu-empty-msg">
-            {filterClass ? 'No students enrolled in this class yet.' : 'No students added yet.'}
+            {(filterClass || selectedGroup) ? 'No students enrolled in this class yet.' : 'No students added yet.'}
           </p>
           {canManageStudents && (
             <button className="stu-empty-action" onClick={openAddForm}>

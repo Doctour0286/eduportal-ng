@@ -16,6 +16,7 @@
  *
  * Read exports:
  *   loadLeafClasses()             — all is_leaf_enrollable class nodes with path labels
+ *   loadParentClassGroups()       — Session 32: parent class nodes + their leaf ids, for the whole-parent filter view
  *   loadStudents()                — paginated student list for a class (or all active)
  *   loadStudent()                 — single student by id
  *   loadGuardiansForStudent()     — all guardian links for a student
@@ -54,6 +55,17 @@ export interface ClassNode {
   parent_id: string | null
   sort_order: number
   path_label: string   // built client-side, e.g. "JSS 1 · JSS 1A"
+}
+
+// Session 32 (owner request: "same kind of intelligent navigation" as
+// AttendanceModule's whole-parent view) — one entry per parent class node
+// that has at least one enrollable leaf beneath it, carrying the ids of
+// those leaves so the UI can filter/aggregate across an entire grade level
+// (e.g. "All of JSS 1") in one combined list rather than one arm at a time.
+export interface ParentClassGroup {
+  id: string
+  name: string
+  leafIds: string[]
 }
 
 export interface Student {
@@ -225,6 +237,62 @@ export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
   }
 }
 
+/**
+ * Session 32 — loads every parent class node that has at least one
+ * enrollable leaf beneath it, for the two-tier "grade level" filter
+ * (matches AttendanceModule.tsx's own loadParentClassGroups, same
+ * reasoning: keeps loadLeafClasses()'s existing contract/return shape
+ * untouched for any other caller, adds a parallel export instead).
+ *
+ * Deliberately a second lightweight query rather than derived from an
+ * already-loaded leaves array — this needs parent name + sort_order too,
+ * which loadLeafClasses() doesn't return for parents (only bakes the name
+ * into each leaf's path_label string). Cheap: one query, id/name/parent_id/
+ * sort_order columns only, same table as loadLeafClasses().
+ */
+export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('class_nodes')
+      .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .order('sort_order')
+
+    if (error) return { ok: false, error: error.message }
+
+    const all = (data ?? []) as Array<{
+      id: string
+      name: string
+      parent_id: string | null
+      sort_order: number
+      is_leaf_enrollable: boolean
+    }>
+
+    const byId = new Map(all.map(n => [n.id, n]))
+    const leafIdsByParent = new Map<string, string[]>()
+
+    for (const n of all) {
+      if (!n.is_leaf_enrollable || !n.parent_id) continue
+      const arr = leafIdsByParent.get(n.parent_id) ?? []
+      arr.push(n.id)
+      leafIdsByParent.set(n.parent_id, arr)
+    }
+
+    const groups: ParentClassGroup[] = Array.from(leafIdsByParent.entries())
+      .map(([parentId, leafIds]) => ({
+        id: parentId,
+        name: byId.get(parentId)?.name ?? 'Class',
+        leafIds,
+        sort_order: byId.get(parentId)?.sort_order ?? 0,
+      }))
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map(({ id, name, leafIds }) => ({ id, name, leafIds })) // drop sort_order, not part of the public type
+
+    return { ok: true, data: groups }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load class groups' }
+  }
+}
+
 // ─── Load students ────────────────────────────────────────────────────────────
 
 /**
@@ -232,7 +300,13 @@ export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
  * Always sorted alphabetically by full_name.
  */
 export async function loadStudents(params: {
-  classNodeId: string | null
+  // Session 32 — widened from `string | null` to also accept `string[]`,
+  // for the whole-parent "All of JSS 1" combined view (matches
+  // attendanceService.ts's own loadStudentsForClass widening, same
+  // reasoning: .eq() for a single id keeps every existing call site's
+  // behavior byte-for-byte unchanged, .in() only engages when an array is
+  // actually passed).
+  classNodeId: string | string[] | null
   // Session 22 follow-up (stat-strip drill-down): which single status to
   // return. Defaults to 'active' when omitted, preserving every existing
   // caller's behavior exactly as before this param was renamed from the old
@@ -270,7 +344,11 @@ export async function loadStudents(params: {
 
     query = query.eq('status', params.statusFilter ?? 'active')
 
-    if (params.classNodeId) {
+    if (Array.isArray(params.classNodeId)) {
+      if (params.classNodeId.length > 0) {
+        query = query.in('class_node_id', params.classNodeId)
+      }
+    } else if (params.classNodeId) {
       query = query.eq('class_node_id', params.classNodeId)
     }
 
@@ -329,12 +407,17 @@ export interface StudentStatusCounts {
  * single-column fetch keeps the payload small even for large rosters.
  */
 export async function getStudentStatusCounts(params: {
-  classNodeId: string | null
+  // Session 32 — widened, same reasoning as loadStudents() above.
+  classNodeId: string | string[] | null
 }): Promise<Result<StudentStatusCounts>> {
   try {
     let query = supabase.from('students').select('status')
 
-    if (params.classNodeId) {
+    if (Array.isArray(params.classNodeId)) {
+      if (params.classNodeId.length > 0) {
+        query = query.in('class_node_id', params.classNodeId)
+      }
+    } else if (params.classNodeId) {
       query = query.eq('class_node_id', params.classNodeId)
     }
 
