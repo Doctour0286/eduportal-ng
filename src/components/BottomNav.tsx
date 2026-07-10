@@ -81,7 +81,7 @@ interface BottomNavProps {
   actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null
 }
 
-const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?: boolean; staffHidden?: boolean; guardianLabel?: string; guardianHidden?: boolean }[] = [
+export const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?: boolean; staffHidden?: boolean; guardianLabel?: string; guardianHidden?: boolean }[] = [
   { id: 'home',       label: 'Home',       icon: <Icon name="home" />,          guardianLabel: 'Dashboard' },
   { id: 'timetable',  label: 'Timetable',  icon: <Icon name="calendar" />,      guardianHidden: true },
   { id: 'attendance', label: 'Attendance', icon: <Icon name="circle-check" />,  guardianHidden: true },
@@ -91,18 +91,35 @@ const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?: boole
   { id: 'more',       label: 'More',       icon: <Icon name="menu" />,          guardianHidden: true },
 ]
 
-export function BottomNav({ activeTab, onNavigate, actorType }: BottomNavProps) {
+/**
+ * Shared visibility filter — the one place `NAV_ITEMS`' staffOnly/staffHidden/
+ * guardianHidden/students-permission rules are evaluated. Exported so
+ * `Sidebar.tsx` (PRD Problem 6.8, larger-viewport addition) can render the
+ * exact same primary-nav item set BottomNav does, rather than re-deriving
+ * its own copy of this filtering logic — a second independently-maintained
+ * copy is exactly how `isGuardian`/`canViewStudents`-style rules drift out
+ * of sync with each other over time (already seen once in this file's own
+ * history, per the Session 10 comments above).
+ */
+export function getVisibleNavItems(
+  actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null,
+  canViewStudents: boolean,
+) {
   const isGuardian = actorType === 'guardian' || actorType === 'student'
-  const can = useAuthStore((s) => s.can)
-  const canViewStudents = can('students.records.view') || actorType === 'platform_admin'
-
-  const visibleItems = NAV_ITEMS.filter((item) => {
+  return NAV_ITEMS.filter((item) => {
     if (item.staffOnly && isGuardian) return false
     if (item.staffHidden && !isGuardian) return false
     if (item.guardianHidden && isGuardian) return false
     if (item.id === 'students' && !canViewStudents) return false
     return true
   })
+}
+
+export function BottomNav({ activeTab, onNavigate, actorType }: BottomNavProps) {
+  const isGuardian = actorType === 'guardian' || actorType === 'student'
+  const can = useAuthStore((s) => s.can)
+  const canViewStudents = can('students.records.view') || actorType === 'platform_admin'
+  const visibleItems = getVisibleNavItems(actorType, canViewStudents)
 
   return (
     <nav className="bottom-nav" role="navigation" aria-label="Main navigation">

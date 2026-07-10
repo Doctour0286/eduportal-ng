@@ -167,6 +167,22 @@ export function LivePeriodWidget({ data, classNodes, onStateChange, staffPrefs, 
 
   // Tick every second off Date.now() — no network calls, purely re-derives
   // from data/classNodes already in memory (§4.1).
+  //
+  // Bugfix (this session): staffId was missing from this dependency array.
+  // App.tsx resolves currentStaffId asynchronously (a separate lookup from
+  // `data`/`classNodes` loading), so it's genuinely possible for this
+  // effect to first run while staffId is still null, then never re-run
+  // once the real id arrives — data/classNodes don't necessarily change
+  // again, so nothing else would trigger a re-run. Every tick after that
+  // point calls fireAlarmsIfNeeded → teachesThisPeriod with the *stale*
+  // null staffId baked into this closure, which makes teachesThisPeriod
+  // always return false — meaning alert_scope: 'mine' (the default) could
+  // never match anything and no alarm would ever fire, silently, with
+  // nothing visibly wrong (state/countdown/progress bar all still update
+  // correctly, since those don't depend on staffId at all). staffPrefs was
+  // already a dep, which is why prefs loading late self-healed but staffId
+  // loading late did not — the exact asymmetry that made this bug easy to
+  // miss on inspection alone.
   useEffect(() => {
     const tick = () => {
       const next = getCurrentPeriodState(data, classNodes)
@@ -178,7 +194,7 @@ export function LivePeriodWidget({ data, classNodes, onStateChange, staffPrefs, 
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, classNodes, staffPrefs])
+  }, [data, classNodes, staffPrefs, staffId])
 
   // Session 28 — true if `staffId` has a real (non-free) lesson in the given
   // day/period, per data.entries (the same array getCurrentPeriodState()
@@ -199,6 +215,23 @@ export function LivePeriodWidget({ data, classNodes, onStateChange, staffPrefs, 
   // itself only for readability; still runs on every 1s tick, same as
   // setState/onStateChange above.
   function fireAlarmsIfNeeded(next: LivePeriodState) {
+    // TEMP DIAGNOSTIC — remove once the silent-alarm issue is confirmed fixed.
+    // Logs once per status change only (not every tick) to stay readable.
+    if (next.status !== (fireAlarmsIfNeeded as any)._lastStatus) {
+      ;(fireAlarmsIfNeeded as any)._lastStatus = next.status
+      console.log('[alarm-debug] status change', {
+        status: next.status,
+        currentPeriodId: next.currentPeriod?.id ?? null,
+        staffId,
+        hasStaffPrefs: !!staffPrefs,
+        soundEnabled: staffPrefs?.sound_enabled,
+        alertScope: staffPrefs?.alert_scope,
+        entriesForThisPeriod: next.currentPeriod
+          ? data.entries.filter(e => e.day_of_week === next.dayOfWeek && e.period_id === next.currentPeriod!.id)
+          : [],
+      })
+    }
+
     if (!staffPrefs || !staffPrefs.sound_enabled) return
     const scopedToMine = staffPrefs.alert_scope === 'mine'
 
@@ -215,7 +248,9 @@ export function LivePeriodWidget({ data, classNodes, onStateChange, staffPrefs, 
     // ended," regardless of whose period comes next.
     const previousLivePeriod = firedEndFor.current
     if (previousLivePeriod && previousLivePeriod.id !== nextPeriodId) {
-      if (!scopedToMine || teachesThisPeriod(next.dayOfWeek, previousLivePeriod.id)) {
+      const endScopeOk = !scopedToMine || teachesThisPeriod(next.dayOfWeek, previousLivePeriod.id)
+      console.log('[alarm-debug] END tone check', { previousLivePeriod, nextPeriodId, scopedToMine, endScopeOk })
+      if (endScopeOk) {
         playAlarmToneRepeated(staffPrefs.sound_type, 'end', staffPrefs.sound_vol, staffPrefs.sound_repeat)
         if (staffPrefs.browser_notif) {
           showAlarmNotification(previousLivePeriod.label, 'end')

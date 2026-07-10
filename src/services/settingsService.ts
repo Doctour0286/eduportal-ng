@@ -209,9 +209,19 @@ export const DEFAULT_STAFF_PREFERENCES: StaffPreferences = {
   alert_scope: 'mine',
 }
 
-const STAFF_PREFERENCES_COLUMNS =
-  'clock_format, default_day, default_view, show_seconds, highlight_col, ' +
-  'sound_enabled, sound_type, sound_vol, sound_repeat, early_warning, warn_lead_min, browser_notif, alert_scope'
+// The column list below is inlined directly into .select() rather than
+// pulled from a shared string constant (as a previous version of this file
+// did) — Supabase's typed client can only narrow `data`'s shape when it sees
+// a literal string at the .select() call site itself; routed through a
+// `string`-typed variable, the column list becomes unparseable statically
+// and `data` widens to a generic fallback shape with almost no overlap
+// against StaffPreferences, which is exactly what produced the
+// `TS2352: Conversion ... may be a mistake` build error. Every other
+// .select() call in this file already inlines its literal column list for
+// this same reason — this was the one call that didn't, and a bare
+// (unused) constant left behind would itself fail `noUnusedLocals` under
+// `tsc -b`'s strict settings, reintroducing a build error of the exact
+// invisible-to-`npm run dev` class the PRD's own §0.2 warns about.
 
 /**
  * Loads this staff member's preferences, falling back to
@@ -226,7 +236,7 @@ const STAFF_PREFERENCES_COLUMNS =
 export async function loadStaffPreferences(staffId: string): Promise<{ data: StaffPreferences; error: string | null }> {
   const { data, error } = await supabase
     .from('staff_preferences')
-    .select(STAFF_PREFERENCES_COLUMNS)
+    .select('clock_format, default_day, default_view, show_seconds, highlight_col, sound_enabled, sound_type, sound_vol, sound_repeat, early_warning, warn_lead_min, browser_notif, alert_scope')
     .eq('staff_id', staffId)
     .maybeSingle()
 

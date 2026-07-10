@@ -177,6 +177,17 @@
   --shadow-md:  0 4px 6px -1px rgb(0 0 0 / 0.1);
   --shadow-lg:  0 10px 15px -3px rgb(0 0 0 / 0.1);
 
+  /* Layout breakpoint — first min-width breakpoint in this file (PRD
+     Problem 6.8). CSS custom properties cannot be used inside @media
+     condition expressions, so this cannot be a real token consumed by
+     @media itself; documented here as the single source of truth for the
+     literal value (1024px), used consistently at every @media (min-width: ...)
+     site added for the sidebar/app-shell-main split below. Chosen as a
+     common tablet-landscape/small-desktop threshold — below it, phone-first
+     behavior (BottomNav only) is completely unchanged; at or above it, the
+     Sidebar addition appears and BottomNav hides, with no gap or overlap
+     between the two since both switch at the exact same value. */
+
   /* Touch targets — minimum 44px per §4.2 */
   --touch-min:  2.75rem;
 
@@ -460,6 +471,24 @@ body {
   flex-direction: column;
   height: 100dvh;  /* dynamic viewport height — handles mobile browser chrome */
   background: var(--color-neutral-50, #f9fafb);
+}
+
+/* Larger viewports: row layout, Sidebar beside the header/content/bottom-nav
+   column. Below this breakpoint, .app-shell stays exactly as it always was
+   (column, full-height) — this rule only adds behavior above 1024px, it
+   never removes or overrides the mobile case. */
+@media (min-width: 1024px) {
+  .app-shell {
+    flex-direction: row;
+  }
+}
+
+.app-shell-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0; /* allow content to shrink/scroll correctly inside the flex row */
+  height: 100%;
 }
 
 .app-header {
@@ -1872,6 +1901,185 @@ body {
 
 .bottom-nav-icon { font-size: 1.375rem; line-height: 1; }
 .bottom-nav-label { line-height: 1; }
+
+/* Larger viewports: Sidebar (below) takes over as primary navigation and
+   BottomNav hides — same 1024px breakpoint as .app-shell's row switch
+   above, so the two never disagree about which surface is "on" and there
+   is never a gap (both nav) or a hole (neither nav) at any width. */
+@media (min-width: 1024px) {
+  .bottom-nav {
+    display: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SIDEBAR (PRD Problem 6.8, Tier 6) — larger-viewport-only addition.
+   Hidden entirely below the 1024px breakpoint (BottomNav remains the
+   sole navigation on phone-sized viewports, per §4.2 mobile-first);
+   shown as a persistent, collapsible column at/above it, for every
+   actor type this app has (staff, teacher, guardian/student, admin) —
+   not just admin, per the owner's explicit correction to the PRD's own
+   Goal 1 "confirm with the owner" open question.
+═══════════════════════════════════════════════════════════════════ */
+
+.app-sidebar {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 15.5rem;
+    height: 100%;
+    background: var(--color-surface);
+    border-right: 1px solid var(--color-neutral-200, #e5e7eb);
+    transition: width 0.15s ease;
+    overflow: hidden;
+  }
+
+  .app-sidebar--collapsed {
+    width: 4.5rem;
+  }
+}
+
+.app-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  min-height: 56px;
+  border-bottom: 1px solid var(--color-neutral-200, #e5e7eb);
+  flex-shrink: 0;
+}
+
+.app-sidebar--collapsed .app-sidebar-header {
+  justify-content: center;
+}
+
+.app-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.app-sidebar-logo {
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.app-sidebar-school-name {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-neutral-900, #111827);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-sidebar-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--color-neutral-500, #6b7280);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-sidebar-collapse-btn:hover {
+  background: var(--color-neutral-100, #f3f4f6);
+  color: var(--color-neutral-700, #374151);
+}
+
+.app-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.75rem 0.625rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.app-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 44px;
+  padding: 0.625rem 0.75rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--color-neutral-600, #4b5563);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-sidebar--collapsed .app-sidebar-item {
+  justify-content: center;
+  padding: 0.625rem;
+}
+
+.app-sidebar-item:hover {
+  background: var(--color-neutral-100, #f3f4f6);
+  color: var(--color-neutral-900, #111827);
+}
+
+.app-sidebar-item--active {
+  background: var(--color-brand-50);
+  color: var(--color-brand-600);
+  font-weight: 600;
+}
+
+.app-sidebar-item--active:hover {
+  background: var(--color-brand-50);
+}
+
+.app-sidebar-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.125rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.app-sidebar-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-sidebar-more {
+  border-top: 1px solid var(--color-neutral-200, #e5e7eb);
+  padding: 0.75rem 0.625rem;
+  overflow-y: auto;
+  flex-shrink: 0;
+  max-height: 45%;
+}
+
+.app-sidebar-more-collapsed-btn {
+  width: 100%;
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    MORE MENU
@@ -12752,7 +12960,12 @@ body {
   height: 8px;
   border-radius: 999px;
   background: var(--color-neutral-200);
-  overflow: hidden;
+  /* overflow: visible (changed from hidden, Session 29 resumed pass) — the
+     today-pin needs to protrude slightly above/below the track to read as a
+     pin rather than just another notch. The fill itself still self-clips via
+     its own border-radius, so this doesn't let the fill bar visually escape
+     the track's rounded ends. */
+  overflow: visible;
 }
 .port-term-progress-fill {
   height: 100%;
@@ -12760,12 +12973,157 @@ body {
   background: var(--color-brand-600);
   transition: width 0.3s ease;
 }
+
+/* Holiday notches (Session 29 resumed pass) — thin vertical marks on the
+   track, one per school-day holiday in range. Positioned via inline `left`
+   from loadTermProgress()'s precomputed positionPercent. A distinct modifier
+   color for extends_term entries, not just position, per §4.10 (never
+   colour-alone — the accompanying `title` tooltip on the element itself
+   carries the specific date/reason for anyone who can't perceive the color
+   difference). */
+.port-term-progress-notch {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--color-neutral-500, var(--color-text-muted));
+  transform: translateX(-1px);
+  border-radius: 1px;
+  z-index: 1;
+}
+.port-term-progress-notch--extending {
+  background: var(--color-gold-600, var(--color-brand-600));
+}
+
+/* Today-marker pin — a small circle straddling the track, positioned by the
+   same percentElapsed value the fill's own width uses, so it can never
+   visually disagree with where the fill actually ends. */
+.port-term-progress-pin {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-bg);
+  border: 2px solid var(--color-brand-600);
+  transform: translate(-50%, -50%);
+  box-shadow: var(--shadow-sm);
+  z-index: 2;
+}
+
 .port-term-progress-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: var(--text-sm);
   color: var(--color-text-muted);
+}
+
+/* Unit toggle (School days / All days / Weeks) — corrected 2026-07-10 after
+   the owner reported the card's calendar-day footer disagreeing with the
+   attendance card's own school-day count on the same term. Same small-pill
+   visual language as .stu-class-pill elsewhere in the app, but built on this
+   card's own --color-brand-600 token family (not --color-primary) to stay
+   consistent with every other rule in this .port-term-progress-* block. */
+.port-term-progress-unit-toggle {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.port-term-progress-unit-pill {
+  flex: 1;
+  min-height: 28px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-full);
+  background: var(--color-bg);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.port-term-progress-unit-pill:hover {
+  border-color: var(--color-brand-600);
+  color: var(--color-text);
+}
+
+.port-term-progress-unit-pill:focus-visible {
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: 2px;
+}
+
+.port-term-progress-unit-pill--active {
+  background: var(--color-brand-50);
+  border-color: var(--color-brand-600);
+  color: var(--color-brand-600);
+}
+
+/* Break-impact summary (Session 29 resumed pass) — collapsed <details>/
+   <summary>, matching the reference app's own .trim-break-row expandable-list
+   pattern. No JS state needed; native disclosure semantics are free
+   keyboard/focus support per §4.10. */
+.port-term-progress-breaks {
+  border-top: 1px solid var(--color-neutral-200);
+  padding-top: var(--space-2);
+  margin-top: var(--space-1);
+}
+.port-term-progress-breaks-summary {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-brand-600);
+  cursor: pointer;
+  list-style: none;
+}
+.port-term-progress-breaks-summary::-webkit-details-marker {
+  display: none;
+}
+.port-term-progress-breaks-summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: var(--space-1);
+  transition: transform 0.15s ease;
+}
+.port-term-progress-breaks[open] .port-term-progress-breaks-summary::before {
+  transform: rotate(90deg);
+}
+.port-term-progress-breaks-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.port-term-progress-breaks-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+.port-term-progress-breaks-date {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.port-term-progress-breaks-label {
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.port-term-progress-breaks-tag {
+  font-size: var(--text-xs, var(--text-sm));
+  font-weight: 600;
+  color: var(--color-gold-600, var(--color-brand-600));
+  background: var(--color-gold-subtle, var(--color-neutral-50));
+  border-radius: var(--radius-sm, 4px);
+  padding: 1px var(--space-2);
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* ── Results tab ──────────────────────────────────────────────────────── */

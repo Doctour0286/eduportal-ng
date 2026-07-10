@@ -55,6 +55,8 @@ import {
   type Payslip,
 } from '../services/hrService';
 import { loadAnnouncements, type Announcement as ServiceAnnouncement } from '../services/announcementsService';
+import { loadTermProgress, type TermProgress } from '../services/portalService';
+import { TermProgressCard } from '../components/TermProgressCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -326,6 +328,14 @@ export default function TeacherDashboard({
   const [annsLoading, setAnnsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Term/session progress card (Session 29, PRD Problem 6.7 — dashboard
+  // placement piece of the visual spec, previously portal-only). Same
+  // loadTermProgress() call AdminDashboard.tsx and the guardian portal use —
+  // one shared computation, so a teacher, an admin, and a parent can never
+  // see three different "days remaining" figures for the same term. Allowed
+  // to fail silently to null, same convention as every other card here.
+  const [termProgress, setTermProgress] = useState<TermProgress | null>(null);
+
   // A tick counter, re-rendered once a minute, purely to keep the countdown
   // label fresh while "My Schedule Today" is expanded — no network calls
   // fire from this, matching §4.1 / the LivePeriodWidget.tsx spec's own
@@ -366,6 +376,7 @@ export default function TeacherDashboard({
     loadDashboardData();
     loadAnns();
     loadPayslipVisibility();
+    loadTermProgress(school.id).then(setTermProgress).catch(() => setTermProgress(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [school?.id, staffId]);
 
@@ -631,6 +642,9 @@ export default function TeacherDashboard({
         </div>
         <div className="dash-school-name">{school?.name}</div>
       </div>
+
+      {/* ── Term/session progress (Session 29, PRD Problem 6.7) ────────────── */}
+      <TermProgressCard progress={termProgress} />
 
       {/* ── Action Items (only rendered if there are pending items) ─────────── */}
       {!dataLoading && actionItems.length > 0 && (

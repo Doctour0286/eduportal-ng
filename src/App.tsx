@@ -22,6 +22,7 @@ import { loadThemePreference, saveThemePreference } from './services/settingsSer
 import { LoginPage } from './routes/LoginPage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
+import { Sidebar } from './components/Sidebar'
 import { Icon } from './components/icons'
 
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
@@ -160,7 +161,7 @@ export default function App() {
     sheetTouchDeltaY.current = 0
   }
 
-  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize } = useAuthStore()
+  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize, can } = useAuthStore()
 
   // Initialize auth once on mount
   useEffect(() => {
@@ -522,8 +523,32 @@ export default function App() {
     setAccountPopoverOpen(false) // always close account popover on navigation
   }
 
+  const canViewStudentsForSidebar = can('students.records.view') || actorType === 'platform_admin'
+
   return (
     <div className="app-shell">
+      {/* Sidebar — larger-viewport addition only (PRD Problem 6.8). Renders
+          nothing on phone-sized viewports via CSS; BottomNav below remains
+          unchanged and is the only nav at that size. */}
+      <Sidebar
+        activeTab={activeTab}
+        onNavigate={(tab) => onNavigate(tab as NavTab)}
+        actorType={actorType}
+        canViewStudents={canViewStudentsForSidebar}
+        schoolName={school.name}
+        logoUrl={school.logo_url}
+        moreContent={
+          actorType === 'guardian' || actorType === 'student' ? null : (
+            <MoreSheetContent
+              isAdmin={isAdminRole || actorType === 'platform_admin'}
+              onNavigate={(tab: NavTab, intent?: NavIntent) => onNavigate(tab, intent)}
+              onOpenSetup={() => setForceShowOnboarding(true)}
+            />
+          )
+        }
+      />
+
+      <div className="app-shell-main">
       {/* Top header */}
       <header className="app-header">
         <div className="app-header-left">
@@ -697,6 +722,7 @@ export default function App() {
           </div>
         </>
       )}
+      </div>
     </div>
   )
 }

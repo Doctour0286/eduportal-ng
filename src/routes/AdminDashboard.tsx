@@ -9,6 +9,8 @@ import { supabase } from '../lib/supabase';
 import { useSchoolStore } from '../stores/schoolStore';
 import { useAuthStore } from '../stores/authStore';
 import { Icon } from '../components/icons';
+import { loadTermProgress, type TermProgress } from '../services/portalService';
+import { TermProgressCard } from '../components/TermProgressCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -175,6 +177,14 @@ export default function AdminDashboard({
   const [annsLoading, setAnnsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Term/session progress card (Session 29, PRD Problem 6.7 — dashboard
+  // placement piece of the visual spec, previously portal-only). Loaded
+  // independently of loadStats()/loadAnnouncements() and allowed to fail
+  // silently to null — a missing term-progress card must never block or
+  // error out the rest of this dashboard, matching every other card's own
+  // degrade-independently convention on this screen.
+  const [termProgress, setTermProgress] = useState<TermProgress | null>(null);
+
   // Derive greeting name from session user metadata
   const staffName = (session?.user?.user_metadata?.full_name as string | undefined) ?? 'Admin';
   const firstName = staffName.split(' ')[0];
@@ -190,6 +200,7 @@ export default function AdminDashboard({
     if (!school) return;
     loadStats();
     loadAnnouncements();
+    loadTermProgress(school.id).then(setTermProgress).catch(() => setTermProgress(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [school?.id]);
 
@@ -363,6 +374,12 @@ export default function AdminDashboard({
         </div>
         <div className="dash-school-name">{school?.name}</div>
       </div>
+
+      {/* ── Term/session progress (Session 29, PRD Problem 6.7) ──────────────
+          Renders nothing when termProgress is null (no current session, terms
+          on but today falls between terms, or the fetch hasn't resolved) —
+          TermProgressCard's own null-guard handles this, no wrapper needed. */}
+      <TermProgressCard progress={termProgress} />
 
       {/* ── Action Items (only rendered if there are pending items) ─────────── */}
       {!statsLoading && actionItems.length > 0 && (

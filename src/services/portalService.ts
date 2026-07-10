@@ -285,16 +285,74 @@ export async function loadSchoolUsesTerms(schoolId: string): Promise<boolean> {
 // function's own reasoning (insert/delete of an extending holiday stays
 // symmetric for free).
 
+// A single school-day holiday within the progress scope's date range, with
+// its position on the bar precomputed as a percentage so TermProgressCard.tsx
+// never has to re-derive date math to place a notch — same "component does
+// rendering, service does computation" split the rest of this file follows.
+// Only holidays that fall within [scopeStartDate, effectiveEndDate] are
+// included here; a holiday entered for a different term/session is filtered
+// out in this function, not left for the component to reason about.
+export interface TermProgressHoliday {
+  date: string            // school_calendar_days.calendar_date
+  label: string | null    // school_calendar_days.label, may be unset
+  dayType: string         // school_calendar_days.day_type
+  extendsTerm: boolean    // raw school_calendar_days.extends_term flag, as entered by an admin
+  qualifiesForExtension: boolean // true only when this entry actually counted toward
+                                  // getEffectiveTermEndDate()'s result: extends_term=true AND
+                                  // day_type!=='school_day' (an entry can have extends_term=true
+                                  // but be ignored if day_type is 'school_day', since a school-day
+                                  // override can't also be a holiday). Distinct from extendsTerm
+                                  // because the card must never visually claim "extended the term"
+                                  // for an entry the computation itself didn't count — see fix
+                                  // note below where this field is computed.
+  positionPercent: number // 0-100, this date's position along [scopeStartDate, effectiveEndDate]
+}
+
 export interface TermProgress {
   scopeLabel: string          // term name (e.g. "First Term") or session name, whichever applies
   scopeStartDate: string      // the term's/session's own start_date, unaffected by extension
   baseEndDate: string         // the term's/session's original end_date, before any extension
   effectiveEndDate: string    // getEffectiveTermEndDate()'s result — may equal baseEndDate
   isExtended: boolean         // true when effectiveEndDate !== baseEndDate
-  elapsedDays: number         // days from scopeStartDate to today, inclusive, clamped to [0, totalDays]
-  totalDays: number           // scopeStartDate to effectiveEndDate, inclusive
-  remainingDays: number       // totalDays - elapsedDays, floor at 0
-  percentElapsed: number      // 0-100, rounded, for the progress bar fill
+  totalCalendarDays: number   // scopeStartDate to effectiveEndDate, inclusive — every date, weekends
+                               // and holidays included. Kept because percentElapsed/positionPercent
+                               // (the progress bar fill and notch placement) are correctly
+                               // calendar-based — a bar spanning real time should fill/position by
+                               // real time, not by school-day count, or a holiday-heavy stretch
+                               // would visually compress unnaturally. NOT the figure to show as a
+                               // plain "days" count to the user — see totalSchoolDays below, which
+                               // is (Bug found 2026-07-10: previously the ONLY count computed, and
+                               // the one the card's "Day X of Y"/"N days left" footer displayed —
+                               // disagreed with the attendance card's own school-day count on the
+                               // same term because the two cards were answering different questions
+                               // without saying so. Per Problem 6.7's own PRD spec: "elapsed/total/
+                               // remaining school-week counts (school days per week from
+                               // school_week_days, not a hardcoded 2)" — the counters were always
+                               // supposed to be school-day-based, not calendar-day-based.)
+  elapsedCalendarDays: number  // calendar days from scopeStartDate to today, inclusive, clamped
+  remainingCalendarDays: number // totalCalendarDays - elapsedCalendarDays, floor at 0
+  percentElapsed: number      // 0-100, rounded, calendar-time-based — for the progress bar fill and
+                               // the today-pin position (Session 29 visual spec). Deliberately
+                               // calendar-based, not school-day-based, so the bar fills at a
+                               // constant real-time rate rather than jumping unevenly around
+                               // holiday clusters — matches how positionPercent (below) places notches.
+  totalSchoolDays: number      // real school-day count in [scopeStartDate, effectiveEndDate], via
+                                // getSchoolDayMap() (school_calendar_days overrides, falling back to
+                                // school_week_days) — the SAME function loadAttendanceSummary() uses
+                                // for the attendance card's own "N school days" figure, so the two
+                                // cards can never disagree on this number for the same term again.
+                                // THIS is the figure the card's counters/footer should display.
+  elapsedSchoolDays: number    // school days from scopeStartDate through today (or effectiveEndDate
+                                // if today is past it), inclusive — counted from the same map as
+                                // totalSchoolDays, not derived by scaling elapsedCalendarDays, so it
+                                // can never drift out of proportion on an uneven holiday distribution.
+  remainingSchoolDays: number  // totalSchoolDays - elapsedSchoolDays, floor at 0
+  schoolDaysPerWeek: number    // size of school_week_days for this school — real data, not a
+                                // hardcoded 5 or 7, per Problem 6.7's own PRD wording ("school days
+                                // per week from school_week_days, not a hardcoded 2"). Used by the
+                                // card to derive a weeks display option (totalSchoolDays /
+                                // schoolDaysPerWeek) without a second, parallel week-counting query.
+  holidays: TermProgressHoliday[] // school-day holidays within range, for bar notches + break-impact summary (Session 29 visual spec)
 }
 
 /**
@@ -329,11 +387,121 @@ export async function loadTermProgress(schoolId: string): Promise<TermProgress |
   const effectiveEndDate = effectiveRes.data
 
   const today = todayDateString()
-  const totalDays = daysBetweenInclusive(scopeStartDate, effectiveEndDate)
-  const elapsedDaysRaw = daysBetweenInclusive(scopeStartDate, today < effectiveEndDate ? today : effectiveEndDate)
-  const elapsedDays = Math.max(0, Math.min(totalDays, elapsedDaysRaw))
-  const remainingDays = Math.max(0, totalDays - elapsedDays)
-  const percentElapsed = totalDays > 0 ? Math.round((elapsedDays / totalDays) * 100) : 0
+
+  // Calendar-day figures — used only for the progress bar's fill percentage
+  // and holiday notch positioning (both correctly time-proportional, not
+  // school-day-proportional). NOT shown to the user as a plain day count —
+  // see totalSchoolDays below.
+  const totalCalendarDays = daysBetweenInclusive(scopeStartDate, effectiveEndDate)
+  const elapsedCalendarDaysRaw = daysBetweenInclusive(scopeStartDate, today < effectiveEndDate ? today : effectiveEndDate)
+  const elapsedCalendarDays = Math.max(0, Math.min(totalCalendarDays, elapsedCalendarDaysRaw))
+  const remainingCalendarDays = Math.max(0, totalCalendarDays - elapsedCalendarDays)
+  const percentElapsed = totalCalendarDays > 0 ? Math.round((elapsedCalendarDays / totalCalendarDays) * 100) : 0
+
+  // School-day figures (bug found and fixed 2026-07-10, reported by the owner
+  // via screenshot — the admin dashboard's TermProgressCard showed "Day 100
+  // of 179" while the attendance card on the same term showed "72 school
+  // days," with no unit distinguishing the two, making them look like a
+  // disagreement over the same number rather than two genuinely different
+  // ones). Per Problem 6.7's own PRD spec, the card's counters were always
+  // supposed to be "elapsed/total/remaining school-week counts (school days
+  // per week from school_week_days, not a hardcoded 2)" — calendar days were
+  // never the correct figure to display. Uses the exact same
+  // getSchoolDayMap() the attendance summary card's totalSchoolDays already
+  // calls (imported, not duplicated), so the two cards can never again show
+  // two different school-day counts for the same term.
+  const schoolDayMapRes = await getSchoolDayMap(scopeStartDate, effectiveEndDate, schoolId)
+  const schoolDayMap = schoolDayMapRes.ok ? schoolDayMapRes.data : new Map<string, boolean>()
+
+  let totalSchoolDays = 0
+  let elapsedSchoolDays = 0
+  const elapsedCutoff = today < effectiveEndDate ? today : effectiveEndDate
+  for (const [dateStr, isDay] of schoolDayMap.entries()) {
+    if (!isDay) continue
+    totalSchoolDays++
+    if (dateStr <= elapsedCutoff) elapsedSchoolDays++
+  }
+  const remainingSchoolDays = Math.max(0, totalSchoolDays - elapsedSchoolDays)
+
+  // Holiday notches + break-impact summary (Session 29 visual spec). Queried
+  // directly against school_calendar_days here rather than adding a new
+  // attendanceService.ts export, since this is a read scoped by date range +
+  // school, the same shape countSchoolDaysInRange() already queries against —
+  // no new RLS surface, [STD]-equivalent school-scoped select already covers
+  // this table (Session 18). Range is [scopeStartDate, effectiveEndDate], not
+  // [scopeStartDate, baseEndDate] — a holiday that itself caused the
+  // extension can sit right at or past the original base end date and must
+  // still show its own notch.
+  const { data: calendarRows } = await supabase
+    .from('school_calendar_days')
+    .select('calendar_date, label, day_type, extends_term')
+    .eq('school_id', schoolId)
+    .gte('calendar_date', scopeStartDate)
+    .lte('calendar_date', effectiveEndDate)
+    .order('calendar_date', { ascending: true })
+
+  // School-day eligibility filter (corrected 2026-07-10, now that
+  // attendanceService.ts is available to verify against). The previous
+  // version of this filter checked only school_week_days and was directionally
+  // right but not the exact eligibility test the source of truth uses.
+  // getEffectiveTermEndDate() only counts a school_calendar_days row toward
+  // extension if ALL of: (1) extends_term = true, (2) day_type !== 'school_day'
+  // — a school_day override can't itself be a holiday, matching
+  // getEffectiveTermEndDate()'s own .neq('day_type','school_day') filter —
+  // and (3) the date would otherwise have been a real school day per
+  // school_week_days. Point 3 is checked directly here, NOT via
+  // getSchoolDayMap(), because that map reports "not a school day" for the
+  // override date itself (per its own inline comment in attendanceService.ts);
+  // what's needed is "would this date have been a school day if it weren't
+
+  // marked as a holiday" — the same distinction getEffectiveTermEndDate()
+  // draws. Rows failing (1) or (2) still appear in the holidays list (a
+  // stray non-extending public holiday is still worth showing, just rendered
+  // non-extending via extendsTerm) — only the weekday-eligibility check (3)
+  // filters the list itself, since a date that was never a school day at all
+  // (e.g. a label stamped on a day the school never runs) shouldn't produce
+  // a notch either way.
+  const { data: weekDayRows } = await supabase
+    .from('school_week_days')
+    .select('day_of_week')
+    .eq('school_id', schoolId)
+
+  const schoolWeekDaySet = new Set((weekDayRows ?? []).map((r) => r.day_of_week))
+
+  function wouldHaveBeenSchoolDay(dateStr: string): boolean {
+    // JS getDay(): 0=Sunday..6=Saturday, matching school_week_days'
+    // day_of_week convention — the same check getEffectiveTermEndDate() runs
+    // per-candidate. Reproduced here rather than imported since it's a 2-line
+    // pure check not exported on its own, and getSchoolDayMap() would give
+    // the wrong answer for the override date itself (see comment above).
+    const dow = new Date(dateStr + 'T00:00:00').getDay()
+    return schoolWeekDaySet.has(dow)
+  }
+
+  const holidays: TermProgressHoliday[] = (calendarRows ?? [])
+    .filter((row) => wouldHaveBeenSchoolDay(row.calendar_date))
+    .map((row) => {
+    const posDaysRaw = daysBetweenInclusive(scopeStartDate, row.calendar_date)
+    // daysBetweenInclusive counts the start date as day 1 — subtract 1 so a
+    // holiday on scopeStartDate itself lands at 0%, matching percentElapsed's
+    // own zero-based convention, then clamp into the visible track.
+    const positionPercent = totalCalendarDays > 0
+      ? Math.max(0, Math.min(100, Math.round(((posDaysRaw - 1) / (totalCalendarDays - 1 || 1)) * 100)))
+      : 0
+    return {
+      date: row.calendar_date,
+      label: row.label,
+      dayType: row.day_type,
+      extendsTerm: row.extends_term,
+      // Matches getEffectiveTermEndDate()'s own eligibility test exactly
+      // (attendanceService.ts: .eq('extends_term', true).neq('day_type',
+      // 'school_day')) — computed here rather than trusted from extendsTerm
+      // alone, so the card can never show "extended term" for a row the
+      // actual computation excluded.
+      qualifiesForExtension: row.extends_term && row.day_type !== 'school_day',
+      positionPercent,
+    }
+  })
 
   return {
     scopeLabel,
@@ -341,10 +509,15 @@ export async function loadTermProgress(schoolId: string): Promise<TermProgress |
     baseEndDate,
     effectiveEndDate,
     isExtended: effectiveEndDate !== baseEndDate,
-    elapsedDays,
-    totalDays,
-    remainingDays,
+    totalCalendarDays,
+    elapsedCalendarDays,
+    remainingCalendarDays,
     percentElapsed,
+    totalSchoolDays,
+    elapsedSchoolDays,
+    remainingSchoolDays,
+    schoolDaysPerWeek: schoolWeekDaySet.size,
+    holidays,
   }
 }
 
