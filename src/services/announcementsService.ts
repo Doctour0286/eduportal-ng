@@ -368,28 +368,72 @@ export async function markAllNotificationsRead(schoolId: string): Promise<Result
 export interface ClassNodeOption {
   id: string
   name: string
-  level: number
+  parent_id: string | null
+  sort_order: number
+  /** Computed client-side via parent-walk (see loadClassNodes below) — not
+   *  a real column. class_nodes has no numeric depth column; hierarchy is
+   *  encoded purely via parent_id chains (confirmed against the live
+   *  schema: id, school_id, parent_id, name, node_type, sort_order,
+   *  is_leaf_enrollable, created_at, updated_at — no "level" column
+   *  exists at all). depth is 0 for a root node (parent_id === null),
+   *  parent's depth + 1 otherwise. Used only for `<select>` indentation. */
+  depth: number
 }
 
+/**
+ * Loads every class_node for the school and returns it as a flat,
+ * hierarchically-ordered list (parents immediately followed by their own
+ * children, recursively), with a client-computed `depth` for indentation.
+ *
+ * class_nodes has no denormalized level/depth column — hierarchy is
+ * parent_id-chain based only (real schema confirmed via
+ * information_schema.columns, see 2026-07-10 bugfix). A prior version of
+ * this function selected/ordered by a "level" column that never existed,
+ * which failed every call with a hard Postgres error (42703) — not an
+ * RLS or empty-data issue, an actually-invalid query. Fixed here by
+ * fetching the real columns (parent_id, sort_order) and walking the tree
+ * client-side, the same map-to-parent-walk approach the master plan
+ * documents for timetableService.ts's buildClassTree() — this is that
+ * established pattern, not a new one invented for this file.
+ */
 export async function loadClassNodes(schoolId: string): Promise<Result<ClassNodeOption[]>> {
   try {
     const { data, error } = await supabase
       .from('class_nodes')
-      .select('id, name, level')
+      .select('id, name, parent_id, sort_order')
       .eq('school_id', schoolId)
-      .order('level')
-      .order('name')
 
     if (error) return { ok: false, error: friendlyError(error, 'Failed to load classes') }
 
-    return {
-      ok: true,
-      data: (data ?? []).map(r => ({
-        id:    r.id as string,
-        name:  r.name as string,
-        level: r.level as number,
-      })),
+    const rows = (data ?? []) as { id: string; name: string; parent_id: string | null; sort_order: number }[]
+
+    // Group children by parent_id (null key = root nodes), each group
+    // sorted by sort_order — sort_order is only meaningful among siblings,
+    // never as a flat cross-tree ordering, hence the grouped walk rather
+    // than a single top-level .order('sort_order').
+    const byParent = new Map<string | null, typeof rows>()
+    for (const r of rows) {
+      const key = r.parent_id
+      const group = byParent.get(key)
+      if (group) group.push(r)
+      else byParent.set(key, [r])
     }
+    for (const group of byParent.values()) {
+      group.sort((a, b) => a.sort_order - b.sort_order)
+    }
+
+    const result: ClassNodeOption[] = []
+    function walk(parentId: string | null, depth: number) {
+      const children = byParent.get(parentId)
+      if (!children) return
+      for (const c of children) {
+        result.push({ id: c.id, name: c.name, parent_id: c.parent_id, sort_order: c.sort_order, depth })
+        walk(c.id, depth + 1)
+      }
+    }
+    walk(null, 0)
+
+    return { ok: true, data: result }
   } catch (e) {
     return { ok: false, error: `Failed to load classes: ${(e as Error).message}` }
   }

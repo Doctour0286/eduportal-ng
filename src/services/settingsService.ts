@@ -43,8 +43,36 @@ export interface SchoolSettings {
   status: string
 }
 
+// ─── Welcome post (owner request, 2026-07-11 — replaces plain-text
+// welcome_message with a real heading + ordered block post) ────────────────
+//
+// Stored in school_public_config.welcome_post (jsonb, additive migration —
+// see add_welcome_post_column.sql). welcome_message itself is untouched:
+// PublicHomepage.tsx falls back to it when welcome_post is null, so a
+// school that saved a plain message before this feature existed doesn't
+// go blank. This editor no longer writes welcome_message going forward.
+
+export interface WelcomePostParagraphBlock {
+  type: 'paragraph'
+  text: string
+}
+
+export interface WelcomePostImageBlock {
+  type: 'image'
+  url: string
+  caption?: string
+}
+
+export type WelcomePostBlock = WelcomePostParagraphBlock | WelcomePostImageBlock
+
+export interface WelcomePost {
+  heading: string
+  blocks: WelcomePostBlock[]
+}
+
 export interface SchoolPublicConfig {
   welcome_message: string | null
+  welcome_post: WelcomePost | null
   contact_info: {
     phone?: string
     email?: string
@@ -366,7 +394,7 @@ export async function updateSchoolSettings(
 export async function loadPublicConfig(schoolId: string): Promise<{ data: SchoolPublicConfig | null; error: string | null }> {
   const { data, error } = await supabase
     .from('school_public_config')
-    .select('welcome_message, contact_info, show_announcements')
+    .select('welcome_message, welcome_post, contact_info, show_announcements')
     .eq('school_id', schoolId)
     .maybeSingle()
 
@@ -374,7 +402,7 @@ export async function loadPublicConfig(schoolId: string): Promise<{ data: School
   return {
     data: data
       ? (data as SchoolPublicConfig)
-      : { welcome_message: null, contact_info: null, show_announcements: true },
+      : { welcome_message: null, welcome_post: null, contact_info: null, show_announcements: true },
     error: null,
   }
 }
@@ -388,6 +416,175 @@ export async function savePublicConfig(
     .upsert({ school_id: schoolId, ...cfg, updated_at: new Date().toISOString() }, { onConflict: 'school_id' })
 
   return { error: error?.message ?? null }
+}
+
+// ─── Welcome post images ────────────────────────────────────────────────────
+// Uploads to the public `school-homepage-images` Storage bucket (see
+// school_homepage_images_bucket_setup.sql). Deliberately PUBLIC, unlike
+// studentsService.ts's private + signed-URL student-photo pattern — this
+// page is anonymous/no-auth/high-traffic, the content has no
+// confidentiality requirement, and a signed URL would both cost an extra
+// request per image on the highest-traffic page in the app and eventually
+// expire with no session available to refresh it. See the bucket-setup
+// migration's own header comment for the full reasoning. Because the
+// bucket is public, the resolved public URL is stored directly in
+// welcome_post — no separate "resolve signed URL at render time" step is
+// needed, unlike student photos.
+//
+// Client-side resize before upload, same approach studentsService.ts's
+// resizeImageToBlob() documents (createImageBitmap/canvas — no new
+// dependency; browser-image-compression confirmed absent from
+// package.json there, same holds here) — capped smaller than a student ID
+// photo, since this is a page hero/inline image, not a printed card asset.
+
+const HOMEPAGE_IMAGE_MAX_DIMENSION = 1600
+const HOMEPAGE_IMAGE_JPEG_QUALITY = 0.82
+
+async function resizeHomepageImageToBlob(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, HOMEPAGE_IMAGE_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height))
+  const width = Math.round(bitmap.width * scale)
+  const height = Math.round(bitmap.height * scale)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not prepare image for upload')
+  ctx.drawImage(bitmap, 0, 0, width, height)
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      blob => (blob ? resolve(blob) : reject(new Error('Could not prepare image for upload'))),
+      'image/jpeg',
+      HOMEPAGE_IMAGE_JPEG_QUALITY
+    )
+  })
+}
+
+/**
+ * Uploads one welcome-post image and returns its public URL. Deliberately
+ * a single-purpose helper (not a generic file-upload utility) — flagged
+ * per this project's own §5 exception precedent (studentsService.ts's
+ * resizeImageToBlob() header note): createImageBitmap/canvas are
+ * browser-only APIs, breaking this file's general "no browser-only APIs"
+ * convention, kept here anyway because owning "always resize, no
+ * exceptions" in one place is a real safety property worth the
+ * inconsistency, same reasoning as that precedent.
+ */
+export async function uploadWelcomePostImage(
+  schoolId: string,
+  file: File
+): Promise<{ url: string | null; error: string | null }> {
+  try {
+    const blob = await resizeHomepageImageToBlob(file)
+    const ext = 'jpg'
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
+    const path = `${schoolId}/${filename}`
+
+    const { error: uploadErr } = await supabase.storage
+      .from('school-homepage-images')
+      .upload(path, blob, { contentType: 'image/jpeg', upsert: false })
+
+    if (uploadErr) return { url: null, error: uploadErr.message }
+
+    const { data } = supabase.storage.from('school-homepage-images').getPublicUrl(path)
+    return { url: data.publicUrl, error: null }
+  } catch (e) {
+    return { url: null, error: (e as Error).message }
+  }
+}
+
+// ─── Homepage posts (owner request, 2026-07-11 follow-up — upgrades the
+// single welcome_post above to a real list of several expandable posts) ────
+//
+// Stored in a new school_homepage_posts table (see
+// add_school_homepage_posts_table.sql), NOT inside school_public_config —
+// this is a genuine one-to-many relationship (per-post always_expanded
+// toggle, per-post ordering, future per-post publish/unpublish), which a
+// singleton-per-school config row can't represent cleanly. welcome_post
+// above is left completely untouched and is not migrated into this list —
+// same "start fresh, old data stays dormant" approach already used for
+// welcome_message → welcome_post.
+//
+// blocks reuses the exact same WelcomePostBlock shape as welcome_post —
+// deliberately not a new/parallel block type.
+
+export interface HomepagePost {
+  id: string
+  school_id: string
+  heading: string
+  blocks: WelcomePostBlock[]
+  always_expanded: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export async function loadHomepagePosts(
+  schoolId: string
+): Promise<{ data: HomepagePost[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('school_homepage_posts')
+    .select('id, school_id, heading, blocks, always_expanded, sort_order, created_at, updated_at')
+    .eq('school_id', schoolId)
+    .order('sort_order', { ascending: true })
+
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as HomepagePost[], error: null }
+}
+
+export async function createHomepagePost(
+  schoolId: string,
+  post: { heading: string; blocks: WelcomePostBlock[]; always_expanded: boolean; sort_order: number }
+): Promise<{ data: HomepagePost | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('school_homepage_posts')
+    .insert({ school_id: schoolId, ...post })
+    .select('id, school_id, heading, blocks, always_expanded, sort_order, created_at, updated_at')
+    .single()
+
+  if (error) return { data: null, error: error.message }
+  return { data: data as HomepagePost, error: null }
+}
+
+export async function updateHomepagePost(
+  postId: string,
+  updates: Partial<Pick<HomepagePost, 'heading' | 'blocks' | 'always_expanded' | 'sort_order'>>
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('school_homepage_posts')
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq('id', postId)
+
+  return { error: error?.message ?? null }
+}
+
+export async function deleteHomepagePost(postId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('school_homepage_posts')
+    .delete()
+    .eq('id', postId)
+
+  return { error: error?.message ?? null }
+}
+
+/**
+ * Persists a full reorder in one round trip — called after a drag/move
+ * action rebuilds the local list order client-side. Writes sort_order for
+ * every post in the given order (0-indexed), not just the two that moved,
+ * so ties can never occur even if a prior partial-write left gaps.
+ */
+export async function reorderHomepagePosts(
+  postIds: string[]
+): Promise<{ error: string | null }> {
+  const results = await Promise.all(
+    postIds.map((id, index) =>
+      supabase.from('school_homepage_posts').update({ sort_order: index, updated_at: new Date().toISOString() }).eq('id', id)
+    )
+  )
+  const firstError = results.find(r => r.error)?.error
+  return { error: firstError?.message ?? null }
 }
 
 // ─── Calendar — sessions & terms ──────────────────────────────────────────────

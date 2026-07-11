@@ -37,7 +37,9 @@ import { applyBrandTheme, type ThemeMode } from '../services/themeService'
 import { Icon } from '../components/icons'
 import {
   loadSchoolSettings,       updateSchoolSettings,
-  loadPublicConfig,         savePublicConfig,
+  loadPublicConfig,         savePublicConfig, uploadWelcomePostImage,
+  loadHomepagePosts,        createHomepagePost, updateHomepagePost,
+  deleteHomepagePost,       reorderHomepagePosts,
   loadSessions,             upsertSession,
   loadTerms,                upsertTerm,
   loadWeekDays,             saveWeekDays,
@@ -51,6 +53,9 @@ import {
   loadStudentRoles,         saveStudentRole, deleteStudentRole,
   type SchoolSettings,
   type SchoolPublicConfig,
+  type WelcomePost,
+  type WelcomePostBlock,
+  type HomepagePost,
   type Period,
   type Subject,
   type Role,
@@ -215,6 +220,366 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
   )
 }
 
+// ─── Welcome post helpers ───────────────────────────────────────────────────
+
+/**
+ * Returns null (not an empty post) when there's genuinely nothing to
+ * save — an empty heading and zero blocks — so a school that never
+ * touches this editor doesn't get a hollow welcome_post row written,
+ * and PublicHomepage.tsx's own null-check / legacy-message-fallback
+ * branch keeps working exactly as documented.
+ */
+function buildWelcomePost(heading: string, blocks: WelcomePostBlock[]): WelcomePost | null {
+  const trimmedHeading = heading.trim()
+  const cleanBlocks = blocks
+    .map(b => b.type === 'paragraph' ? { ...b, text: b.text.trim() } : b)
+    .filter(b => b.type === 'image' || b.text.length > 0)
+  if (!trimmedHeading && cleanBlocks.length === 0) return null
+  return { heading: trimmedHeading, blocks: cleanBlocks }
+}
+
+// ─── Homepage posts editor (owner request, 2026-07-11 follow-up #2) ───────
+// Several ordered, independently expandable posts — a real one-to-many
+// list (school_homepage_posts), distinct from the single welcome_post
+// editor above. Each post gets the same paragraph/image block editor
+// pattern as the welcome post (deliberately not a separate component —
+// see PostBlockFields below, shared by both), plus its own heading and
+// an "always expanded" toggle: on, the public page never truncates this
+// post regardless of length; off (the default for every new post), the
+// public page collapses it past a fixed height with a "Continue
+// reading…" control — matching PublicHomepage.tsx's own
+// HomepagePostCard default (isExpanded starts false, always_expanded
+// starts false on create below).
+//
+// Each row is its own local draft with its own save — posts are
+// independent rows in a separate table, not one form-wide blob, so a
+// half-finished edit to post #2 shouldn't block saving a brand-new
+// post #3. This deliberately does NOT share SchoolTab's single
+// SaveBar/handleSave — that button only ever wrote school_public_config
+// and schools, this list writes school_homepage_posts via its own CRUD
+// (loadHomepagePosts/createHomepagePost/updateHomepagePost/
+// deleteHomepagePost/reorderHomepagePosts, all already built in
+// settingsService.ts but never wired to any UI until now).
+
+interface PostDraft {
+  id: string | null // null = new, unsaved post
+  heading: string
+  blocks: WelcomePostBlock[]
+  always_expanded: boolean
+  sort_order: number
+  saving: boolean
+  error: string | null
+  dirty: boolean
+}
+
+function homepagePostToDraft(p: HomepagePost): PostDraft {
+  return {
+    id: p.id,
+    heading: p.heading,
+    blocks: p.blocks,
+    always_expanded: p.always_expanded,
+    sort_order: p.sort_order,
+    saving: false,
+    error: null,
+    dirty: false,
+  }
+}
+
+function newPostDraft(sortOrder: number): PostDraft {
+  return {
+    id: null,
+    heading: '',
+    blocks: [],
+    always_expanded: false,
+    sort_order: sortOrder,
+    saving: false,
+    error: null,
+    dirty: true, // a brand-new draft always needs its first save
+  }
+}
+
+/** Shared paragraph/image block editor — identical UI/behavior to the
+ *  welcome-post editor above, factored out so the two don't drift into
+ *  two different block-editing experiences for the same underlying
+ *  WelcomePostBlock shape. */
+function PostBlockFields({
+  blocks,
+  onChange,
+  schoolId,
+}: {
+  blocks: WelcomePostBlock[]
+  onChange: (blocks: WelcomePostBlock[]) => void
+  schoolId: string
+}) {
+  const [imageUploading, setImageUploading] = useState(false)
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null)
+
+  function addParagraphBlock() {
+    onChange([...blocks, { type: 'paragraph', text: '' }])
+  }
+
+  function updateParagraphBlock(index: number, text: string) {
+    onChange(blocks.map((b, i) => (i === index && b.type === 'paragraph' ? { ...b, text } : b)))
+  }
+
+  function updateImageCaption(index: number, caption: string) {
+    onChange(blocks.map((b, i) => (i === index && b.type === 'image' ? { ...b, caption } : b)))
+  }
+
+  function removeBlock(index: number) {
+    onChange(blocks.filter((_, i) => i !== index))
+  }
+
+  function moveBlock(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= blocks.length) return
+    const next = [...blocks]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    onChange(next)
+  }
+
+  async function handleImageFileSelected(file: File | undefined) {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setImageUploadError('Please choose an image file')
+      return
+    }
+    setImageUploading(true)
+    setImageUploadError(null)
+    const { url, error } = await uploadWelcomePostImage(schoolId, file)
+    setImageUploading(false)
+    if (error || !url) {
+      setImageUploadError(error ?? 'Could not upload image')
+      return
+    }
+    onChange([...blocks, { type: 'image', url, caption: '' }])
+  }
+
+  return (
+    <>
+      <div className="set-post-blocks">
+        {blocks.map((block, i) => (
+          <div key={i} className="set-post-block">
+            <div className="set-post-block-controls">
+              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, -1)} disabled={i === 0} aria-label="Move up">
+                ▲
+              </button>
+              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, 1)} disabled={i === blocks.length - 1} aria-label="Move down">
+                ▼
+              </button>
+              <span className="set-post-block-type">{block.type === 'paragraph' ? 'Text' : 'Image'}</span>
+              <button type="button" className="set-post-block-remove" onClick={() => removeBlock(i)} aria-label="Remove block">
+                ✕
+              </button>
+            </div>
+            {block.type === 'paragraph' ? (
+              <Textarea
+                value={block.text}
+                onChange={t => updateParagraphBlock(i, t)}
+                placeholder="Write a paragraph…"
+                rows={3}
+              />
+            ) : (
+              <div className="set-post-image-block">
+                <img src={block.url} alt="" className="set-post-image-preview" />
+                <Input
+                  value={block.caption ?? ''}
+                  onChange={c => updateImageCaption(i, c)}
+                  placeholder="Caption (optional)"
+                />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="set-post-add-row">
+        <button type="button" className="set-post-add-btn" onClick={addParagraphBlock}>
+          + Add text
+        </button>
+        <label className="set-post-add-btn set-post-add-btn--upload">
+          {imageUploading ? 'Uploading…' : '+ Add image'}
+          <input
+            type="file"
+            accept="image/*"
+            className="set-post-image-input"
+            disabled={imageUploading}
+            onChange={e => { handleImageFileSelected(e.target.files?.[0]); e.target.value = '' }}
+          />
+        </label>
+      </div>
+      {imageUploadError && <p className="form-error" role="alert">{imageUploadError}</p>}
+    </>
+  )
+}
+
+function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [drafts, setDrafts] = useState<PostDraft[]>([])
+  const [reordering, setReordering] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const { data, error } = await loadHomepagePosts(schoolId)
+    if (error) { setError(error); setLoading(false); return }
+    setDrafts(data.map(homepagePostToDraft))
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  function updateDraft(index: number, patch: Partial<PostDraft>) {
+    setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, ...patch, dirty: true } : d)))
+  }
+
+  function addPost() {
+    setDrafts(prev => [...prev, newPostDraft(prev.length)])
+  }
+
+  async function savePost(index: number) {
+    const draft = drafts[index]
+    const cleanHeading = draft.heading.trim()
+    const cleanBlocks = draft.blocks
+      .map(b => b.type === 'paragraph' ? { ...b, text: b.text.trim() } : b)
+      .filter(b => b.type === 'image' || b.text.length > 0)
+    if (!cleanHeading && cleanBlocks.length === 0) {
+      updateDraft(index, { error: 'Add a heading or some content before saving.' })
+      return
+    }
+
+    setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: true, error: null } : d)))
+
+    if (draft.id === null) {
+      const { data, error } = await createHomepagePost(schoolId, {
+        heading: cleanHeading,
+        blocks: cleanBlocks,
+        always_expanded: draft.always_expanded,
+        sort_order: draft.sort_order,
+      })
+      if (error || !data) {
+        setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: false, error: error ?? 'Could not save post' } : d)))
+        return
+      }
+      setDrafts(prev => prev.map((d, i) => (i === index ? homepagePostToDraft(data) : d)))
+    } else {
+      const { error } = await updateHomepagePost(draft.id, {
+        heading: cleanHeading,
+        blocks: cleanBlocks,
+        always_expanded: draft.always_expanded,
+      })
+      if (error) {
+        setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: false, error } : d)))
+        return
+      }
+      setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, heading: cleanHeading, blocks: cleanBlocks, saving: false, error: null, dirty: false } : d)))
+    }
+  }
+
+  async function removePost(index: number) {
+    const draft = drafts[index]
+    if (draft.id === null) {
+      // Never saved — just drop the local draft, no network call needed.
+      setDrafts(prev => prev.filter((_, i) => i !== index))
+      return
+    }
+    if (!window.confirm('Delete this post? This cannot be undone.')) return
+    updateDraft(index, { saving: true })
+    const { error } = await deleteHomepagePost(draft.id)
+    if (error) {
+      updateDraft(index, { saving: false, error })
+      return
+    }
+    setDrafts(prev => prev.filter((_, i) => i !== index))
+  }
+
+  async function movePost(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= drafts.length) return
+    const next = [...drafts]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    setDrafts(next)
+
+    // Only persist ordering across posts that already exist server-side —
+    // an unsaved draft has no row to reorder yet and will get its real
+    // sort_order the moment it's first saved (see savePost's create branch).
+    const savedIds = next.filter(d => d.id !== null).map(d => d.id as string)
+    if (savedIds.length < 2) return
+    setReordering(true)
+    await reorderHomepagePosts(savedIds)
+    setReordering(false)
+  }
+
+  if (loading) return <Skeleton lines={4} />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-homepage-posts">
+      {drafts.length === 0 && (
+        <p className="set-homepage-posts-empty">No posts yet. Add one below.</p>
+      )}
+
+      {drafts.map((draft, i) => (
+        <div key={draft.id ?? `new-${i}`} className="set-homepage-post-card">
+          <div className="set-homepage-post-card-header">
+            <div className="set-homepage-post-move-group">
+              <button type="button" className="set-post-block-move" onClick={() => movePost(i, -1)} disabled={i === 0 || reordering} aria-label="Move post up">
+                ▲
+              </button>
+              <button type="button" className="set-post-block-move" onClick={() => movePost(i, 1)} disabled={i === drafts.length - 1 || reordering} aria-label="Move post down">
+                ▼
+              </button>
+            </div>
+            <span className="set-homepage-post-card-label">
+              {draft.id === null ? 'New post (unsaved)' : `Post ${i + 1}`}
+            </span>
+            <button type="button" className="set-post-block-remove" onClick={() => removePost(i)} aria-label="Delete post">
+              ✕ Delete
+            </button>
+          </div>
+
+          <FieldRow label="Heading">
+            <Input
+              value={draft.heading}
+              onChange={h => updateDraft(i, { heading: h })}
+              placeholder="e.g. Resumption date for next term"
+            />
+          </FieldRow>
+
+          <PostBlockFields
+            blocks={draft.blocks}
+            onChange={blocks => updateDraft(i, { blocks })}
+            schoolId={schoolId}
+          />
+
+          <Toggle
+            checked={draft.always_expanded}
+            onChange={v => updateDraft(i, { always_expanded: v })}
+            label="Always show in full (skip “Continue reading…” collapsing, regardless of length)"
+          />
+
+          <div className="set-homepage-post-card-footer">
+            {draft.error && <p className="form-error" role="alert">{draft.error}</p>}
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => savePost(i)}
+              disabled={draft.saving || !draft.dirty}
+            >
+              {draft.saving ? 'Saving…' : draft.id === null ? 'Add post' : 'Save changes'}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <button type="button" className="set-post-add-btn set-homepage-post-add-btn" onClick={addPost}>
+        + Add another post
+      </button>
+    </div>
+  )
+}
+
 // ─── Tab: School ──────────────────────────────────────────────────────────────
 
 function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: ThemeMode }) {
@@ -232,7 +597,16 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
   const [enabledLangs, setEnabledLangs] = useState<string[]>(['en'])
   const [usesTerms, setUsesTerms] = useState(true)
   const [usesLedger, setUsesLedger] = useState(false)
-  const [welcomeMsg, setWelcomeMsg] = useState('')
+  // Welcome post (owner request, 2026-07-11) — heading + ordered blocks,
+  // replaces the old plain-text welcomeMsg textarea. legacyWelcomeMessage
+  // is kept read-only, shown only as a one-time "you have an old plain
+  // message — start a post from it?" prompt for schools that saved one
+  // before this feature existed; it is never written by this form again.
+  const [postHeading, setPostHeading] = useState('')
+  const [postBlocks, setPostBlocks] = useState<WelcomePostBlock[]>([])
+  const [legacyWelcomeMessage, setLegacyWelcomeMessage] = useState<string | null>(null)
+  const [imageUploading, setImageUploading] = useState(false)
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null)
   const [contactPhone, setContactPhone] = useState('')
   const [contactEmail, setContactEmail] = useState('')
   const [contactAddress, setContactAddress] = useState('')
@@ -266,7 +640,14 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
     setEnabledLangs(s.enabled_langs ?? ['en'])
     setUsesTerms(s.uses_terms)
     setUsesLedger(s.uses_ledger)
-    setWelcomeMsg(p.welcome_message ?? '')
+    if (p.welcome_post) {
+      setPostHeading(p.welcome_post.heading ?? '')
+      setPostBlocks(p.welcome_post.blocks ?? [])
+    } else {
+      setPostHeading('')
+      setPostBlocks([])
+    }
+    setLegacyWelcomeMessage(p.welcome_post ? null : (p.welcome_message ?? null))
     setContactPhone((p.contact_info as { phone?: string })?.phone ?? '')
     setContactEmail((p.contact_info as { email?: string })?.email ?? '')
     setContactAddress((p.contact_info as { address?: string })?.address ?? '')
@@ -301,7 +682,17 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
         enabled_langs: enabledLangs, uses_terms: usesTerms, uses_ledger: usesLedger,
       }),
       savePublicConfig(schoolId, {
-        welcome_message: welcomeMsg || null,
+        // welcome_message is round-tripped from what was loaded, never
+        // actively edited by this form again — see this section's own
+        // header comment. savePublicConfig() upserts the whole row, so
+        // omitting this field (or sending null) would silently blank out
+        // an existing plain-text message the moment an admin saves any
+        // other School-tab field, even if they never touched the welcome
+        // post editor. Once a real welcome_post is saved, legacyWelcomeMessage
+        // is null (see load()'s own branch) and this correctly stops
+        // resending the old text — a genuine post supersedes it.
+        welcome_message: legacyWelcomeMessage,
+        welcome_post: buildWelcomePost(postHeading, postBlocks),
         contact_info: {
           phone: contactPhone || undefined,
           email: contactEmail || undefined,
@@ -352,6 +743,57 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
     setEnabledLangs(prev =>
       prev.includes(lang) ? prev.filter(l => l !== lang) : [...prev, lang]
     )
+  }
+
+  // ─── Welcome post block editor ────────────────────────────────────────
+
+  function addParagraphBlock() {
+    setPostBlocks(prev => [...prev, { type: 'paragraph', text: '' }])
+  }
+
+  function updateParagraphBlock(index: number, text: string) {
+    setPostBlocks(prev => prev.map((b, i) => (i === index && b.type === 'paragraph' ? { ...b, text } : b)))
+  }
+
+  function updateImageCaption(index: number, caption: string) {
+    setPostBlocks(prev => prev.map((b, i) => (i === index && b.type === 'image' ? { ...b, caption } : b)))
+  }
+
+  function removeBlock(index: number) {
+    setPostBlocks(prev => prev.filter((_, i) => i !== index))
+  }
+
+  function moveBlock(index: number, direction: -1 | 1) {
+    setPostBlocks(prev => {
+      const target = index + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  async function handleImageFileSelected(file: File | undefined) {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setImageUploadError('Please choose an image file')
+      return
+    }
+    setImageUploading(true)
+    setImageUploadError(null)
+    const { url, error } = await uploadWelcomePostImage(schoolId, file)
+    setImageUploading(false)
+    if (error || !url) {
+      setImageUploadError(error ?? 'Could not upload image')
+      return
+    }
+    setPostBlocks(prev => [...prev, { type: 'image', url, caption: '' }])
+  }
+
+  function startPostFromLegacyMessage() {
+    if (!legacyWelcomeMessage) return
+    setPostBlocks(prev => [...prev, { type: 'paragraph', text: legacyWelcomeMessage }])
+    setLegacyWelcomeMessage(null)
   }
 
   if (loading) return <Skeleton lines={8} />
@@ -405,9 +847,83 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
       <Toggle checked={usesLedger} onChange={setUsesLedger} label="Enable double-entry ledger (advanced accounting)" />
 
       <SectionLabel>Public page</SectionLabel>
-      <FieldRow label="Welcome message">
-        <Textarea value={welcomeMsg} onChange={setWelcomeMsg} placeholder="A short message shown to visitors on your school's public page." />
+
+      {legacyWelcomeMessage && (
+        <div className="set-legacy-msg-banner">
+          <p className="set-legacy-msg-text">
+            You have an older plain-text welcome message: <em>“{legacyWelcomeMessage.slice(0, 120)}{legacyWelcomeMessage.length > 120 ? '…' : ''}”</em>
+          </p>
+          <button type="button" className="set-legacy-msg-btn" onClick={startPostFromLegacyMessage}>
+            Start a post from it
+          </button>
+        </div>
+      )}
+
+      <FieldRow label="Post heading">
+        <Input value={postHeading} onChange={setPostHeading} placeholder="e.g. Welcome to Dilimi Model School" />
       </FieldRow>
+
+      <div className="set-post-blocks">
+        {postBlocks.map((block, i) => (
+          <div key={i} className="set-post-block">
+            <div className="set-post-block-controls">
+              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, -1)} disabled={i === 0} aria-label="Move up">
+                ▲
+              </button>
+              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, 1)} disabled={i === postBlocks.length - 1} aria-label="Move down">
+                ▼
+              </button>
+              <span className="set-post-block-type">{block.type === 'paragraph' ? 'Text' : 'Image'}</span>
+              <button type="button" className="set-post-block-remove" onClick={() => removeBlock(i)} aria-label="Remove block">
+                ✕
+              </button>
+            </div>
+            {block.type === 'paragraph' ? (
+              <Textarea
+                value={block.text}
+                onChange={t => updateParagraphBlock(i, t)}
+                placeholder="Write a paragraph…"
+                rows={3}
+              />
+            ) : (
+              <div className="set-post-image-block">
+                <img src={block.url} alt="" className="set-post-image-preview" />
+                <Input
+                  value={block.caption ?? ''}
+                  onChange={c => updateImageCaption(i, c)}
+                  placeholder="Caption (optional)"
+                />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="set-post-add-row">
+        <button type="button" className="set-post-add-btn" onClick={addParagraphBlock}>
+          + Add text
+        </button>
+        <label className="set-post-add-btn set-post-add-btn--upload">
+          {imageUploading ? 'Uploading…' : '+ Add image'}
+          <input
+            type="file"
+            accept="image/*"
+            className="set-post-image-input"
+            disabled={imageUploading}
+            onChange={e => { handleImageFileSelected(e.target.files?.[0]); e.target.value = '' }}
+          />
+        </label>
+      </div>
+      {imageUploadError && <p className="form-error" role="alert">{imageUploadError}</p>}
+
+      <SectionLabel>Homepage posts</SectionLabel>
+      <p className="set-homepage-posts-hint">
+        Several ordered posts shown below the welcome message on the public page.
+        Each one collapses at a certain length with a “Continue reading…” link by
+        default — toggle “Always show in full” per post to skip that.
+      </p>
+      <HomepagePostsEditor schoolId={schoolId} />
+
       <FieldRow label="Phone">
         <Input value={contactPhone} onChange={setContactPhone} placeholder="+234 801 234 5678" />
       </FieldRow>

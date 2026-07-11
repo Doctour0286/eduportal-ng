@@ -5,7 +5,11 @@
  * Routing logic (in order):
  * 1. Read subdomain → query schools by slug
  * 2. If no school found → SchoolNotFound
- * 3. If school found but no auth session → LoginPage
+ * 3. If school found but no auth session → PublicHomepage first (no auth
+ *    required), "Log in" tap → LoginPage. A wrong-school redirect
+ *    (valid-elsewhere credentials on this subdomain) bypasses
+ *    PublicHomepage entirely and goes straight to LoginPage's banner —
+ *    that's a security-relevant redirect, not a first-time-visitor flow.
  * 4. If authenticated but onboarding not complete → OnboardingWizard
  * 5. If authenticated and onboarded → MainApp (with BottomNav)
  *
@@ -20,6 +24,7 @@ import { useSchoolStore } from './stores/schoolStore'
 import { applyBrandTheme, type ThemeMode } from './services/themeService'
 import { loadThemePreference, saveThemePreference } from './services/settingsService'
 import { LoginPage } from './routes/LoginPage'
+import { PublicHomepage } from './routes/PublicHomepage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
 import { Sidebar } from './components/Sidebar'
@@ -107,6 +112,12 @@ export default function App() {
   // matching on the very next render and silently swap this message for
   // LoginPage before the person has had a chance to read it.
   const [wrongSchoolBlock, setWrongSchoolBlock] = useState(false)
+  // PRD Row 34 / Problem 7.1 — local only, deliberately not persisted
+  // (sessionStorage/localStorage) across a reload: a fresh visit to the
+  // subdomain should show the public homepage again, not skip straight to
+  // LoginPage from a stale flag. Reset is implicit — this is component
+  // state, gone on unmount/reload, no explicit reset code needed.
+  const [homepageAcknowledged, setHomepageAcknowledged] = useState(false)
   const [activeTab, setActiveTab] = useState<NavTab>('home')
   const [forceShowOnboarding, setForceShowOnboarding] = useState(false)
   // staff.id of the signed-in actor, resolved once via app_identities — needed by
@@ -523,18 +534,59 @@ export default function App() {
   // this school without a reload. Message kept deliberately generic (not
   // naming the person's actual correct school) per owner direction — see
   // the isWrongSchool/useEffect block above for the reasoning on why.
-  if (isWrongSchool || wrongSchoolBlock || !session) {
+  //
+  // This branch deliberately bypasses PublicHomepage entirely — a wrong-
+  // school redirect means someone already has valid-elsewhere credentials
+  // and got signed out of *this* subdomain, not a first-time anonymous
+  // visitor; showing them this school's public content first would be a
+  // confusing (and mildly information-disclosing) detour, not a courtesy.
+  if (isWrongSchool || wrongSchoolBlock) {
     return (
       <LoginPage
         schoolId={school.id}
         schoolName={school.name}
         logoUrl={school.logo_url}
         themeColor={school.theme_color}
-        topLevelError={
-          isWrongSchool || wrongSchoolBlock
-            ? "This isn't your school — check the URL or link your school gave you."
-            : null
-        }
+        topLevelError="This isn't your school — check the URL or link your school gave you."
+      />
+    )
+  }
+
+  // ─── Not logged in, first visit → PublicHomepage before LoginPage ─────
+  // PRD Row 34 / Problem 7.1. homepageAcknowledged flips true only when
+  // the person taps "Log in" on PublicHomepage itself — a plain !session
+  // with no acknowledgement yet always shows the public page first, per
+  // this problem's own Definition of Done ("visiting the subdomain in an
+  // incognito/logged-out browser shows..."). Once acknowledged, LoginPage
+  // renders with no error banner (this is the ordinary path, not a
+  // wrong-school redirect).
+  if (!session && !homepageAcknowledged) {
+    return (
+      <PublicHomepage
+        slug={school.slug}
+        onLogin={() => setHomepageAcknowledged(true)}
+      />
+    )
+  }
+
+  if (!session) {
+    return (
+      <LoginPage
+        schoolId={school.id}
+        schoolName={school.name}
+        logoUrl={school.logo_url}
+        themeColor={school.theme_color}
+        topLevelError={null}
+        // Owner request, 2026-07-11: back button returns to PublicHomepage.
+        // Only wired here, not on the wrong-school branch above — that
+        // redirect is security-relevant (valid-elsewhere credentials on
+        // the wrong subdomain), not an ordinary first visit, and offering
+        // a way "back" into this school's public content there would be
+        // the same disclosure risk this file's own PublicHomepage routing
+        // comment already flags. homepageAcknowledged flipping back to
+        // false is exactly the state PublicHomepage's own branch above
+        // checks — no new state needed.
+        onBack={() => setHomepageAcknowledged(false)}
       />
     )
   }
@@ -765,6 +817,7 @@ export default function App() {
           isAdminRole={isAdminRole}
           schoolId={school.id}
           schoolName={school.name}
+          schoolLogoUrl={school.logo_url}
           authUserId={session.user.id}
           currentStaffId={currentStaffId}
           actorRecordId={actorRecordId}
@@ -846,6 +899,13 @@ function TabContent({
   isAdminRole,
   schoolId,
   schoolName,
+  // PRD Tier 6 / Problem 6.10 follow-up (2026-07-10) — needed for the
+  // student ID card print feature's logo slot. A genuine pre-existing gap,
+  // not previously threaded through TabContent at all despite school.logo_url
+  // already being read at the top-level App component for the header <img>
+  // and GuardianPortal/LoginPage's own logoUrl props — closed here rather
+  // than silently left missing.
+  schoolLogoUrl,
   authUserId,
   currentStaffId,
   actorRecordId,
@@ -859,6 +919,7 @@ function TabContent({
   isAdminRole: boolean
   schoolId: string
   schoolName: string
+  schoolLogoUrl: string | null
   authUserId: string
   currentStaffId: string | null
   actorRecordId: string | null
@@ -971,7 +1032,12 @@ function TabContent({
   }
 
   if (tab === 'students') {
-    return <StudentsModule schoolId={schoolId} isAdmin={isAdmin} intent={intent.intent} onNavigate={onNavigate} />
+    // schoolName added (PRD Tier 6 / Problem 6.10) — needed for the new
+    // student ID card print feature's header, same reasoning and same
+    // threading pattern as TimetableModule's own schoolName prop two
+    // branches up (added there for its print page header). schoolLogoUrl
+    // added the same way, same session, for the card's logo slot.
+    return <StudentsModule schoolId={schoolId} schoolName={schoolName} schoolLogoUrl={schoolLogoUrl} isAdmin={isAdmin} intent={intent.intent} onNavigate={onNavigate} />
   }
 
   if (tab === 'finance') {

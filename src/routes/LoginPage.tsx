@@ -57,11 +57,23 @@ interface LoginPageProps {
    * to log into.
    */
   topLevelError?: string | null
+  /**
+   * Owner request, 2026-07-11: a way back to the school's public homepage
+   * without a reload. Optional and deliberately omitted on the wrong-school
+   * banner branch (App.tsx's isWrongSchool/wrongSchoolBlock render) — that
+   * case is a security-relevant redirect for someone with valid-elsewhere
+   * credentials, not a first-time visitor, so sending them "back" to this
+   * school's public content would be the same information-disclosure risk
+   * PublicHomepage.tsx's own header comment already flags for that branch.
+   * Undefined (not just a no-op) hides the button entirely rather than
+   * rendering a dead one.
+   */
+  onBack?: () => void
 }
 
 type TabKey = 'staff' | 'code'
 
-export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelError }: LoginPageProps) {
+export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelError, onBack }: LoginPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('staff')
 
   // Session 23's real-contrast derivation, reused here for the logo
@@ -74,6 +86,12 @@ export function LoginPage({ schoolId, schoolName, logoUrl, themeColor, topLevelE
 
   return (
     <div className="login-shell">
+      {onBack && (
+        <button type="button" className="login-back-btn" onClick={onBack} aria-label="Back to school homepage">
+          ← Back
+        </button>
+      )}
+
       {/* Compact brand identity strip */}
       <div className="login-brand-strip">
         {logoUrl ? (

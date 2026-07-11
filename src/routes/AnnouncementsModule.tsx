@@ -581,7 +581,7 @@ function ComposeSheet({
                   <option value="">Select a class</option>
                   {classNodes.map(c => (
                     <option key={c.id} value={c.id}>
-                      {'  '.repeat(Math.max(0, c.level - 1))}{c.name}
+                      {'  '.repeat(c.depth)}{c.name}
                     </option>
                   ))}
                 </select>

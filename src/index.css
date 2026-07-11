@@ -971,6 +971,536 @@ body {
   color: var(--color-brand-600, #2563eb);
 }
 
+/* Back-to-homepage button (owner request, 2026-07-11) — sits above the
+   brand strip. align-self: flex-start positions it at the left edge of
+   .login-shell's centered column without disturbing that layout, matching
+   the same "small, unobtrusive, top of the centered stack" treatment as
+   the rest of this page's chrome. */
+.login-back-btn {
+  align-self: flex-start;
+  width: auto;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-secondary, #6b7280);
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-md, 0.5rem);
+}
+
+.login-back-btn:hover {
+  color: var(--color-brand-600, #2563eb);
+  background: var(--color-neutral-100, #f3f4f6);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   PUBLIC HOMEPAGE — PRD Row 34 / Problem 7.1
+   Pre-login, no-auth page shown before LoginPage.
+
+   Layout revised 2026-07-11 (owner follow-up): the original version
+   centered a single narrow (560px) card on the page — reasonable on a
+   phone, but on any wider screen it read as "just a card" floating in
+   a sea of empty background, not a real page. This version makes the
+   page genuinely fill the viewport at any width:
+     - .public-home-header becomes a full-bleed brand band (own
+       background, full width) rather than plain page padding — this is
+       what makes the page read as "a page" rather than "a card's
+       header," and gives the school's brand color/logo real presence
+       on a wide screen instead of shrinking into a corner.
+     - .public-home-main drops the card treatment (surface/border/
+       shadow) at ≥1024px and becomes a wide, centered content column
+       with generous side margins instead — content-width-limited for
+       readability (max-width caps line length, same reasoning browsers
+       use for article text) but the *page* itself fills the screen.
+     - Below 1024px the original card-on-neutral-background treatment
+       is kept as-is (still reuses .login-shell/.login-card's visual
+       language per the original design note below) since that's the
+       phone-first pattern already proven to work.
+
+   Original design note, still true: still shares .login-shell's
+   min-height-100dvh convention and .login-card's surface/border/
+   radius/shadow language at the size where a card treatment applies,
+   since these two screens sit back-to-back in the same visit.
+═══════════════════════════════════════════════════════════════════ */
+
+.public-home {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-neutral-50, #f9fafb);
+}
+
+.public-home-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3, 0.75rem);
+  text-align: center;
+  padding: 40px 16px 28px;
+  background: var(--color-surface, #ffffff);
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+
+.public-home-logo {
+  width: 88px;
+  height: 88px;
+  border-radius: var(--radius-lg, 0.75rem);
+  object-fit: cover;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface, #ffffff);
+}
+
+.public-home-school-name {
+  font-size: var(--text-2xl, 1.5rem);
+  font-weight: 800;
+  color: var(--color-text-primary, #111827);
+  margin: 0;
+}
+
+/* .public-home-main is a full-width region at every breakpoint — it no
+   longer caps its own width or centers itself as a block. On phone it's
+   still visually "a card" (background/border/shadow below), but that
+   card spans the available width with side padding, same as the header
+   band above it — the page doesn't narrow to a floating island at any
+   width, only the *text inside it* gets a readable max-width via
+   .public-home-layout's own children. */
+.public-home-main {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 24px 16px 56px;
+}
+
+.public-home-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6, 1.5rem);
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-xl, 1rem);
+  box-shadow: var(--shadow-md, 0 4px 6px -1px rgb(0 0 0 / 0.1));
+  padding: var(--space-8, 2rem) var(--space-6, 1.5rem);
+}
+
+.public-home-primary,
+.public-home-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6, 1.5rem);
+}
+
+/* ≥1024px: a genuine two-column page, not a single wide block. The
+   primary column (welcome + posts) and sidebar (contact + announcements
+   + log in) sit side by side, each with their own real width — this is
+   what makes the page read as "a page" at desktop size rather than a
+   stretched single column with empty margins either side. Same
+   breakpoint used consistently elsewhere in this file. */
+@media (min-width: 1024px) {
+  .public-home-header {
+    padding: 56px 48px 40px;
+  }
+
+  .public-home-logo {
+    width: 108px;
+    height: 108px;
+  }
+
+  .public-home-school-name {
+    font-size: var(--text-3xl, 1.875rem);
+  }
+
+  .public-home-main {
+    padding: 56px 48px 80px;
+  }
+
+  .public-home-layout {
+    flex-direction: row;
+    align-items: flex-start;
+    max-width: 1160px;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    gap: var(--space-8, 2rem);
+  }
+
+  .public-home-primary {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .public-home-sidebar {
+    flex: 0 0 340px;
+    width: 340px;
+    position: sticky;
+    top: 24px;
+  }
+
+  /* Individual sections get their own real surface/border now that the
+     single outer card is gone — same card language as before, just
+     per-section instead of once around everything. */
+  .public-home-post,
+  .public-home-post-card,
+  .public-home-contact,
+  .public-home-announcements {
+    background: var(--color-surface, #ffffff);
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: var(--radius-lg, 0.75rem);
+    padding: var(--space-6, 1.5rem);
+    padding-top: var(--space-6, 1.5rem);
+  }
+
+  .public-home-post-body--clamped::after {
+    background: linear-gradient(to bottom, transparent, var(--color-surface, #ffffff));
+  }
+
+  .public-home-login-btn {
+    align-self: stretch;
+    text-align: center;
+  }
+}
+
+.public-home-welcome {
+  font-size: var(--text-base, 1rem);
+  line-height: 1.6;
+  color: var(--color-text-primary, #111827);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.public-home-welcome--empty {
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ─── Welcome post (owner request, 2026-07-11) ────────────────────────
+   Structured heading + ordered paragraph/image blocks, replacing the
+   plain-text welcome message for schools that have saved one. Sits in
+   the same slot .public-home-welcome occupied — same container, same
+   surrounding spacing rhythm — deliberately not a separately-boxed
+   "card within a card" treatment. */
+
+.public-home-post {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 1rem);
+}
+
+.public-home-post-heading {
+  font-size: var(--text-xl, 1.25rem);
+  font-weight: 700;
+  color: var(--color-text-primary, #111827);
+  margin: 0;
+}
+
+.public-home-post-paragraph {
+  font-size: var(--text-base, 1rem);
+  line-height: 1.6;
+  color: var(--color-text-primary, #111827);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.public-home-post-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+}
+
+.public-home-post-image {
+  width: 100%;
+  border-radius: var(--radius-lg, 0.75rem);
+  border: 1px solid var(--color-border, #e2e8f0);
+  display: block;
+}
+
+.public-home-post-caption {
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-secondary, #6b7280);
+  text-align: center;
+}
+
+/* ─── Homepage posts (owner request, 2026-07-11 follow-up) ────────────
+   Several ordered, independently expandable posts — distinct from the
+   single .public-home-post welcome post above, though they share its
+   heading/paragraph/figure/image/caption rules (same block shape,
+   rendered by the same BlocksView). Each card is boxed individually
+   (unlike the welcome post, which sits directly in .public-home-main's
+   own padding) since there can be several of these in a row and they
+   need a visible boundary between them. */
+
+.public-home-posts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 1rem);
+}
+
+.public-home-post-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-5, 1.25rem);
+  background: var(--color-bg-subtle, #f9fafb);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-lg, 0.75rem);
+}
+
+.public-home-post-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 1rem);
+}
+
+/* Height-based clamp with a fade-out mask, not -webkit-line-clamp —
+   line-clamp only reliably truncates a single flow of inline text; this
+   container holds separate block children (paragraphs AND images via
+   BlocksView), and line-clamp does not correctly truncate across
+   multiple block-level children in that case — confirmed the real cause
+   of a long real post not collapsing on the public page. A fixed
+   max-height + gradient fade works regardless of what mix of blocks is
+   inside, and is the same fallback real sites use for exactly this
+   "clamp mixed content" case. */
+.public-home-post-body--clamped {
+  position: relative;
+  max-height: 132px;
+  overflow: hidden;
+}
+
+.public-home-post-body--clamped::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  background: linear-gradient(to bottom, transparent, var(--color-bg-subtle, #f9fafb));
+  pointer-events: none;
+}
+
+.public-home-post-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 700;
+  color: var(--color-brand-600, #2563eb);
+  cursor: pointer;
+}
+
+.public-home-post-toggle:hover {
+  text-decoration: underline;
+}
+
+.public-home-post-skel {
+  width: 100%;
+  height: 96px;
+  border-radius: var(--radius-lg, 0.75rem);
+}
+
+.public-home-post-skel + .public-home-post-skel {
+  margin-top: var(--space-3, 0.75rem);
+}
+
+.public-home-section-heading {
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary, #6b7280);
+  margin: 0 0 var(--space-3, 0.75rem);
+}
+
+/* ─── Contact ──────────────────────────────────────────────────────── */
+
+.public-home-contact {
+  padding-top: var(--space-5, 1.25rem);
+  border-top: 1px solid var(--color-border, #e2e8f0);
+}
+
+.public-home-contact-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.public-home-contact-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2, 0.5rem);
+  font-size: var(--text-sm, 0.875rem);
+}
+
+.public-home-contact-label {
+  flex: 0 0 auto;
+  min-width: 60px;
+  color: var(--color-text-secondary, #6b7280);
+  font-weight: 600;
+}
+
+.public-home-contact-value {
+  color: var(--color-text-primary, #111827);
+  word-break: break-word;
+}
+
+/* ─── Announcements ────────────────────────────────────────────────── */
+
+.public-home-announcements {
+  padding-top: var(--space-5, 1.25rem);
+  border-top: 1px solid var(--color-border, #e2e8f0);
+}
+
+.public-home-ann-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 0.75rem);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.public-home-ann-row {
+  padding: var(--space-3, 0.75rem);
+  background: var(--color-bg-subtle, #f9fafb);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-md, 0.5rem);
+}
+
+.public-home-ann-title {
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 700;
+  color: var(--color-text-primary, #111827);
+  margin: 0 0 4px;
+}
+
+.public-home-ann-body {
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.public-home-ann-empty {
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-secondary, #6b7280);
+  margin: 0;
+}
+
+/* ─── Login button ─────────────────────────────────────────────────── */
+
+.public-home-login-btn {
+  align-self: center;
+  margin-top: var(--space-2, 0.5rem);
+  padding: 12px 32px;
+  min-height: 48px;
+  font-size: var(--text-base, 1rem);
+  font-weight: 700;
+  color: var(--color-brand-on, #ffffff);
+  background: var(--color-brand-600, #2563eb);
+  border: none;
+  border-radius: var(--radius-lg, 0.75rem);
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.public-home-login-btn:hover {
+  background: var(--color-brand-700, var(--color-brand-600));
+}
+
+.public-home-login-btn:active {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand-600, #2563eb) 25%, transparent);
+}
+
+/* ─── Not-found / error states ─────────────────────────────────────── */
+
+.public-home-status {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-neutral-50, #f9fafb);
+  padding: 24px 16px;
+}
+
+.public-home-status-inner {
+  text-align: center;
+  max-width: 340px;
+}
+
+.public-home-status-inner h1 {
+  font-size: var(--text-xl, 1.25rem);
+  font-weight: 800;
+  color: var(--color-text-primary, #111827);
+  margin: 0 0 var(--space-2, 0.5rem);
+}
+
+.public-home-status-inner p {
+  font-size: var(--text-sm, 0.875rem);
+  color: var(--color-text-secondary, #6b7280);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.public-home-retry-btn {
+  margin-top: var(--space-4, 1rem);
+  padding: 10px 24px;
+  min-height: 44px;
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 600;
+  color: var(--color-brand-on, #ffffff);
+  background: var(--color-brand-600, #2563eb);
+  border: none;
+  border-radius: var(--radius-md, 0.5rem);
+  cursor: pointer;
+}
+
+/* ─── Loading skeletons ─────────────────────────────────────────────
+   Reuses the .skeleton base class already declared elsewhere in this
+   file (AdminDashboard.tsx's own convention — shimmer/pulse animation
+   lives on that shared class, not redefined per-page here). Only the
+   per-element sizing is page-specific. */
+
+.public-home-logo-skel {
+  width: 88px;
+  height: 88px;
+  border-radius: var(--radius-lg, 0.75rem);
+}
+
+.public-home-name-skel {
+  width: 180px;
+  height: 24px;
+  border-radius: var(--radius-sm, 0.25rem);
+}
+
+.public-home-welcome-skel {
+  width: 100%;
+  height: 16px;
+  border-radius: var(--radius-sm, 0.25rem);
+}
+
+.public-home-welcome-skel + .public-home-welcome-skel {
+  width: 70%;
+}
+
+.public-home-ann-skel {
+  width: 100%;
+  height: 52px;
+  border-radius: var(--radius-md, 0.5rem);
+}
+
+.public-home-ann-skel + .public-home-ann-skel {
+  margin-top: var(--space-2, 0.5rem);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    SHARED FORM ELEMENTS
 ═══════════════════════════════════════════════════════════════════ */
@@ -6460,6 +6990,28 @@ body {
   background: var(--color-border);
 }
 
+/* PRD Tier 6 / Problem 6.10 — single-student ID card print button, detail
+   sheet header. Same 32px circular-icon shape as .stu-form-close beside it,
+   distinguished only by a subtle brand tint so it doesn't read as another
+   dismiss/close affordance. */
+.stu-detail-print-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  border: none;
+  border-radius: var(--radius-full);
+  color: var(--color-brand-600, var(--color-primary));
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.stu-detail-print-btn:hover {
+  filter: brightness(0.96);
+}
+
 /* ── Form body ────────────────────────────────────────────────────────────── */
 
 .stu-form-body {
@@ -6573,6 +7125,53 @@ body {
   background: var(--color-danger-subtle);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
+  margin: 0;
+}
+
+/* Pre-existing gaps closed (PRD Tier 6 / Problem 6.10 pass) — the student
+   ID number field's input+generate-button row (Edit subtab and Add-student
+   form both use this same markup). .stu-input--code is a monospace
+   modifier on the shared .stu-input, matching this file's existing
+   monospace-for-code-values convention (see stu-brief-code below). */
+.stu-code-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.stu-code-row .stu-input--code {
+  flex: 1;
+}
+
+.stu-input--code {
+  font-family: monospace;
+  letter-spacing: 0.02em;
+}
+
+.stu-code-gen-btn {
+  flex-shrink: 0;
+  padding: 0 var(--space-3);
+  min-height: 44px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stu-code-gen-btn:hover {
+  background: var(--color-bg-subtle);
+}
+
+/* Reused across several fields as a small explanatory line under an input —
+   student code, role picker (loading/empty states). One rule, multiple call
+   sites, same convention as .stu-guardian-meta's "quiet metadata" tone. */
+.stu-field-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
   margin: 0;
 }
 
@@ -6785,6 +7384,38 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* PRD Tier 6 / Problem 6.10 — restyle target's "avatar, name, class, code
+   badge" header layout. Sits between the name and the status badge in
+   .stu-detail-title-wrap (already flex-column with gap — no extra layout
+   work needed). Class is plain text (informational); code is a badge
+   (matches .stu-status-badge's pill shape, but neutral-toned and
+   monospaced, since it's an identifier, not a state). */
+.stu-detail-meta-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.stu-detail-class-label {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.stu-detail-code-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: monospace;
+  letter-spacing: 0.02em;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-subtle);
+  white-space: nowrap;
 }
 
 .stu-info-back-link {
@@ -7102,6 +7733,16 @@ body {
   text-align: right;
 }
 
+/* Pre-existing gap closed (PRD Tier 6 / Problem 6.10 pass) — composes onto
+   .stu-brief-fact-value (className="stu-brief-fact-value stu-brief-code")
+   for the student code specifically, monospaced same as .stu-input--code
+   and .stu-detail-code-badge, so the same value reads consistently
+   wherever it appears in this module. */
+.stu-brief-code {
+  font-family: monospace;
+  letter-spacing: 0.02em;
+}
+
 /* Session 16 — replaces the old presence-only "flag" (owner asked for the
    actual note text on Brief, not a pointer elsewhere). Not a .stu-brief-
    fact-row — that layout is a short label/value pair with right-aligned
@@ -7312,6 +7953,65 @@ body {
 .stu-guardian-form-footer {
   display: flex;
   gap: var(--space-2);
+}
+
+/* Pre-existing gaps closed (PRD Tier 6 / Problem 6.10 pass) — the
+   search-first guardian-linking flow inside .stu-guardian-form (Add
+   guardian → search existing before creating new). Row/info deliberately
+   mirror .stu-guardian-row/.stu-guardian-info exactly (same shape, same
+   tokens) since visually these are the same "guardian summary" pattern,
+   just from a search result instead of an already-linked list. */
+.stu-guardian-search-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.stu-guardian-search-status {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin: 0;
+  padding: var(--space-2) 0;
+}
+
+.stu-guardian-search-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.stu-guardian-search-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.stu-guardian-search-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Composes onto .stu-save-btn (className="stu-save-btn stu-guardian-link-btn")
+   — same primary-button look, just narrower since it sits inline in a list
+   row rather than spanning a form footer. */
+.stu-guardian-link-btn {
+  flex: none;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
 }
 
 .stu-add-guardian-btn {
@@ -7648,8 +8348,25 @@ body {
   cursor: pointer;
 }
 
+/* Pre-existing gap closed (PRD Tier 6 / Problem 6.10 pass) — same shape as
+   .stu-confirm-danger above, warning tone instead of danger. Used for every
+   status change except the alumni transition (which is the one genuinely
+   destructive-feeling change and keeps the danger treatment). */
+.stu-confirm-warn {
+  flex: 1;
+  min-height: 40px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-warning);
+  color: #fff;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .stu-confirm-cancel:disabled,
-.stu-confirm-danger:disabled {
+.stu-confirm-danger:disabled,
+.stu-confirm-warn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
@@ -14397,6 +15114,236 @@ body {
   margin-top: var(--space-1);
 }
 
+/* ── Welcome post block editor (owner request, 2026-07-11) ──────────────────
+   Heading + ordered paragraph/image blocks, replacing the plain-text
+   welcome-message textarea. Reuses .set-input/.set-textarea for the
+   underlying fields — only the block chrome (add/move/remove controls,
+   image preview) is new here. */
+
+.set-legacy-msg-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-warning-subtle, #fffbeb);
+  border: 1px solid var(--color-warning-200, #fde68a);
+  border-radius: var(--radius-md);
+}
+
+.set-legacy-msg-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.set-legacy-msg-btn {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-warning-800, #92400e);
+  background: var(--color-surface);
+  border: 1px solid var(--color-warning-200, #fde68a);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.set-legacy-msg-btn:hover {
+  background: var(--color-warning-100, #fef3c7);
+}
+
+.set-post-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.set-post-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised, #f3f4f6);
+}
+
+.set-post-block-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.set-post-block-move {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  padding: 0;
+}
+
+.set-post-block-move:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.set-post-block-move:not(:disabled):hover {
+  border-color: var(--color-brand-600);
+  color: var(--color-brand-600);
+}
+
+.set-post-block-type {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+  flex: 1;
+}
+
+.set-post-block-remove {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.set-post-block-remove:hover {
+  background: var(--color-danger-subtle, #fef2f2);
+  color: var(--color-danger, #dc2626);
+}
+
+.set-post-image-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.set-post-image-preview {
+  width: 100%;
+  max-height: 240px;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.set-post-add-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.set-post-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-brand-600);
+  background: var(--color-brand-subtle);
+  border: 1px dashed var(--color-brand-300, #93c5fd);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  min-height: 40px;
+}
+
+.set-post-add-btn:hover {
+  background: var(--color-brand-100, #dbeafe);
+}
+
+.set-post-add-btn--upload {
+  position: relative;
+}
+
+.set-post-image-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Homepage posts list (owner request, 2026-07-11 follow-up #2) ─────────
+   Several ordered, independently expandable posts — one level up in
+   visual weight from a single .set-post-block (each of these contains a
+   full block editor inside it), so it gets its own card treatment
+   rather than reusing that class directly. */
+
+.set-homepage-posts-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-2);
+}
+
+.set-homepage-posts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.set-homepage-posts-empty {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.set-homepage-post-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.set-homepage-post-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.set-homepage-post-move-group {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.set-homepage-post-card-label {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.set-homepage-post-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.set-homepage-post-add-btn {
+  align-self: flex-start;
+}
+
 /* ── Language chips ──────────────────────────────────────────────────────── */
 
 .set-lang-chips {
@@ -15994,4 +16941,30 @@ body {
 
 .stu-status-filter-clear:hover {
   filter: brightness(0.96);
+}
+
+/* PRD Tier 6 / Problem 6.10 — bulk "print class ID cards" action, inline
+   with the student count text. Small text-button shape (not a full pill)
+   since it sits directly in a <p>, same "reads as clearly actionable but
+   doesn't compete with the count" intent as .stu-status-filter-clear above,
+   just without the pill background — this one isn't a clearable filter
+   state, it's a one-shot action. */
+.stu-print-class-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text-subtle);
+  cursor: pointer;
+}
+
+.stu-print-class-btn:hover {
+  background: var(--color-bg-subtle);
+  color: var(--color-text);
 }

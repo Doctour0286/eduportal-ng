@@ -81,12 +81,33 @@ import {
   type GuardianSearchResult,
   type GuardianDetail,
 } from '../services/guardianService'
+// PRD Tier 6 / Problem 6.10 — student ID card print feature. Same Blob-URL
+// pattern as printTimetable.ts (see that file's own header comment for why
+// document.write() on a blank window.open('') is unsafe on Android Chrome).
+import { printStudentIdCards, type IdCardStudent } from '../services/printStudentIdCards'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface StudentsModuleProps {
   schoolId: string
   isAdmin: boolean
+  /** PRD Tier 6 / Problem 6.10 — needed for the ID card print header, same
+   *  reasoning and same threading pattern as TimetableModule.tsx's own
+   *  schoolName prop (added there for its print page header). App.tsx
+   *  passes schoolName={school.name} into this module's call site, same
+   *  as it already does for TimetableModule. */
+  schoolName: string
+  /** PRD Tier 6 / Problem 6.10 follow-up (owner-supplied reference design,
+   *  2026-07-10) — "space for school logo" on the printed ID card.
+   *  schools.logo_url per §7.1; public bucket (unlike student photos,
+   *  which are private and need a signed URL), so this is passed straight
+   *  through with no resolution step. Optional/nullable — a school that
+   *  hasn't set a logo yet still gets a working card, just without the
+   *  logo mark, same graceful-fallback convention as everywhere else in
+   *  this file. App.tsx must pass schoolLogoUrl={school.logo_url} — see
+   *  that file's existing school.logo_url reads (header <img>,
+   *  GuardianPortal's logoUrl prop) for the pattern to copy. */
+  schoolLogoUrl?: string | null
   /** Optional intent from a dashboard quick action — 'add_student' opens the
    *  add-student form immediately on mount, same as tapping the in-module
    *  "Add student" button. Per PRD Problem 2.2c — no new form is built here,
@@ -172,7 +193,7 @@ type DetailTab = 'brief' | 'info' | 'guardians' | 'status'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StudentsModule({ schoolId, intent, onNavigate }: StudentsModuleProps) {
+export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, intent, onNavigate }: StudentsModuleProps) {
 
   // ── Auth: permission gates (PRD Tier 3 / Session 10, 2026-07-01) ────────────
   // Read directly via useAuthStore, same pattern as AttendanceModule.tsx's
@@ -1191,6 +1212,46 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
     setPickerExpanded(false)
   }
 
+  // ─── ID card print (PRD Tier 6 / Problem 6.10) ────────────────────────────
+  //
+  // PRD §4.10 explicitly scopes this "admin-only" — reusing canManageStudents
+  // (students.records.manage) rather than inventing a new permission key,
+  // since that's already this module's own gate for the analogous "+ Add
+  // student" action (both are office/admin-level record actions, not
+  // read-level access). Two entry points: a single-card print from the
+  // detail sheet header (one student, whichever is currently open), and a
+  // bulk "print class" action from the list header (every student currently
+  // shown in filteredStudents — respects whatever class/search filter is
+  // active, same "what you see is what you get" contract as the rest of
+  // this module's filtering). Both funnel through the same
+  // toIdCardStudent() mapper so photo resolution (photoUrls) and the
+  // class_path_label fallback stay identical between the two paths.
+  function toIdCardStudent(s: Student): IdCardStudent {
+    return {
+      id: s.id,
+      full_name: s.full_name,
+      class_path_label: s.class_node_id ? (classPathMap.get(s.class_node_id) ?? null) : null,
+      student_code: s.student_code,
+      photo_url: s.photo_url ? (photoUrls.get(s.photo_url) ?? null) : null,
+    }
+  }
+
+  function printSingleStudentIdCard(student: Student) {
+    printStudentIdCards({
+      schoolName,
+      schoolLogoUrl,
+      students: [toIdCardStudent(student)],
+    })
+  }
+
+  function printClassIdCards() {
+    printStudentIdCards({
+      schoolName,
+      schoolLogoUrl,
+      students: filteredStudents.map(toIdCardStudent),
+    })
+  }
+
   function renderHeader() {
     // Session 32 (owner request: "same kind of intelligent navigation" as
     // AttendanceModule's whole-parent view) — two-tier pill picker:
@@ -1440,6 +1501,19 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
             Showing: {statusLabel(statusFilter)} ×
           </button>
         )}
+        {/* PRD Tier 6 / Problem 6.10 — bulk ID card print for whatever's
+            currently shown (respects class filter + search, same
+            "what you see is what you get" contract as the count text
+            itself). Admin-only per §4.10; hidden when the list is empty. */}
+        {canManageStudents && shown > 0 && (
+          <button
+            type="button"
+            className="stu-print-class-btn"
+            onClick={printClassIdCards}
+          >
+            <Icon name="printer" size={14} /> Print ID cards
+          </button>
+        )}
       </p>
     )
   }
@@ -1552,6 +1626,24 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
             )}
             <div className="stu-detail-title-wrap">
               <h3 className="stu-detail-name">{detailStudent.full_name}</h3>
+              {/* PRD Tier 6 / Problem 6.10 — restyle target explicitly calls
+                  for "avatar, name, class, code badge" at a glance in the
+                  popup header, not two taps deep under Brief's "More
+                  details" toggle (where student_code previously lived
+                  alone). Class was already shown in Brief's Tier 1; this
+                  row surfaces both together at the header level instead,
+                  without removing either from Brief — same data, promoted
+                  visibility, not a duplicate source of truth. */}
+              {(detailStudent.class_path_label || detailStudent.student_code) && (
+                <div className="stu-detail-meta-row">
+                  {detailStudent.class_path_label && (
+                    <span className="stu-detail-class-label">{detailStudent.class_path_label}</span>
+                  )}
+                  {detailStudent.student_code && (
+                    <span className="stu-detail-code-badge">{detailStudent.student_code}</span>
+                  )}
+                </div>
+              )}
               <span className={`stu-status-badge stu-status-badge--${detailStudent.status}`}>
                 {statusLabel(detailStudent.status)}
               </span>
@@ -1569,6 +1661,21 @@ export default function StudentsModule({ schoolId, intent, onNavigate }: Student
                 </div>
               )}
             </div>
+            {/* PRD Tier 6 / Problem 6.10 — print this one student's ID card.
+                Admin-only per §4.10, reusing canManageStudents. Placed in
+                the header (not a tab) so it's reachable regardless of which
+                detail tab is open, same reasoning as the close button
+                beside it. */}
+            {canManageStudents && (
+              <button
+                className="stu-detail-print-btn"
+                onClick={() => printSingleStudentIdCard(detailStudent)}
+                aria-label="Print ID card"
+                title="Print ID card"
+              >
+                <Icon name="printer" size={16} />
+              </button>
+            )}
             <button className="stu-form-close" onClick={closeDetail} aria-label="Close"><Icon name="x" size={16} /></button>
           </div>
 
