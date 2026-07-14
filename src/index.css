@@ -1050,7 +1050,7 @@ body {
   height: 88px;
   border-radius: var(--radius-lg, 0.75rem);
   object-fit: cover;
-  border: 1px solid var(--color-border, #e2e8f0);
+  border: 2px solid var(--color-brand-200, var(--color-border, #e2e8f0));
   background: var(--color-surface, #ffffff);
 }
 
@@ -1206,6 +1206,33 @@ body {
   white-space: pre-wrap;
 }
 
+/* Rich text heading levels (owner request) — block-level, so the whole
+   line renders as a real h2/h3/h4 element, not just a bigger <p>. H3/H4
+   pull their color from the school's brand scale so in-body sub-headings
+   visually tie back to the school's identity, same as every other
+   brand-driven accent on this page; H2 stays neutral (already the
+   largest/boldest heading in body content, doesn't need color to read
+   as a heading). */
+.public-home-post-paragraph--h2 {
+  font-size: var(--text-xl, 1.25rem);
+  font-weight: 700;
+  white-space: normal;
+}
+
+.public-home-post-paragraph--h3 {
+  font-size: var(--text-lg, 1.125rem);
+  font-weight: 700;
+  color: var(--color-brand-700, var(--color-brand-600, #1d4ed8));
+  white-space: normal;
+}
+
+.public-home-post-paragraph--h4 {
+  font-size: var(--text-base, 1rem);
+  font-weight: 700;
+  color: var(--color-brand-600, #2563eb);
+  white-space: normal;
+}
+
 .public-home-post-figure {
   margin: 0;
   display: flex;
@@ -1248,6 +1275,7 @@ body {
   padding: var(--space-5, 1.25rem);
   background: var(--color-bg-subtle, #f9fafb);
   border: 1px solid var(--color-border, #e2e8f0);
+  border-left: 3px solid var(--color-brand-300, var(--color-brand-600, #93c5fd));
   border-radius: var(--radius-lg, 0.75rem);
 }
 
@@ -1309,6 +1337,9 @@ body {
 }
 
 .public-home-section-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 0.5rem);
   font-size: var(--text-sm, 0.875rem);
   font-weight: 700;
   text-transform: uppercase;
@@ -1317,11 +1348,20 @@ body {
   margin: 0 0 var(--space-3, 0.75rem);
 }
 
+.public-home-section-heading::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--color-brand-600, #2563eb);
+}
+
 /* ─── Contact ──────────────────────────────────────────────────────── */
 
 .public-home-contact {
   padding-top: var(--space-5, 1.25rem);
-  border-top: 1px solid var(--color-border, #e2e8f0);
+  border-top: 2px solid var(--color-brand-100, var(--color-border, #e2e8f0));
 }
 
 .public-home-contact-list {
@@ -1356,7 +1396,7 @@ body {
 
 .public-home-announcements {
   padding-top: var(--space-5, 1.25rem);
-  border-top: 1px solid var(--color-border, #e2e8f0);
+  border-top: 2px solid var(--color-brand-100, var(--color-border, #e2e8f0));
 }
 
 .public-home-ann-list {
@@ -15335,6 +15375,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-3);
   padding-top: var(--space-2);
   border-top: 1px solid var(--color-border);
@@ -15342,6 +15383,179 @@ body {
 
 .set-homepage-post-add-btn {
   align-self: flex-start;
+}
+
+/* Collapsed row (the gate itself) — a post shows only its title and
+   dates until this row is tapped; no edit or delete control exists at
+   this level, by design (owner-requested mistake-prevention: opening a
+   post is the one deliberate step required before it can be touched). */
+.set-homepage-post-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-1) 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.set-homepage-post-row-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.set-homepage-post-row-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-homepage-post-row-meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.set-homepage-post-row-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+
+.set-homepage-post-row:hover .set-homepage-post-row-title {
+  color: var(--color-brand-600);
+}
+
+/* New-post title prompt — creation asks for a title first, matching the
+   same gating principle: nothing exists (and nothing can be deleted)
+   until a real title has been given. */
+.set-homepage-post-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px dashed var(--color-brand-300, #93c5fd);
+  border-radius: var(--radius-lg);
+  background: var(--color-brand-subtle);
+}
+
+.set-homepage-post-new-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* Delete confirmation — requires typing the post's own title back, not
+   just a window.confirm() dialog, since a reflexive "OK" tap is exactly
+   how a whole page gets deleted by accident. */
+.set-homepage-post-delete-trigger {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-danger, #dc2626);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-2) 0;
+  margin-right: auto;
+}
+
+.set-homepage-post-delete-trigger:hover {
+  text-decoration: underline;
+}
+
+.set-homepage-post-delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger, #dc2626);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-subtle, #fef2f2);
+}
+
+.set-homepage-post-delete-warning {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  margin: 0;
+}
+
+.set-homepage-post-delete-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.btn--danger {
+  background: var(--color-danger, #dc2626);
+  color: #ffffff;
+  border: 1px solid var(--color-danger-700, #b91c1c);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--color-danger-700, #b91c1c);
+}
+
+.btn--danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Rich-text block toolbar (owner request: H2-H4 heading level + Bold/
+   Italic per text block). Sits directly above the block's textarea. */
+.set-post-block-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.set-post-level-select {
+  font-size: var(--text-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.set-post-format-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  padding: 0;
+}
+
+.set-post-format-btn--italic {
+  font-style: italic;
+}
+
+.set-post-format-btn:hover {
+  border-color: var(--color-brand-600);
+  color: var(--color-brand-600);
+}
+
+.set-post-format-btn--active {
+  background: var(--color-brand-subtle);
+  border-color: var(--color-brand-600);
+  color: var(--color-brand-600);
 }
 
 /* ── Language chips ──────────────────────────────────────────────────────── */
@@ -16967,4 +17181,133 @@ body {
 .stu-print-class-btn:hover {
   background: var(--color-bg-subtle);
   color: var(--color-text);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Course attendance (PRD Tier 8 / Problem 8.7, SESSION 58)
+   CourseAttendanceModule.tsx — per-course attendance register, higher-ed
+   track. Every class below is genuinely new (confirmed absent from this
+   file before this addition); every .att-* class the component also
+   references (pills, buttons, empty/error states, badges) is reused as-is
+   from the rules above and intentionally NOT redefined here — see the
+   components own file header for why. Tokens and the background/border/
+   color badge triplet below match the existing .att-*/.res-* conventions
+   exactly (e.g. the warning-subtle pattern already used by .res-approve-badge--incomplete),
+   not a new palette invented for this module.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Offering picker: collapsed summary (mirrors .att- collapse-on-select
+   pattern used elsewhere in this codebase for the same picked-now-get-out-of-the-way interaction) ─────────────────────────────────────────────── */
+
+.catt-picker-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+  text-align: left;
+}
+
+.catt-picker-summary:hover {
+  border-color: var(--color-brand-600, var(--color-primary));
+}
+
+.catt-picker-summary-code {
+  font-weight: 700;
+  font-size: var(--text-sm);
+  color: var(--color-brand-600, var(--color-primary));
+  flex-shrink: 0;
+}
+
+.catt-picker-summary-title {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Offering pill contents — course code + title inside .att-pill, plus
+   the lecturer name shown only in the admin (all-offerings) view ───────── */
+
+.catt-pill-code {
+  font-weight: 700;
+}
+
+.catt-pill-staff {
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+/* ── Session count, shown next to the date input once at least one
+   course_attendance_session row exists for the selected offering ──────── */
+
+.catt-session-count {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Student row name block — matric number, carryover flag, and
+   eligibility % sit alongside the students name, ahead of the status
+   buttons. Wraps rather than truncates on narrow screens since all three
+   are short tokens, not prose. ──────────────────────────────────────────── */
+
+.catt-student-name-block {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.catt-row-matric {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Carryover — warning-toned, matching the background/color pairing already used by .res-approve-badge--incomplete rather than inventing a new palette;
+   a carryover registration is informational context here, not an error,
+   but it IS something a lecturer should notice at a glance. */
+
+.catt-carryover-badge {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+  white-space: nowrap;
+}
+
+/* Attendance-eligibility % badge — informational only this session, not
+   wired to block exam entry (SESSION 58 card, verbatim). Default state
+   uses the brand-subtle/brand pairing (neutral-positive, showing the number plainly); the below-threshold state switches to the danger-subtle/danger
+   pairing so a lecturer scanning the register can spot a student below
+   their own schools configured threshold without reading every number. */
+
+.catt-elig-badge {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-brand-subtle, var(--color-primary-subtle));
+  color: var(--color-brand-600, var(--color-primary));
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.catt-elig-badge--below {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
 }

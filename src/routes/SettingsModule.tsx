@@ -37,7 +37,7 @@ import { applyBrandTheme, type ThemeMode } from '../services/themeService'
 import { Icon } from '../components/icons'
 import {
   loadSchoolSettings,       updateSchoolSettings,
-  loadPublicConfig,         savePublicConfig, uploadWelcomePostImage,
+  loadPublicConfig,         savePublicConfig, uploadWelcomePostImage, uploadSchoolLogo,
   loadHomepagePosts,        createHomepagePost, updateHomepagePost,
   deleteHomepagePost,       reorderHomepagePosts,
   loadSessions,             upsertSession,
@@ -51,10 +51,24 @@ import {
   loadAuditLog,             loadAuditTableNames,
   buildClassTree,           loadClassNodes, upsertClassNode,
   loadStudentRoles,         saveStudentRole, deleteStudentRole,
+  loadFaculties,            upsertFaculty,
+  loadDepartments,          upsertDepartment,
+  loadProgrammes,           upsertProgramme,
+  loadProgrammeLevels,      upsertProgrammeLevel,
+  searchStudents,           loadCurrentSession,
+  loadPlacementsForProgramme, upsertPlacement,
+  loadCourses,              upsertCourse,
+  loadCurriculum,           addCurriculumEntry, removeCurriculumEntry,
+  loadHigherEdGradeScale,   upsertHigherEdGradeBand, deleteHigherEdGradeBand,
+  loadCgpaPolicy,           upsertCgpaPolicy,
+  loadCourseOfferings,      upsertCourseOffering, deleteCourseOffering,
   type SchoolSettings,
   type SchoolPublicConfig,
   type WelcomePost,
   type WelcomePostBlock,
+  type WelcomePostTextBlock,
+  type WelcomePostTextRun,
+  type WelcomePostTextLevel,
   type HomepagePost,
   type Period,
   type Subject,
@@ -68,36 +82,133 @@ import {
   type StaffListItem,
   type AuditEntry,
   type StudentRole,
+  type Faculty,
+  type Department,
+  type Programme,
+  type ProgrammeLevel,
+  type StudentSearchResult,
+  type StudentProgrammePlacement,
+  type Course,
+  type CurriculumEntry,
+  type GradeScaleBand,
+  type CgpaPolicy,
+  type CourseOffering,
 } from '../services/settingsService'
+
+// Same fixed union as onboardingService.ts's InstitutionCategory — kept in
+// sync manually since this file doesn't import from onboardingService.ts
+// (settingsService.ts is this module's own data-access layer, per its own
+// header comment's scope). If this union changes, update both files and
+// record it in master-plan §12, per §3.16's amendment.
+const HIGHER_INSTITUTION_SCHOOL_TYPES = ['university', 'polytechnic', 'college_of_education', 'other']
+function isHigherInstitutionSchoolType(schoolType: string | null | undefined): boolean {
+  return !!schoolType && HIGHER_INSTITUTION_SCHOOL_TYPES.includes(schoolType)
+}
+
+// All values the onboarding wizard's institution-category picker can write
+// (HIGHER_INSTITUTION_SCHOOL_TYPES plus 'secondary'). Once school_type holds
+// one of these, it was set via the wizard's saveInstitutionCategory, not
+// hand-typed — SchoolTab locks the field at that point instead of allowing
+// free-text edits that could silently overwrite a valid category with an
+// arbitrary string (this is what caused the wizard-looks-unchanged bug for
+// existing schools; see SESSION 55 follow-up). A school that has never gone
+// through the wizard still gets the old free-text input, unchanged.
+const RECOGNIZED_SCHOOL_TYPES = ['secondary', ...HIGHER_INSTITUTION_SCHOOL_TYPES]
+function isRecognizedSchoolType(schoolType: string | null | undefined): boolean {
+  return !!schoolType && RECOGNIZED_SCHOOL_TYPES.includes(schoolType)
+}
+
+const SCHOOL_TYPE_DISPLAY_LABELS: Record<string, string> = {
+  secondary: 'Secondary / Basic school',
+  university: 'University',
+  polytechnic: 'Polytechnic / Monotechnic',
+  college_of_education: 'College of Education',
+  other: 'Other higher institution',
+}
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
-type SettingsTab = 'school' | 'calendar' | 'schedule' | 'classes' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
+type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
-const TABS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
-  { id: 'school',        label: 'School',        icon: <Icon name="school" size={18} /> },
-  { id: 'calendar',      label: 'Sessions',      icon: <Icon name="calendar" size={18} /> },
-  { id: 'schedule',      label: 'Schedule',      icon: <Icon name="clock" size={18} /> },
-  { id: 'classes',       label: 'Classes',       icon: <Icon name="tag" size={18} /> },
-  { id: 'subjects',      label: 'Subjects',      icon: <Icon name="book-open" size={18} /> },
-  { id: 'roles',         label: 'Roles',         icon: <Icon name="key" size={18} /> },
-  { id: 'student-roles', label: 'Student roles', icon: <Icon name="graduation-cap" size={18} /> },
-  { id: 'staff',         label: 'Staff',         icon: <Icon name="users" size={18} /> },
-  { id: 'audit',         label: 'Audit log',     icon: <Icon name="clipboard-list" size={18} /> },
-]
+// Institution tab is hidden entirely when school_type is not a
+// higher-institution type — per SESSION 55 §0 instruction 5 — so TABS is
+// built conditionally rather than filtered by a render-time boolean check
+// on every tab bar render.
+function buildTabs(schoolType: string | null | undefined): { id: SettingsTab; label: string; icon: React.ReactNode }[] {
+  const isHigherEd = isHigherInstitutionSchoolType(schoolType)
+  const tabs: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
+    { id: 'school',        label: 'School',        icon: <Icon name="school" size={18} /> },
+    { id: 'homepage',      label: 'Homepage',      icon: <Icon name="globe" size={18} /> },
+    { id: 'calendar',      label: 'Sessions',      icon: <Icon name="calendar" size={18} /> },
+    { id: 'schedule',      label: 'Schedule',      icon: <Icon name="clock" size={18} /> },
+  ]
+  if (isHigherEd) {
+    tabs.push({ id: 'institution', label: 'Institution', icon: <Icon name="graduation-cap" size={18} /> })
+    // Curriculum depends on a real programme/level structure existing
+    // (PRD SESSION 56, depends on SESSION 55) — shown alongside Institution
+    // for the same higher-ed-only reason, not gated further, since an empty
+    // structure just means the tab's pickers have nothing to select yet
+    // (same "fine, just nothing to show" pattern as Faculties being optional).
+    tabs.push({ id: 'curriculum', label: 'Curriculum', icon: <Icon name="book-open" size={18} /> })
+    // Course offerings (unscheduled interim step before SESSION 60, PRD Tier
+    // 8 / Problem 8.7 — closes the gap SESSION 58's close-out surfaced: "no
+    // course_offerings creation UI exists anywhere"). Sits between
+    // Curriculum and Grading — an offering ("this course, this session/
+    // term, this lecturer") is the real per-session object that
+    // registration and attendance both key off, distinct from the
+    // catalogue (courses) and the requirement structure (curriculum).
+    tabs.push({ id: 'offerings', label: 'Offerings', icon: <Icon name="users" size={18} /> })
+    // Grade scale + CGPA policy (PRD Tier 8 / Problem 8.7, SESSION 59,
+    // §7.27.4). Higher-ed-only for the same reason Institution/Curriculum
+    // are: grade_scales rows here are the higher-ed shape (scale_max/
+    // grade_point populated), and cgpa_policy has no secondary-school
+    // meaning at all. A secondary school's own grading (CA/exam bands) is
+    // configured elsewhere (Results module), not through this tab.
+    tabs.push({ id: 'grading', label: 'Grading', icon: <Icon name="clipboard-list" size={18} /> })
+  } else {
+    tabs.push({ id: 'classes', label: 'Classes', icon: <Icon name="tag" size={18} /> })
+  }
+  tabs.push(
+    { id: 'subjects',      label: 'Subjects',      icon: <Icon name="book-open" size={18} /> },
+    { id: 'roles',         label: 'Roles',         icon: <Icon name="key" size={18} /> },
+    { id: 'student-roles', label: 'Student roles', icon: <Icon name="graduation-cap" size={18} /> },
+    { id: 'staff',         label: 'Staff',         icon: <Icon name="users" size={18} /> },
+    { id: 'audit',         label: 'Audit log',     icon: <Icon name="clipboard-list" size={18} /> },
+  )
+  return tabs
+}
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export default function SettingsModule({ schoolId, isAdmin, themeMode }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode }) {
+export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolType }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode; schoolType?: string | null }) {
   // themeMode is only consumed by SchoolTab (the brand-color picker), but
   // is accepted here and passed down since this is the module's entry
   // point — matches the pattern App.tsx already uses for other props
   // that only one sub-tab actually needs (e.g. schoolId itself).
+  //
+  // schoolType (new, SESSION 55): needed here purely to decide which tab
+  // — Classes or Institution — appears in TABS, per §0 instruction 5
+  // ("hidden entirely when school_type is not a higher-institution type").
+  // This is the app-level UI branch reading school_type; the §3.16
+  // amendment's own recorded exception is App.tsx's academic-engine
+  // selection, not this tab-visibility check — both are legitimate reads
+  // of the same column for different reasons, but flagged here so a future
+  // contributor doesn't count this as a second violation of §3.16's "never
+  // branch on it again" rule. App.tsx must pass its already-fetched
+  // schoolType through to this component's props; it does not fetch its
+  // own copy here.
   const [activeTab, setActiveTab] = useState<SettingsTab>('school')
+  const tabs = buildTabs(schoolType)
 
   if (!isAdmin) return null
+
+  // If the active tab was 'classes'/'institution' and school_type changes
+  // out from under it (shouldn't normally happen mid-session, but defends
+  // against a stale tab reference), fall back to 'school' rather than
+  // rendering a tab no longer in the list.
+  const safeActiveTab = tabs.some(t => t.id === activeTab) ? activeTab : 'school'
 
   return (
     <div className="set-root">
@@ -108,12 +219,12 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode }: { schoo
 
       {/* Horizontal scrollable tab bar */}
       <div className="set-tabs" role="tablist">
-        {TABS.map(t => (
+        {tabs.map(t => (
           <button
             key={t.id}
             role="tab"
-            aria-selected={activeTab === t.id}
-            className={`set-tab${activeTab === t.id ? ' set-tab--active' : ''}`}
+            aria-selected={safeActiveTab === t.id}
+            className={`set-tab${safeActiveTab === t.id ? ' set-tab--active' : ''}`}
             onClick={() => setActiveTab(t.id)}
           >
             <span className="set-tab-icon">{t.icon}</span>
@@ -123,15 +234,20 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode }: { schoo
       </div>
 
       <div className="set-body">
-        {activeTab === 'school'    && <SchoolTab   schoolId={schoolId} themeMode={themeMode} />}
-        {activeTab === 'calendar'  && <CalendarTab schoolId={schoolId} />}
-        {activeTab === 'schedule'  && <ScheduleTab schoolId={schoolId} />}
-        {activeTab === 'classes'   && <ClassesTab  schoolId={schoolId} />}
-        {activeTab === 'subjects'  && <SubjectsTab schoolId={schoolId} />}
-        {activeTab === 'roles'         && <RolesTab        schoolId={schoolId} />}
-        {activeTab === 'student-roles' && <StudentRolesTab schoolId={schoolId} />}
-        {activeTab === 'staff'         && <StaffTab        schoolId={schoolId} />}
-        {activeTab === 'audit'         && <AuditTab        schoolId={schoolId} />}
+        {safeActiveTab === 'school'      && <SchoolTab      schoolId={schoolId} themeMode={themeMode} />}
+        {safeActiveTab === 'homepage'    && <HomepageTab    schoolId={schoolId} />}
+        {safeActiveTab === 'calendar'    && <CalendarTab    schoolId={schoolId} />}
+        {safeActiveTab === 'schedule'    && <ScheduleTab    schoolId={schoolId} />}
+        {safeActiveTab === 'classes'     && <ClassesTab     schoolId={schoolId} />}
+        {safeActiveTab === 'institution' && <InstitutionTab schoolId={schoolId} />}
+        {safeActiveTab === 'curriculum'  && <CurriculumTab  schoolId={schoolId} />}
+        {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
+        {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
+        {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}
+        {safeActiveTab === 'roles'         && <RolesTab        schoolId={schoolId} />}
+        {safeActiveTab === 'student-roles' && <StudentRolesTab schoolId={schoolId} />}
+        {safeActiveTab === 'staff'         && <StaffTab        schoolId={schoolId} />}
+        {safeActiveTab === 'audit'         && <AuditTab        schoolId={schoolId} />}
       </div>
     </div>
   )
@@ -200,6 +316,20 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
   )
 }
 
+// Debounced value — used by the student search picker below (§7.27.1a).
+// Small and local rather than a new file: this is the only place in the
+// module that needs debounce, since every other tab's search (e.g. StaffTab)
+// filters an already-loaded, small, in-memory list instead of querying per
+// keystroke.
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(t)
+  }, [value, delayMs])
+  return debounced
+}
+
 function Skeleton({ lines = 4 }: { lines?: number }) {
   return (
     <div className="set-skel">
@@ -229,13 +359,20 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
  * and PublicHomepage.tsx's own null-check / legacy-message-fallback
  * branch keeps working exactly as documented.
  */
+/** Trims every run's text in a text block and drops any run left empty;
+ *  a text block with zero non-empty runs left is dropped entirely. Image
+ *  blocks pass through untouched. */
+function cleanBlocks(blocks: WelcomePostBlock[]): WelcomePostBlock[] {
+  return blocks
+    .map(b => b.type === 'text' ? { ...b, runs: b.runs.map(r => ({ ...r, text: r.text.trim() })).filter(r => r.text.length > 0) } : b)
+    .filter(b => b.type === 'image' || b.runs.length > 0)
+}
+
 function buildWelcomePost(heading: string, blocks: WelcomePostBlock[]): WelcomePost | null {
   const trimmedHeading = heading.trim()
-  const cleanBlocks = blocks
-    .map(b => b.type === 'paragraph' ? { ...b, text: b.text.trim() } : b)
-    .filter(b => b.type === 'image' || b.text.length > 0)
-  if (!trimmedHeading && cleanBlocks.length === 0) return null
-  return { heading: trimmedHeading, blocks: cleanBlocks }
+  const cb = cleanBlocks(blocks)
+  if (!trimmedHeading && cb.length === 0) return null
+  return { heading: trimmedHeading, blocks: cb }
 }
 
 // ─── Homepage posts editor (owner request, 2026-07-11 follow-up #2) ───────
@@ -270,6 +407,15 @@ interface PostDraft {
   saving: boolean
   error: string | null
   dirty: boolean
+  created_at: string | null
+  updated_at: string | null
+  /** Gating (owner request, mistake-prevention): a post starts collapsed
+   *  to a title-only row in the list. Clicking the title is the only way
+   *  to reveal its editor/delete control — this deliberately keeps
+   *  destructive actions (and accidental edits) behind one intentional
+   *  extra tap, rather than every post's full editor + delete button
+   *  sitting open and reachable at all times. */
+  open: boolean
 }
 
 function homepagePostToDraft(p: HomepagePost): PostDraft {
@@ -282,26 +428,43 @@ function homepagePostToDraft(p: HomepagePost): PostDraft {
     saving: false,
     error: null,
     dirty: false,
+    created_at: p.created_at,
+    updated_at: p.updated_at,
+    open: false,
   }
 }
 
-function newPostDraft(sortOrder: number): PostDraft {
-  return {
-    id: null,
-    heading: '',
-    blocks: [],
-    always_expanded: false,
-    sort_order: sortOrder,
-    saving: false,
-    error: null,
-    dirty: true, // a brand-new draft always needs its first save
-  }
+const HEADING_LEVEL_OPTIONS: { value: WelcomePostTextLevel; label: string }[] = [
+  { value: 'p',  label: 'Normal text' },
+  { value: 'h2', label: 'Heading 2' },
+  { value: 'h3', label: 'Heading 3' },
+  { value: 'h4', label: 'Heading 4' },
+]
+
+/** A text block's editable content, flattened to one run for this plain-
+ *  textarea editor (no cursor-selection engine exists here, so bold/
+ *  italic are whole-block toggles rather than a mid-sentence selection —
+ *  see PostBlockFields' own doc comment for the full reasoning). Reads
+ *  the first run's flags/text; a block with multiple runs (possible if
+ *  data is ever produced another way) is still readable — later runs'
+ *  text is concatenated in, but its own individual bold/italic flags are
+ *  not separately editable here. */
+function firstRunOf(block: WelcomePostTextBlock): WelcomePostTextRun {
+  return block.runs[0] ?? { text: '' }
+}
+
+function textOf(block: WelcomePostTextBlock): string {
+  return block.runs.map(r => r.text).join('')
 }
 
 /** Shared paragraph/image block editor — identical UI/behavior to the
  *  welcome-post editor above, factored out so the two don't drift into
  *  two different block-editing experiences for the same underlying
- *  WelcomePostBlock shape. */
+ *  WelcomePostBlock shape. Text blocks (owner request, rich text
+ *  upgrade): each gets a heading-level selector (Normal/H2/H3/H4 — H1 is
+ *  deliberately not offered, matching this app's own documented
+ *  heading-hierarchy reasoning) and Bold/Italic toggle buttons, applied
+ *  to the block's whole line of text as a single run. */
 function PostBlockFields({
   blocks,
   onChange,
@@ -314,12 +477,20 @@ function PostBlockFields({
   const [imageUploading, setImageUploading] = useState(false)
   const [imageUploadError, setImageUploadError] = useState<string | null>(null)
 
-  function addParagraphBlock() {
-    onChange([...blocks, { type: 'paragraph', text: '' }])
+  function addTextBlock() {
+    onChange([...blocks, { type: 'text', level: 'p', runs: [{ text: '' }] }])
   }
 
-  function updateParagraphBlock(index: number, text: string) {
-    onChange(blocks.map((b, i) => (i === index && b.type === 'paragraph' ? { ...b, text } : b)))
+  function updateTextBlock(index: number, patch: Partial<WelcomePostTextRun>) {
+    onChange(blocks.map((b, i) => {
+      if (i !== index || b.type !== 'text') return b
+      const run = firstRunOf(b)
+      return { ...b, runs: [{ ...run, ...patch }] }
+    }))
+  }
+
+  function updateTextLevel(index: number, level: WelcomePostTextLevel) {
+    onChange(blocks.map((b, i) => (i === index && b.type === 'text' ? { ...b, level } : b)))
   }
 
   function updateImageCaption(index: number, caption: string) {
@@ -367,18 +538,52 @@ function PostBlockFields({
               <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, 1)} disabled={i === blocks.length - 1} aria-label="Move down">
                 ▼
               </button>
-              <span className="set-post-block-type">{block.type === 'paragraph' ? 'Text' : 'Image'}</span>
+              <span className="set-post-block-type">{block.type === 'text' ? 'Text' : 'Image'}</span>
               <button type="button" className="set-post-block-remove" onClick={() => removeBlock(i)} aria-label="Remove block">
                 ✕
               </button>
             </div>
-            {block.type === 'paragraph' ? (
-              <Textarea
-                value={block.text}
-                onChange={t => updateParagraphBlock(i, t)}
-                placeholder="Write a paragraph…"
-                rows={3}
-              />
+            {block.type === 'text' ? (
+              <>
+                <div className="set-post-block-toolbar" role="toolbar" aria-label="Text formatting">
+                  <select
+                    className="set-post-level-select"
+                    value={block.level}
+                    onChange={e => updateTextLevel(i, e.target.value as WelcomePostTextLevel)}
+                    aria-label="Heading level"
+                  >
+                    {HEADING_LEVEL_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className={`set-post-format-btn ${firstRunOf(block).bold ? 'set-post-format-btn--active' : ''}`}
+                    onClick={() => updateTextBlock(i, { bold: !firstRunOf(block).bold })}
+                    aria-pressed={!!firstRunOf(block).bold}
+                    aria-label="Bold"
+                    title="Bold"
+                  >
+                    B
+                  </button>
+                  <button
+                    type="button"
+                    className={`set-post-format-btn set-post-format-btn--italic ${firstRunOf(block).italic ? 'set-post-format-btn--active' : ''}`}
+                    onClick={() => updateTextBlock(i, { italic: !firstRunOf(block).italic })}
+                    aria-pressed={!!firstRunOf(block).italic}
+                    aria-label="Italic"
+                    title="Italic"
+                  >
+                    I
+                  </button>
+                </div>
+                <Textarea
+                  value={textOf(block)}
+                  onChange={t => updateTextBlock(i, { text: t })}
+                  placeholder="Write a paragraph…"
+                  rows={3}
+                />
+              </>
             ) : (
               <div className="set-post-image-block">
                 <img src={block.url} alt="" className="set-post-image-preview" />
@@ -394,7 +599,7 @@ function PostBlockFields({
       </div>
 
       <div className="set-post-add-row">
-        <button type="button" className="set-post-add-btn" onClick={addParagraphBlock}>
+        <button type="button" className="set-post-add-btn" onClick={addTextBlock}>
           + Add text
         </button>
         <label className="set-post-add-btn set-post-add-btn--upload">
@@ -413,11 +618,120 @@ function PostBlockFields({
   )
 }
 
+/** Formats an ISO timestamp as a short, readable date for the list row
+ *  ("Posted Jul 11, 2026" / "Updated Jul 11, 2026"). Falls back to the
+ *  raw string if it doesn't parse, rather than throwing on odd data. */
+function formatPostDate(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+/** New-post creation prompt (owner request): a post cannot be opened for
+ *  editing or deletion until it has a title — so creation itself asks
+ *  for the title first and calls createHomepagePost immediately, rather
+ *  than inserting an empty, already-editable draft into the list. The
+ *  moment the title is saved, the post exists as a real row and opens
+ *  automatically into its full editor. */
+function NewPostPrompt({
+  onCreate,
+  onCancel,
+}: {
+  onCreate: (title: string) => Promise<void>
+  onCancel: () => void
+}) {
+  const [title, setTitle] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleCreate() {
+    const trimmed = title.trim()
+    if (!trimmed) {
+      setError('Enter a title for the post')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    await onCreate(trimmed)
+    setSaving(false)
+  }
+
+  return (
+    <div className="set-homepage-post-new">
+      <FieldRow label="Post title">
+        <Input
+          value={title}
+          onChange={setTitle}
+          placeholder="e.g. Resumption date for next term"
+        />
+      </FieldRow>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <div className="set-homepage-post-new-actions">
+        <button type="button" className="btn btn--primary" onClick={handleCreate} disabled={saving}>
+          {saving ? 'Creating…' : 'Create post'}
+        </button>
+        <button type="button" className="btn btn--secondary" onClick={onCancel} disabled={saving}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Delete requires typing the post's own title back exactly, not just a
+ *  window.confirm() dialog — owner-requested mistake-prevention, since a
+ *  reflexive "OK" tap on a generic confirm is exactly how a real page
+ *  gets deleted by accident. */
+function DeletePostConfirm({
+  heading,
+  onConfirm,
+  onCancel,
+  deleting,
+}: {
+  heading: string
+  onConfirm: () => void
+  onCancel: () => void
+  deleting: boolean
+}) {
+  const [typed, setTyped] = useState('')
+  const matches = typed.trim() === heading.trim() && heading.trim().length > 0
+
+  return (
+    <div className="set-homepage-post-delete-confirm">
+      <p className="set-homepage-post-delete-warning">
+        This will permanently delete this post from the public page. Type the post's
+        title to confirm: <strong>{heading || '(untitled post)'}</strong>
+      </p>
+      <Input value={typed} onChange={setTyped} placeholder="Type the title exactly" />
+      <div className="set-homepage-post-delete-actions">
+        <button
+          type="button"
+          className="btn btn--danger"
+          onClick={onConfirm}
+          disabled={!matches || deleting}
+        >
+          {deleting ? 'Deleting…' : 'Delete permanently'}
+        </button>
+        <button type="button" className="btn btn--secondary" onClick={onCancel} disabled={deleting}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<PostDraft[]>([])
   const [reordering, setReordering] = useState(false)
+  const [showNewPost, setShowNewPost] = useState(false)
+  // id of the post currently showing its delete-confirm panel — kept
+  // separate from `open` so confirming delete doesn't require the full
+  // editor to also be open, and so only one post's delete-confirm shows
+  // at a time.
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -434,57 +748,55 @@ function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
     setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, ...patch, dirty: true } : d)))
   }
 
-  function addPost() {
-    setDrafts(prev => [...prev, newPostDraft(prev.length)])
+  function toggleOpen(index: number) {
+    setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, open: !d.open } : d)))
+  }
+
+  async function handleCreatePost(title: string) {
+    setError(null)
+    const { data, error } = await createHomepagePost(schoolId, {
+      heading: title,
+      blocks: [],
+      always_expanded: false,
+      sort_order: drafts.length,
+    })
+    if (error || !data) {
+      setError(error ?? 'Could not create post')
+      return
+    }
+    // The new post exists now — open it immediately so the admin can add
+    // content right away, matching "only once a title exists can the
+    // post be edited," not a separate extra tap after creation.
+    setDrafts(prev => [...prev, { ...homepagePostToDraft(data), open: true }])
+    setShowNewPost(false)
   }
 
   async function savePost(index: number) {
     const draft = drafts[index]
     const cleanHeading = draft.heading.trim()
-    const cleanBlocks = draft.blocks
-      .map(b => b.type === 'paragraph' ? { ...b, text: b.text.trim() } : b)
-      .filter(b => b.type === 'image' || b.text.length > 0)
-    if (!cleanHeading && cleanBlocks.length === 0) {
-      updateDraft(index, { error: 'Add a heading or some content before saving.' })
+    if (!cleanHeading) {
+      updateDraft(index, { error: 'A post needs a title.' })
       return
     }
+    const cb = cleanBlocks(draft.blocks)
 
     setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: true, error: null } : d)))
 
-    if (draft.id === null) {
-      const { data, error } = await createHomepagePost(schoolId, {
-        heading: cleanHeading,
-        blocks: cleanBlocks,
-        always_expanded: draft.always_expanded,
-        sort_order: draft.sort_order,
-      })
-      if (error || !data) {
-        setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: false, error: error ?? 'Could not save post' } : d)))
-        return
-      }
-      setDrafts(prev => prev.map((d, i) => (i === index ? homepagePostToDraft(data) : d)))
-    } else {
-      const { error } = await updateHomepagePost(draft.id, {
-        heading: cleanHeading,
-        blocks: cleanBlocks,
-        always_expanded: draft.always_expanded,
-      })
-      if (error) {
-        setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: false, error } : d)))
-        return
-      }
-      setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, heading: cleanHeading, blocks: cleanBlocks, saving: false, error: null, dirty: false } : d)))
-    }
-  }
-
-  async function removePost(index: number) {
-    const draft = drafts[index]
-    if (draft.id === null) {
-      // Never saved — just drop the local draft, no network call needed.
-      setDrafts(prev => prev.filter((_, i) => i !== index))
+    const { error } = await updateHomepagePost(draft.id as string, {
+      heading: cleanHeading,
+      blocks: cb,
+      always_expanded: draft.always_expanded,
+    })
+    if (error) {
+      setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, saving: false, error } : d)))
       return
     }
-    if (!window.confirm('Delete this post? This cannot be undone.')) return
+    setDrafts(prev => prev.map((d, i) => (i === index ? { ...d, heading: cleanHeading, blocks: cb, saving: false, error: null, dirty: false, updated_at: new Date().toISOString() } : d)))
+  }
+
+  async function confirmDelete(index: number) {
+    const draft = drafts[index]
+    if (draft.id === null) return
     updateDraft(index, { saving: true })
     const { error } = await deleteHomepagePost(draft.id)
     if (error) {
@@ -492,6 +804,7 @@ function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
       return
     }
     setDrafts(prev => prev.filter((_, i) => i !== index))
+    setDeletingId(null)
   }
 
   async function movePost(index: number, direction: -1 | 1) {
@@ -501,9 +814,6 @@ function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
     ;[next[index], next[target]] = [next[target], next[index]]
     setDrafts(next)
 
-    // Only persist ordering across posts that already exist server-side —
-    // an unsaved draft has no row to reorder yet and will get its real
-    // sort_order the moment it's first saved (see savePost's create branch).
     const savedIds = next.filter(d => d.id !== null).map(d => d.id as string)
     if (savedIds.length < 2) return
     setReordering(true)
@@ -512,101 +822,136 @@ function HomepagePostsEditor({ schoolId }: { schoolId: string }) {
   }
 
   if (loading) return <Skeleton lines={4} />
-  if (error) return <ErrorState message={error} onRetry={load} />
+  if (error && drafts.length === 0) return <ErrorState message={error} onRetry={load} />
 
   return (
     <div className="set-homepage-posts">
-      {drafts.length === 0 && (
+      {drafts.length === 0 && !showNewPost && (
         <p className="set-homepage-posts-empty">No posts yet. Add one below.</p>
       )}
 
       {drafts.map((draft, i) => (
-        <div key={draft.id ?? `new-${i}`} className="set-homepage-post-card">
-          <div className="set-homepage-post-card-header">
-            <div className="set-homepage-post-move-group">
-              <button type="button" className="set-post-block-move" onClick={() => movePost(i, -1)} disabled={i === 0 || reordering} aria-label="Move post up">
-                ▲
-              </button>
-              <button type="button" className="set-post-block-move" onClick={() => movePost(i, 1)} disabled={i === drafts.length - 1 || reordering} aria-label="Move post down">
-                ▼
-              </button>
-            </div>
-            <span className="set-homepage-post-card-label">
-              {draft.id === null ? 'New post (unsaved)' : `Post ${i + 1}`}
-            </span>
-            <button type="button" className="set-post-block-remove" onClick={() => removePost(i)} aria-label="Delete post">
-              ✕ Delete
-            </button>
-          </div>
-
-          <FieldRow label="Heading">
-            <Input
-              value={draft.heading}
-              onChange={h => updateDraft(i, { heading: h })}
-              placeholder="e.g. Resumption date for next term"
-            />
-          </FieldRow>
-
-          <PostBlockFields
-            blocks={draft.blocks}
-            onChange={blocks => updateDraft(i, { blocks })}
-            schoolId={schoolId}
-          />
-
-          <Toggle
-            checked={draft.always_expanded}
-            onChange={v => updateDraft(i, { always_expanded: v })}
-            label="Always show in full (skip “Continue reading…” collapsing, regardless of length)"
-          />
-
-          <div className="set-homepage-post-card-footer">
-            {draft.error && <p className="form-error" role="alert">{draft.error}</p>}
+        <div key={draft.id} className="set-homepage-post-card">
+          {!draft.open ? (
+            // ─── Collapsed row: title + dates only. This is the gate —
+            // no edit or delete control exists here at all, only a way
+            // to open the post (owner-requested mistake-prevention).
             <button
               type="button"
-              className="btn btn--primary"
-              onClick={() => savePost(i)}
-              disabled={draft.saving || !draft.dirty}
+              className="set-homepage-post-row"
+              onClick={() => toggleOpen(i)}
             >
-              {draft.saving ? 'Saving…' : draft.id === null ? 'Add post' : 'Save changes'}
+              <div className="set-homepage-post-move-group" onClick={e => e.stopPropagation()}>
+                <button type="button" className="set-post-block-move" onClick={() => movePost(i, -1)} disabled={i === 0 || reordering} aria-label="Move post up">
+                  ▲
+                </button>
+                <button type="button" className="set-post-block-move" onClick={() => movePost(i, 1)} disabled={i === drafts.length - 1 || reordering} aria-label="Move post down">
+                  ▼
+                </button>
+              </div>
+              <div className="set-homepage-post-row-info">
+                <span className="set-homepage-post-row-title">{draft.heading || '(untitled post)'}</span>
+                <span className="set-homepage-post-row-meta">
+                  Posted {formatPostDate(draft.created_at)} · Last updated {formatPostDate(draft.updated_at)}
+                  {draft.always_expanded && ' · Always shown in full'}
+                </span>
+              </div>
+              <span className="set-homepage-post-row-chevron" aria-hidden="true">
+                <Icon name="chevron-down" size={18} />
+              </span>
             </button>
-          </div>
+          ) : (
+            <>
+              <div className="set-homepage-post-card-header">
+                <span className="set-homepage-post-card-label">{draft.heading || '(untitled post)'}</span>
+                <button type="button" className="set-post-block-remove" onClick={() => toggleOpen(i)} aria-label="Collapse post">
+                  Close
+                </button>
+              </div>
+
+              <FieldRow label="Heading">
+                <Input
+                  value={draft.heading}
+                  onChange={h => updateDraft(i, { heading: h })}
+                  placeholder="e.g. Resumption date for next term"
+                />
+              </FieldRow>
+
+              <PostBlockFields
+                blocks={draft.blocks}
+                onChange={blocks => updateDraft(i, { blocks })}
+                schoolId={schoolId}
+              />
+
+              <Toggle
+                checked={draft.always_expanded}
+                onChange={v => updateDraft(i, { always_expanded: v })}
+                label="Always show in full (skip “Continue reading…” collapsing, regardless of length)"
+              />
+
+              <div className="set-homepage-post-card-footer">
+                {draft.error && <p className="form-error" role="alert">{draft.error}</p>}
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={() => savePost(i)}
+                  disabled={draft.saving || !draft.dirty}
+                >
+                  {draft.saving ? 'Saving…' : 'Save changes'}
+                </button>
+                {deletingId === draft.id ? null : (
+                  <button
+                    type="button"
+                    className="set-homepage-post-delete-trigger"
+                    onClick={() => setDeletingId(draft.id)}
+                  >
+                    Delete this post…
+                  </button>
+                )}
+              </div>
+
+              {deletingId === draft.id && (
+                <DeletePostConfirm
+                  heading={draft.heading}
+                  deleting={draft.saving}
+                  onConfirm={() => confirmDelete(i)}
+                  onCancel={() => setDeletingId(null)}
+                />
+              )}
+            </>
+          )}
         </div>
       ))}
 
-      <button type="button" className="set-post-add-btn set-homepage-post-add-btn" onClick={addPost}>
-        + Add another post
-      </button>
+      {showNewPost ? (
+        <NewPostPrompt onCreate={handleCreatePost} onCancel={() => setShowNewPost(false)} />
+      ) : (
+        <button type="button" className="set-post-add-btn set-homepage-post-add-btn" onClick={() => setShowNewPost(true)}>
+          + Add another post
+        </button>
+      )}
     </div>
   )
 }
 
-// ─── Tab: School ──────────────────────────────────────────────────────────────
+// ─── Tab: Homepage ──────────────────────────────────────────────────────────
+// Owner request: everything the public homepage renders (welcome post,
+// several ordered posts, contact info, announcements toggle) now lives on
+// its own tab, separate from School identity — previously all of this sat
+// inside SchoolTab's single form, which made "School" a confusing mix of
+// identity settings and public-page content, and buried destructive post
+// actions in an always-open editor. This tab owns school_public_config's
+// read/write directly (welcome_message round-trip, welcome_post, contact
+// info, show_announcements) and mounts HomepagePostsEditor for the
+// separate school_homepage_posts table.
 
-function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: ThemeMode }) {
+function HomepageTab({ schoolId }: { schoolId: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [_settings, setSettings] = useState<SchoolSettings | null>(null)
-  const [_pubCfg, setPubCfg] = useState<SchoolPublicConfig | null>(null)
 
-  // Form state
-  const [name, setName] = useState('')
-  const [schoolType, setSchoolType] = useState('')
-  const [logoUrl, setLogoUrl] = useState('')
-  const [themeColor, setThemeColor] = useState('#2563eb')
-  const [defaultLang, setDefaultLang] = useState<'en' | 'ar' | 'ha'>('en')
-  const [enabledLangs, setEnabledLangs] = useState<string[]>(['en'])
-  const [usesTerms, setUsesTerms] = useState(true)
-  const [usesLedger, setUsesLedger] = useState(false)
-  // Welcome post (owner request, 2026-07-11) — heading + ordered blocks,
-  // replaces the old plain-text welcomeMsg textarea. legacyWelcomeMessage
-  // is kept read-only, shown only as a one-time "you have an old plain
-  // message — start a post from it?" prompt for schools that saved one
-  // before this feature existed; it is never written by this form again.
   const [postHeading, setPostHeading] = useState('')
   const [postBlocks, setPostBlocks] = useState<WelcomePostBlock[]>([])
   const [legacyWelcomeMessage, setLegacyWelcomeMessage] = useState<string | null>(null)
-  const [imageUploading, setImageUploading] = useState(false)
-  const [imageUploadError, setImageUploadError] = useState<string | null>(null)
   const [contactPhone, setContactPhone] = useState('')
   const [contactEmail, setContactEmail] = useState('')
   const [contactAddress, setContactAddress] = useState('')
@@ -619,27 +964,13 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [sRes, pRes] = await Promise.all([
-      loadSchoolSettings(schoolId),
-      loadPublicConfig(schoolId),
-    ])
-    if (sRes.error || pRes.error) {
-      setError(sRes.error ?? pRes.error)
+    const pRes = await loadPublicConfig(schoolId)
+    if (pRes.error) {
+      setError(pRes.error)
       setLoading(false)
       return
     }
-    const s = sRes.data!
-    const p = pRes.data!
-    setSettings(s)
-    setPubCfg(p)
-    setName(s.name)
-    setSchoolType(s.school_type ?? '')
-    setLogoUrl(s.logo_url ?? '')
-    setThemeColor(s.theme_color ?? '#2563eb')
-    setDefaultLang(s.default_lang)
-    setEnabledLangs(s.enabled_langs ?? ['en'])
-    setUsesTerms(s.uses_terms)
-    setUsesLedger(s.uses_ledger)
+    const p: SchoolPublicConfig = pRes.data!
     if (p.welcome_post) {
       setPostHeading(p.welcome_post.heading ?? '')
       setPostBlocks(p.welcome_post.blocks ?? [])
@@ -652,6 +983,145 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
     setContactEmail((p.contact_info as { email?: string })?.email ?? '')
     setContactAddress((p.contact_info as { address?: string })?.address ?? '')
     setShowAnnouncements(p.show_announcements)
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  function startPostFromLegacyMessage() {
+    if (!legacyWelcomeMessage) return
+    setPostBlocks(prev => [...prev, { type: 'text', level: 'p', runs: [{ text: legacyWelcomeMessage }] }])
+    setLegacyWelcomeMessage(null)
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    setSaveError(null)
+    setSaved(false)
+
+    const pRes = await savePublicConfig(schoolId, {
+      // welcome_message is round-tripped from what was loaded, never
+      // actively edited by this form — an existing plain-text message
+      // must survive saves of the other fields on this tab (contact
+      // info, announcements toggle) until a real welcome_post supersedes
+      // it (see load()'s own branch, which nulls this out once a real
+      // post exists).
+      welcome_message: legacyWelcomeMessage,
+      welcome_post: buildWelcomePost(postHeading, postBlocks),
+      contact_info: {
+        phone: contactPhone || undefined,
+        email: contactEmail || undefined,
+        address: contactAddress || undefined,
+      },
+      show_announcements: showAnnouncements,
+    })
+
+    if (pRes.error) {
+      setSaveError(pRes.error)
+    } else {
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    }
+    setSaving(false)
+  }
+
+  if (loading) return <Skeleton lines={8} />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <SectionLabel>Welcome message</SectionLabel>
+
+      {legacyWelcomeMessage && (
+        <div className="set-legacy-msg-banner">
+          <p className="set-legacy-msg-text">
+            You have an older plain-text welcome message: <em>“{legacyWelcomeMessage.slice(0, 120)}{legacyWelcomeMessage.length > 120 ? '…' : ''}”</em>
+          </p>
+          <button type="button" className="set-legacy-msg-btn" onClick={startPostFromLegacyMessage}>
+            Start a post from it
+          </button>
+        </div>
+      )}
+
+      <FieldRow label="Post heading">
+        <Input value={postHeading} onChange={setPostHeading} placeholder="e.g. Welcome to Dilimi Model School" />
+      </FieldRow>
+
+      <PostBlockFields blocks={postBlocks} onChange={setPostBlocks} schoolId={schoolId} />
+
+      <SectionLabel>Homepage posts</SectionLabel>
+      <p className="set-homepage-posts-hint">
+        Several ordered posts shown below the welcome message on the public page.
+        Each one collapses at a certain length with a “Continue reading…” link by
+        default — toggle “Always show in full” per post to skip that. Click a
+        post's title to open it — that's also the only way to edit or delete it.
+      </p>
+      <HomepagePostsEditor schoolId={schoolId} />
+
+      <SectionLabel>Contact info</SectionLabel>
+      <FieldRow label="Phone">
+        <Input value={contactPhone} onChange={setContactPhone} placeholder="+234 801 234 5678" />
+      </FieldRow>
+      <FieldRow label="Email">
+        <Input value={contactEmail} onChange={setContactEmail} placeholder="admin@yourschool.edu.ng" type="email" />
+      </FieldRow>
+      <FieldRow label="Address">
+        <Textarea value={contactAddress} onChange={setContactAddress} placeholder="Full school address" rows={2} />
+      </FieldRow>
+      <Toggle checked={showAnnouncements} onChange={setShowAnnouncements} label="Show announcements on public page" />
+
+      <SaveBar saving={saving} saved={saved} error={saveError} onSave={handleSave} />
+    </div>
+  )
+}
+
+// ─── Tab: School ──────────────────────────────────────────────────────────────
+
+function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: ThemeMode }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [_settings, setSettings] = useState<SchoolSettings | null>(null)
+
+  // Form state
+  const [name, setName] = useState('')
+  const [schoolType, setSchoolType] = useState('')
+  const [logoUrl, setLogoUrl] = useState('')
+  const [themeColor, setThemeColor] = useState('#2563eb')
+  const [defaultLang, setDefaultLang] = useState<'en' | 'ar' | 'ha'>('en')
+  const [enabledLangs, setEnabledLangs] = useState<string[]>(['en'])
+  const [usesTerms, setUsesTerms] = useState(true)
+  const [usesLedger, setUsesLedger] = useState(false)
+
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  // Logo upload — same loading/error state shape as the welcome-post
+  // block editor's own image upload (imageUploading/imageUploadError),
+  // kept local to this tab rather than shared, since this field lives
+  // here while post images live in HomepageTab.
+  const [logoUploading, setLogoUploading] = useState(false)
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const sRes = await loadSchoolSettings(schoolId)
+    if (sRes.error) {
+      setError(sRes.error)
+      setLoading(false)
+      return
+    }
+    const s = sRes.data!
+    setSettings(s)
+    setName(s.name)
+    setSchoolType(s.school_type ?? '')
+    setLogoUrl(s.logo_url ?? '')
+    setThemeColor(s.theme_color ?? '#2563eb')
+    setDefaultLang(s.default_lang)
+    setEnabledLangs(s.enabled_langs ?? ['en'])
+    setUsesTerms(s.uses_terms)
+    setUsesLedger(s.uses_ledger)
     setLoading(false)
 
     // Re-apply the school's saved theme color on load, not just on save.
@@ -675,35 +1145,14 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
     setSaveError(null)
     setSaved(false)
 
-    const [sRes, pRes] = await Promise.all([
-      updateSchoolSettings(schoolId, {
-        name, school_type: schoolType || null, logo_url: logoUrl || null,
-        theme_color: themeColor, default_lang: defaultLang,
-        enabled_langs: enabledLangs, uses_terms: usesTerms, uses_ledger: usesLedger,
-      }),
-      savePublicConfig(schoolId, {
-        // welcome_message is round-tripped from what was loaded, never
-        // actively edited by this form again — see this section's own
-        // header comment. savePublicConfig() upserts the whole row, so
-        // omitting this field (or sending null) would silently blank out
-        // an existing plain-text message the moment an admin saves any
-        // other School-tab field, even if they never touched the welcome
-        // post editor. Once a real welcome_post is saved, legacyWelcomeMessage
-        // is null (see load()'s own branch) and this correctly stops
-        // resending the old text — a genuine post supersedes it.
-        welcome_message: legacyWelcomeMessage,
-        welcome_post: buildWelcomePost(postHeading, postBlocks),
-        contact_info: {
-          phone: contactPhone || undefined,
-          email: contactEmail || undefined,
-          address: contactAddress || undefined,
-        },
-        show_announcements: showAnnouncements,
-      }),
-    ])
+    const sRes = await updateSchoolSettings(schoolId, {
+      name, school_type: schoolType || null, logo_url: logoUrl || null,
+      theme_color: themeColor, default_lang: defaultLang,
+      enabled_langs: enabledLangs, uses_terms: usesTerms, uses_ledger: usesLedger,
+    })
 
-    if (sRes.error || pRes.error) {
-      setSaveError(sRes.error ?? pRes.error)
+    if (sRes.error) {
+      setSaveError(sRes.error)
     } else {
       setSaved(true)
       // Apply the full derived brand scale live (PRD Session 23) — the
@@ -745,55 +1194,27 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
     )
   }
 
-  // ─── Welcome post block editor ────────────────────────────────────────
-
-  function addParagraphBlock() {
-    setPostBlocks(prev => [...prev, { type: 'paragraph', text: '' }])
-  }
-
-  function updateParagraphBlock(index: number, text: string) {
-    setPostBlocks(prev => prev.map((b, i) => (i === index && b.type === 'paragraph' ? { ...b, text } : b)))
-  }
-
-  function updateImageCaption(index: number, caption: string) {
-    setPostBlocks(prev => prev.map((b, i) => (i === index && b.type === 'image' ? { ...b, caption } : b)))
-  }
-
-  function removeBlock(index: number) {
-    setPostBlocks(prev => prev.filter((_, i) => i !== index))
-  }
-
-  function moveBlock(index: number, direction: -1 | 1) {
-    setPostBlocks(prev => {
-      const target = index + direction
-      if (target < 0 || target >= prev.length) return prev
-      const next = [...prev]
-      ;[next[index], next[target]] = [next[target], next[index]]
-      return next
-    })
-  }
-
-  async function handleImageFileSelected(file: File | undefined) {
+  // Fills logoUrl on a successful upload. Upload-only now (owner removed
+  // the paste-a-link fallback) — logoUrl state still exists purely to
+  // hold whatever the upload returns for preview/save; nothing downstream
+  // (public homepage, login page, header chrome, App.tsx, student ID
+  // cards) needs to change, since they all just read the resulting
+  // string in logo_url regardless of how it got there.
+  async function handleLogoFileSelected(file: File | undefined) {
     if (!file) return
     if (!file.type.startsWith('image/')) {
-      setImageUploadError('Please choose an image file')
+      setLogoUploadError('Please choose an image file')
       return
     }
-    setImageUploading(true)
-    setImageUploadError(null)
-    const { url, error } = await uploadWelcomePostImage(schoolId, file)
-    setImageUploading(false)
+    setLogoUploading(true)
+    setLogoUploadError(null)
+    const { url, error } = await uploadSchoolLogo(schoolId, file)
+    setLogoUploading(false)
     if (error || !url) {
-      setImageUploadError(error ?? 'Could not upload image')
+      setLogoUploadError(error ?? 'Could not upload logo')
       return
     }
-    setPostBlocks(prev => [...prev, { type: 'image', url, caption: '' }])
-  }
-
-  function startPostFromLegacyMessage() {
-    if (!legacyWelcomeMessage) return
-    setPostBlocks(prev => [...prev, { type: 'paragraph', text: legacyWelcomeMessage }])
-    setLegacyWelcomeMessage(null)
+    setLogoUrl(url)
   }
 
   if (loading) return <Skeleton lines={8} />
@@ -805,12 +1226,36 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
       <FieldRow label="School name">
         <Input value={name} onChange={setName} placeholder="e.g. Dilimi Model School" />
       </FieldRow>
-      <FieldRow label="School type (optional)">
-        <Input value={schoolType} onChange={setSchoolType} placeholder="e.g. Primary, Secondary, Madrasa" />
+      <FieldRow label="School type">
+        {isRecognizedSchoolType(schoolType) ? (
+          <div className="set-readonly-field">
+            <span className="set-readonly-value">
+              {SCHOOL_TYPE_DISPLAY_LABELS[schoolType] ?? schoolType}
+            </span>
+            <p className="field-hint">
+              Set during onboarding and can't be changed here. Contact support if this needs to change.
+            </p>
+          </div>
+        ) : (
+          <Input value={schoolType} onChange={setSchoolType} placeholder="e.g. Primary, Secondary, Madrasa" />
+        )}
       </FieldRow>
-      <FieldRow label="Logo URL (optional)">
-        <Input value={logoUrl} onChange={setLogoUrl} placeholder="https://…" />
-        {logoUrl && <img src={logoUrl} alt="Logo preview" className="set-logo-preview" />}
+      <FieldRow label="Logo">
+        <div className="set-logo-upload-row">
+          {logoUrl && <img src={logoUrl} alt="Logo preview" className="set-logo-preview" />}
+          <label className="btn btn--secondary set-logo-upload-btn">
+            <Icon name="image" size={16} />
+            {logoUploading ? 'Uploading…' : logoUrl ? 'Replace logo' : 'Upload logo'}
+            <input
+              type="file"
+              accept="image/*"
+              className="set-logo-upload-input"
+              disabled={logoUploading}
+              onChange={e => handleLogoFileSelected(e.target.files?.[0])}
+            />
+          </label>
+        </div>
+        {logoUploadError && <p className="form-error" role="alert">{logoUploadError}</p>}
       </FieldRow>
       <FieldRow label="Theme colour">
         <div className="set-color-row">
@@ -845,95 +1290,6 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
       <SectionLabel>Module flags</SectionLabel>
       <Toggle checked={usesTerms} onChange={setUsesTerms} label="Use terms within each session (e.g. 1st, 2nd, 3rd term)" />
       <Toggle checked={usesLedger} onChange={setUsesLedger} label="Enable double-entry ledger (advanced accounting)" />
-
-      <SectionLabel>Public page</SectionLabel>
-
-      {legacyWelcomeMessage && (
-        <div className="set-legacy-msg-banner">
-          <p className="set-legacy-msg-text">
-            You have an older plain-text welcome message: <em>“{legacyWelcomeMessage.slice(0, 120)}{legacyWelcomeMessage.length > 120 ? '…' : ''}”</em>
-          </p>
-          <button type="button" className="set-legacy-msg-btn" onClick={startPostFromLegacyMessage}>
-            Start a post from it
-          </button>
-        </div>
-      )}
-
-      <FieldRow label="Post heading">
-        <Input value={postHeading} onChange={setPostHeading} placeholder="e.g. Welcome to Dilimi Model School" />
-      </FieldRow>
-
-      <div className="set-post-blocks">
-        {postBlocks.map((block, i) => (
-          <div key={i} className="set-post-block">
-            <div className="set-post-block-controls">
-              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, -1)} disabled={i === 0} aria-label="Move up">
-                ▲
-              </button>
-              <button type="button" className="set-post-block-move" onClick={() => moveBlock(i, 1)} disabled={i === postBlocks.length - 1} aria-label="Move down">
-                ▼
-              </button>
-              <span className="set-post-block-type">{block.type === 'paragraph' ? 'Text' : 'Image'}</span>
-              <button type="button" className="set-post-block-remove" onClick={() => removeBlock(i)} aria-label="Remove block">
-                ✕
-              </button>
-            </div>
-            {block.type === 'paragraph' ? (
-              <Textarea
-                value={block.text}
-                onChange={t => updateParagraphBlock(i, t)}
-                placeholder="Write a paragraph…"
-                rows={3}
-              />
-            ) : (
-              <div className="set-post-image-block">
-                <img src={block.url} alt="" className="set-post-image-preview" />
-                <Input
-                  value={block.caption ?? ''}
-                  onChange={c => updateImageCaption(i, c)}
-                  placeholder="Caption (optional)"
-                />
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <div className="set-post-add-row">
-        <button type="button" className="set-post-add-btn" onClick={addParagraphBlock}>
-          + Add text
-        </button>
-        <label className="set-post-add-btn set-post-add-btn--upload">
-          {imageUploading ? 'Uploading…' : '+ Add image'}
-          <input
-            type="file"
-            accept="image/*"
-            className="set-post-image-input"
-            disabled={imageUploading}
-            onChange={e => { handleImageFileSelected(e.target.files?.[0]); e.target.value = '' }}
-          />
-        </label>
-      </div>
-      {imageUploadError && <p className="form-error" role="alert">{imageUploadError}</p>}
-
-      <SectionLabel>Homepage posts</SectionLabel>
-      <p className="set-homepage-posts-hint">
-        Several ordered posts shown below the welcome message on the public page.
-        Each one collapses at a certain length with a “Continue reading…” link by
-        default — toggle “Always show in full” per post to skip that.
-      </p>
-      <HomepagePostsEditor schoolId={schoolId} />
-
-      <FieldRow label="Phone">
-        <Input value={contactPhone} onChange={setContactPhone} placeholder="+234 801 234 5678" />
-      </FieldRow>
-      <FieldRow label="Email">
-        <Input value={contactEmail} onChange={setContactEmail} placeholder="admin@yourschool.edu.ng" type="email" />
-      </FieldRow>
-      <FieldRow label="Address">
-        <Textarea value={contactAddress} onChange={setContactAddress} placeholder="Full school address" rows={2} />
-      </FieldRow>
-      <Toggle checked={showAnnouncements} onChange={setShowAnnouncements} label="Show announcements on public page" />
 
       <SaveBar saving={saving} saved={saved} error={saveError} onSave={handleSave} />
     </div>
@@ -1647,6 +2003,1369 @@ function ClassesTab({ schoolId }: { schoolId: string }) {
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowForm(false)}>Cancel</button>
               <button className="set-save-btn" onClick={handleSave} disabled={nSaving}>{nSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab: Institution (faculties → departments → programmes → levels) ─────────
+// §7.27.1, PRD SESSION 55. Post-onboarding equivalent of ClassesTab above,
+// modeled directly on its structure (openForm/handleSave/set-sheet pattern)
+// per SESSION 55 §0 instruction 5 — hidden entirely unless school_type is a
+// higher-institution type (enforced in buildTabs, above). Deliberately not
+// merged with ClassesTab: different tables, different anchor semantics
+// (§7.27.1's own note — programme_levels is administrative metadata, not a
+// live daily container the way class_nodes is).
+
+function InstitutionTab({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [faculties, setFaculties] = useState<Faculty[]>([])
+  const [departments, setDepartments] = useState<Department[]>([])
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [levelsByProgramme, setLevelsByProgramme] = useState<Record<string, ProgrammeLevel[]>>({})
+  const [courses, setCourses] = useState<Course[]>([])
+
+  // Faculty form
+  const [showFacultyForm, setShowFacultyForm] = useState(false)
+  const [editingFaculty, setEditingFaculty] = useState<Faculty | null>(null)
+  const [fName, setFName] = useState('')
+  const [fCode, setFCode] = useState('')
+  const [fSaving, setFSaving] = useState(false)
+  const [fError, setFError] = useState<string | null>(null)
+
+  // Department form
+  const [showDeptForm, setShowDeptForm] = useState(false)
+  const [editingDept, setEditingDept] = useState<Department | null>(null)
+  const [dName, setDName] = useState('')
+  const [dCode, setDCode] = useState('')
+  const [dFacultyId, setDFacultyId] = useState<string | null>(null)
+  const [dSaving, setDSaving] = useState(false)
+  const [dError, setDError] = useState<string | null>(null)
+
+  // Programme form
+  const [showProgForm, setShowProgForm] = useState(false)
+  const [editingProg, setEditingProg] = useState<Programme | null>(null)
+  const [pName, setPName] = useState('')
+  const [pAwardType, setPAwardType] = useState('degree')
+  const [pDeptId, setPDeptId] = useState<string | null>(null)
+  const [pDuration, setPDuration] = useState(4)
+  const [pMinCredit, setPMinCredit] = useState('')
+  const [pMaxCredit, setPMaxCredit] = useState('')
+  const [pSaving, setPSaving] = useState(false)
+  const [pError, setPError] = useState<string | null>(null)
+
+  // Course form (§7.27.2 courses — school-wide catalogue, not per-programme;
+  // lives here rather than in CurriculumTab since a course is definitional
+  // institutional metadata like a Faculty/Department/Programme, reused
+  // across many curricula — see settingsService.ts's header note on this.)
+  const [showCourseForm, setShowCourseForm] = useState(false)
+  const [editingCourse, setEditingCourse] = useState<Course | null>(null)
+  const [cCode, setCCode] = useState('')
+  const [cTitle, setCTitle] = useState('')
+  const [cDeptId, setCDeptId] = useState<string | null>(null)
+  const [cCreditUnits, setCCreditUnits] = useState('1')
+  const [cType, setCType] = useState('')
+  const [cSaving, setCSaving] = useState(false)
+  const [cError, setCError] = useState<string | null>(null)
+
+  // Level form
+  const [showLevelForm, setShowLevelForm] = useState(false)
+  const [editingLevel, setEditingLevel] = useState<ProgrammeLevel | null>(null)
+  const [lProgId, setLProgId] = useState<string | null>(null)
+  const [lLabel, setLLabel] = useState('')
+  const [lSequence, setLSequence] = useState(1)
+  const [lSaving, setLSaving] = useState(false)
+  const [lError, setLError] = useState<string | null>(null)
+
+  // Placement form (§7.27.1a, student_programme_placements) — admits a
+  // student into a specific programme level for the school's current
+  // session. Deliberately its own small form rather than folded into the
+  // level form above: a level is created once by an admin setting up the
+  // structure, while a placement happens per-student, repeatedly, and needs
+  // its own search-driven picker (see useDebouncedValue above) rather than
+  // a static dropdown — mirrors the reasoning already used to keep this
+  // whole tab separate from ClassesTab.
+  const [placementsByLevel, setPlacementsByLevel] = useState<Record<string, StudentProgrammePlacement[]>>({})
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [currentSessionName, setCurrentSessionName] = useState<string | null>(null)
+
+  const [showPlacementForm, setShowPlacementForm] = useState(false)
+  const [placementLevelId, setPlacementLevelId] = useState<string | null>(null)
+  const [placementLevelLabel, setPlacementLevelLabel] = useState('')
+  const [studentQuery, setStudentQuery] = useState('')
+  const debouncedStudentQuery = useDebouncedValue(studentQuery, 300)
+  const [studentResults, setStudentResults] = useState<StudentSearchResult[]>([])
+  const [studentSearching, setStudentSearching] = useState(false)
+  const [selectedStudent, setSelectedStudent] = useState<StudentSearchResult | null>(null)
+  const [plSaving, setPlSaving] = useState(false)
+  const [plError, setPlError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [fRes, dRes, pRes, sessRes, cRes] = await Promise.all([
+      loadFaculties(schoolId),
+      loadDepartments(schoolId),
+      loadProgrammes(schoolId),
+      loadCurrentSession(schoolId),
+      loadCourses(schoolId),
+    ])
+    if (fRes.error) { setError(fRes.error); setLoading(false); return }
+    if (dRes.error) { setError(dRes.error); setLoading(false); return }
+    if (pRes.error) { setError(pRes.error); setLoading(false); return }
+    if (cRes.error) { setError(cRes.error); setLoading(false); return }
+    // Current session is informational context for the placement form, not
+    // a hard blocker for the rest of the tab — a school between sessions
+    // (sessRes.data null) should still be able to manage its hierarchy; it
+    // just can't admit a student into a placement until one exists, which
+    // the placement form itself gates on below.
+    if (!sessRes.error && sessRes.data) {
+      setCurrentSessionId(sessRes.data.id)
+      setCurrentSessionName(sessRes.data.name)
+    }
+    setFaculties(fRes.data)
+    setDepartments(dRes.data)
+    setProgrammes(pRes.data)
+    setCourses(cRes.data)
+    const levelEntries = await Promise.all(
+      pRes.data.map(async (prog) => [prog.id, (await loadProgrammeLevels(prog.id)).data] as const),
+    )
+    setLevelsByProgramme(Object.fromEntries(levelEntries))
+    // Placements are loaded per-level, scoped to the current session, since
+    // that's the only view an admin needs day-to-day ("who's placed into
+    // this level right now") — historical placements remain queryable
+    // directly via SQL per the PRD's Done Check, not surfaced in this list.
+    const allLevelIds = Object.values(Object.fromEntries(levelEntries)).flat().map(l => l.id)
+    if (allLevelIds.length > 0) {
+      const placementEntries = await Promise.all(
+        allLevelIds.map(async (levelId) => [levelId, (await loadPlacementsForProgramme(levelId)).data] as const),
+      )
+      setPlacementsByLevel(Object.fromEntries(placementEntries))
+    }
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  // Debounced student search — only fires once the query settles, and only
+  // against this school's own students (searchStudents scopes by schoolId
+  // itself, same as every other loader in this file).
+  useEffect(() => {
+    if (!debouncedStudentQuery || debouncedStudentQuery.trim().length < 2) {
+      setStudentResults([])
+      return
+    }
+    let cancelled = false
+    setStudentSearching(true)
+    searchStudents(schoolId, debouncedStudentQuery).then(res => {
+      if (cancelled) return
+      setStudentResults(res.error ? [] : res.data)
+      setStudentSearching(false)
+    })
+    return () => { cancelled = true }
+  }, [schoolId, debouncedStudentQuery])
+
+  function openFacultyForm(f?: Faculty) {
+    setEditingFaculty(f ?? null)
+    setFName(f?.name ?? '')
+    setFCode(f?.code ?? '')
+    setFError(null)
+    setShowFacultyForm(true)
+  }
+
+  async function handleSaveFaculty() {
+    if (!fName) { setFError('Name is required.'); return }
+    setFSaving(true)
+    const res = await upsertFaculty(schoolId, { id: editingFaculty?.id, name: fName, code: fCode || null })
+    if (res.error) { setFError(res.error); setFSaving(false); return }
+    setShowFacultyForm(false)
+    await load()
+    setFSaving(false)
+  }
+
+  function openDeptForm(d?: Department) {
+    setEditingDept(d ?? null)
+    setDName(d?.name ?? '')
+    setDCode(d?.code ?? '')
+    setDFacultyId(d?.faculty_id ?? null)
+    setDError(null)
+    setShowDeptForm(true)
+  }
+
+  async function handleSaveDept() {
+    if (!dName) { setDError('Name is required.'); return }
+    setDSaving(true)
+    const res = await upsertDepartment(schoolId, {
+      id: editingDept?.id, name: dName, code: dCode || null, faculty_id: dFacultyId,
+    })
+    if (res.error) { setDError(res.error); setDSaving(false); return }
+    setShowDeptForm(false)
+    await load()
+    setDSaving(false)
+  }
+
+  function openProgForm(p?: Programme, deptId?: string) {
+    setEditingProg(p ?? null)
+    setPName(p?.name ?? '')
+    setPAwardType(p?.award_type ?? 'degree')
+    setPDeptId(p?.department_id ?? deptId ?? null)
+    setPDuration(p?.duration_sessions ?? 4)
+    setPMinCredit(p?.min_credit_load != null ? String(p.min_credit_load) : '')
+    setPMaxCredit(p?.max_credit_load != null ? String(p.max_credit_load) : '')
+    setPError(null)
+    setShowProgForm(true)
+  }
+
+  async function handleSaveProg() {
+    if (!pName) { setPError('Name is required.'); return }
+    if (!pDeptId) { setPError('Choose a department.'); return }
+    setPSaving(true)
+    const res = await upsertProgramme(schoolId, {
+      id: editingProg?.id,
+      name: pName,
+      award_type: pAwardType,
+      department_id: pDeptId,
+      duration_sessions: pDuration,
+      min_credit_load: pMinCredit ? Number(pMinCredit) : null,
+      max_credit_load: pMaxCredit ? Number(pMaxCredit) : null,
+    })
+    if (res.error) { setPError(res.error); setPSaving(false); return }
+    setShowProgForm(false)
+    await load()
+    setPSaving(false)
+  }
+
+  function openCourseForm(c?: Course) {
+    setEditingCourse(c ?? null)
+    setCCode(c?.code ?? '')
+    setCTitle(c?.title ?? '')
+    setCDeptId(c?.department_id ?? null)
+    setCCreditUnits(String(c?.credit_units ?? 1))
+    setCType(c?.course_type ?? '')
+    setCError(null)
+    setShowCourseForm(true)
+  }
+
+  async function handleSaveCourse() {
+    if (!cCode) { setCError('Course code is required.'); return }
+    if (!cTitle) { setCError('Title is required.'); return }
+    if (!cDeptId) { setCError('Choose a department.'); return }
+    const creditUnitsNum = Number(cCreditUnits)
+    if (!cCreditUnits || !Number.isInteger(creditUnitsNum) || creditUnitsNum < 1) {
+      setCError('Credit units must be a whole number of 1 or more.')
+      return
+    }
+    setCSaving(true)
+    const res = await upsertCourse(schoolId, {
+      id: editingCourse?.id,
+      code: cCode,
+      title: cTitle,
+      department_id: cDeptId,
+      credit_units: creditUnitsNum,
+      course_type: cType || null,
+    })
+    if (res.error) { setCError(res.error); setCSaving(false); return }
+    setShowCourseForm(false)
+    await load()
+    setCSaving(false)
+  }
+
+  function openLevelForm(programmeId: string, l?: ProgrammeLevel) {
+    setEditingLevel(l ?? null)
+    setLProgId(programmeId)
+    setLLabel(l?.level_label ?? '')
+    setLSequence(l?.sequence_order ?? (levelsByProgramme[programmeId]?.length ?? 0) + 1)
+    setLError(null)
+    setShowLevelForm(true)
+  }
+
+  async function handleSaveLevel() {
+    if (!lLabel) { setLError('Label is required.'); return }
+    if (!lProgId) { setLError('No programme selected.'); return }
+    setLSaving(true)
+    const res = await upsertProgrammeLevel({
+      id: editingLevel?.id, programme_id: lProgId, level_label: lLabel, sequence_order: lSequence,
+    })
+    if (res.error) { setLError(res.error); setLSaving(false); return }
+    setShowLevelForm(false)
+    await load()
+    setLSaving(false)
+  }
+
+  function openPlacementForm(levelId: string, levelLabel: string) {
+    setPlacementLevelId(levelId)
+    setPlacementLevelLabel(levelLabel)
+    setStudentQuery('')
+    setStudentResults([])
+    setSelectedStudent(null)
+    setPlError(null)
+    setShowPlacementForm(true)
+  }
+
+  async function handleSavePlacement() {
+    if (!selectedStudent) { setPlError('Search for and select a student first.'); return }
+    if (!placementLevelId) { setPlError('No level selected.'); return }
+    if (!currentSessionId) {
+      // Real, current constraint — not something to silently work around.
+      // student_programme_placements.session_id is not-null (migration
+      // 55b), and there is deliberately no "no session" fallback: a
+      // placement without a session is meaningless for the history this
+      // table exists to track. If a school genuinely has no current
+      // session, that's a Sessions-tab problem to fix first, not something
+      // this form should paper over with an invented session.
+      setPlError('This school has no current session set. Set one in the Sessions tab before placing students.')
+      return
+    }
+    setPlSaving(true)
+    const res = await upsertPlacement({
+      school_id: schoolId,
+      student_id: selectedStudent.id,
+      programme_level_id: placementLevelId,
+      session_id: currentSessionId,
+    })
+    if (res.error) { setPlError(res.error); setPlSaving(false); return }
+    setShowPlacementForm(false)
+    await load()
+    setPlSaving(false)
+  }
+
+  if (loading) return <Skeleton />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <div className="set-section-header">
+        <SectionLabel>Faculties <span className="optional">(optional)</span></SectionLabel>
+        <button className="set-add-btn" onClick={() => openFacultyForm()}>+ Add faculty</button>
+      </div>
+      {faculties.length === 0
+        ? <p className="set-empty-hint">No faculties — fine if your institution doesn't use this tier.</p>
+        : faculties.map(f => (
+          <div key={f.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{f.name}</p>
+              {f.code && <p className="set-list-row-meta">Code: {f.code}</p>}
+            </div>
+            <button className="set-edit-btn" onClick={() => openFacultyForm(f)}>Edit</button>
+          </div>
+        ))
+      }
+
+      <div className="set-section-header">
+        <SectionLabel>Departments</SectionLabel>
+        <button className="set-add-btn" onClick={() => openDeptForm()}>+ Add department</button>
+      </div>
+      {departments.length === 0
+        ? <p className="set-empty-hint">No departments yet. Add your first one.</p>
+        : departments.map(d => (
+          <div key={d.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{d.name}</p>
+              <p className="set-list-row-meta">
+                {faculties.find(f => f.id === d.faculty_id)?.name ?? 'No faculty'}
+                {d.code ? ` · Code: ${d.code}` : ''}
+              </p>
+            </div>
+            <button className="set-edit-btn" onClick={() => openDeptForm(d)}>Edit</button>
+          </div>
+        ))
+      }
+
+      <div className="set-section-header">
+        <SectionLabel>Programmes</SectionLabel>
+        <button className="set-add-btn" onClick={() => openProgForm()} disabled={departments.length === 0}>+ Add programme</button>
+      </div>
+      {departments.length === 0 ? (
+        <p className="set-empty-hint">Add a department first.</p>
+      ) : programmes.length === 0 ? (
+        <p className="set-empty-hint">No programmes yet. Add your first one.</p>
+      ) : programmes.map(p => (
+        <div key={p.id} className="set-class-node">
+          <div className="set-class-node-row">
+            <div className="set-class-node-info">
+              <span className="set-class-node-name">{p.name}</span>
+              <span className="set-type-chip">{p.award_type}</span>
+              <span className="set-type-chip">{p.duration_sessions} sessions</span>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openProgForm(p)}>Edit</button>
+              <button className="set-add-sub-btn" onClick={() => openLevelForm(p.id)}>+ Level</button>
+            </div>
+          </div>
+          {(levelsByProgramme[p.id] ?? []).map(l => (
+            <div key={l.id} className="set-class-node" style={{ marginLeft: 16 }}>
+              <div className="set-class-node-row">
+                <div className="set-class-node-info">
+                  <span className="set-class-node-name">{l.level_label}</span>
+                  {(placementsByLevel[l.id] ?? []).length > 0 && (
+                    <span className="set-type-chip">{(placementsByLevel[l.id] ?? []).length} placed</span>
+                  )}
+                </div>
+                <div className="set-list-row-actions">
+                  <button className="set-edit-btn" onClick={() => openLevelForm(p.id, l)}>Edit</button>
+                  <button className="set-add-sub-btn" onClick={() => openPlacementForm(l.id, l.level_label)}>+ Place student</button>
+                </div>
+              </div>
+              {(placementsByLevel[l.id] ?? []).length > 0 && (
+                <div style={{ marginLeft: 16 }}>
+                  {(placementsByLevel[l.id] ?? []).map(pl => (
+                    <p key={pl.id} className="set-list-row-meta">{pl.student_name}{pl.student_matric_number ? ` · ${pl.student_matric_number}` : ''}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {/* Course catalogue (§7.27.2 courses) — school-wide, reused across
+          many curricula; kept here alongside Programmes rather than in
+          CurriculumTab since it's institutional metadata, not a per-
+          programme assignment. See settingsService.ts header note. */}
+      <div className="set-section-header">
+        <SectionLabel>Courses</SectionLabel>
+        <button className="set-add-btn" onClick={() => openCourseForm()} disabled={departments.length === 0}>+ Add course</button>
+      </div>
+      {departments.length === 0 ? (
+        <p className="set-empty-hint">Add a department first.</p>
+      ) : courses.length === 0 ? (
+        <p className="set-empty-hint">No courses yet. Add your first one.</p>
+      ) : courses.map(c => (
+        <div key={c.id} className="set-list-row">
+          <div className="set-list-row-info">
+            <p className="set-list-row-name">{c.code} — {c.title}</p>
+            <p className="set-list-row-meta">
+              {departments.find(d => d.id === c.department_id)?.name ?? 'No department'}
+              {' · '}{c.credit_units} unit{c.credit_units === 1 ? '' : 's'}
+              {c.course_type ? ` · ${c.course_type}` : ''}
+            </p>
+          </div>
+          <button className="set-edit-btn" onClick={() => openCourseForm(c)}>Edit</button>
+        </div>
+      ))}
+
+      {showFacultyForm && (
+        <div className="set-overlay" onClick={() => setShowFacultyForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingFaculty ? 'Edit faculty' : 'Add faculty'}</h2>
+            <FieldRow label="Name"><Input value={fName} onChange={setFName} placeholder="e.g. Faculty of Science" /></FieldRow>
+            <FieldRow label="Code (optional)"><Input value={fCode} onChange={setFCode} placeholder="e.g. SCI" /></FieldRow>
+            {fError && <p className="set-form-error">{fError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowFacultyForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveFaculty} disabled={fSaving}>{fSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeptForm && (
+        <div className="set-overlay" onClick={() => setShowDeptForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingDept ? 'Edit department' : 'Add department'}</h2>
+            <FieldRow label="Name"><Input value={dName} onChange={setDName} placeholder="e.g. Department of Nursing" /></FieldRow>
+            <FieldRow label="Faculty (optional)">
+              <select className="set-select" value={dFacultyId ?? ''} onChange={e => setDFacultyId(e.target.value || null)}>
+                <option value="">No faculty</option>
+                {faculties.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Code (optional)"><Input value={dCode} onChange={setDCode} placeholder="e.g. NUR" /></FieldRow>
+            {dError && <p className="set-form-error">{dError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowDeptForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveDept} disabled={dSaving}>{dSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showProgForm && (
+        <div className="set-overlay" onClick={() => setShowProgForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingProg ? 'Edit programme' : 'Add programme'}</h2>
+            <FieldRow label="Department">
+              <select className="set-select" value={pDeptId ?? ''} onChange={e => setPDeptId(e.target.value || null)}>
+                <option value="">Choose a department</option>
+                {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Name"><Input value={pName} onChange={setPName} placeholder="e.g. Basic Nursing Science" /></FieldRow>
+            <FieldRow label="Award type">
+              <select className="set-select" value={pAwardType} onChange={e => setPAwardType(e.target.value)}>
+                {AWARD_TYPE_OPTIONS_SETTINGS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Duration (sessions)"><Input value={String(pDuration)} onChange={v => setPDuration(Number(v) || 1)} type="number" /></FieldRow>
+            <FieldRow label="Min credit load (optional)"><Input value={pMinCredit} onChange={setPMinCredit} type="number" /></FieldRow>
+            <FieldRow label="Max credit load (optional)"><Input value={pMaxCredit} onChange={setPMaxCredit} type="number" /></FieldRow>
+            {pError && <p className="set-form-error">{pError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowProgForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveProg} disabled={pSaving}>{pSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCourseForm && (
+        <div className="set-overlay" onClick={() => setShowCourseForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingCourse ? 'Edit course' : 'Add course'}</h2>
+            <FieldRow label="Department">
+              <select className="set-select" value={cDeptId ?? ''} onChange={e => setCDeptId(e.target.value || null)}>
+                <option value="">Choose a department</option>
+                {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Course code"><Input value={cCode} onChange={setCCode} placeholder="e.g. NSC101" /></FieldRow>
+            <FieldRow label="Title"><Input value={cTitle} onChange={setCTitle} placeholder="e.g. Introduction to Nursing Science" /></FieldRow>
+            <FieldRow label="Credit units"><Input value={cCreditUnits} onChange={v => setCCreditUnits(v.replace(/[^0-9]/g, ''))} type="number" /></FieldRow>
+            <FieldRow label="Type (optional)">
+              <select className="set-select" value={cType} onChange={e => setCType(e.target.value)}>
+                <option value="">Not specified</option>
+                {COURSE_TYPE_OPTIONS_SETTINGS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </FieldRow>
+            {cError && <p className="set-form-error">{cError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowCourseForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveCourse} disabled={cSaving}>{cSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLevelForm && (
+        <div className="set-overlay" onClick={() => setShowLevelForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingLevel ? 'Edit level' : 'Add level'}</h2>
+            <FieldRow label="Label"><Input value={lLabel} onChange={setLLabel} placeholder="e.g. 100, ND1, Year 1" /></FieldRow>
+            <FieldRow label="Sequence order"><Input value={String(lSequence)} onChange={v => setLSequence(Number(v) || 1)} type="number" /></FieldRow>
+            {lError && <p className="set-form-error">{lError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowLevelForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveLevel} disabled={lSaving}>{lSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showPlacementForm && (
+        <div className="set-overlay" onClick={() => setShowPlacementForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">Place student — {placementLevelLabel}</h2>
+            <p className="set-hint-text">
+              {currentSessionName
+                ? `This places the student into ${placementLevelLabel} for the current session (${currentSessionName}).`
+                : 'No current session is set for this school — set one in the Sessions tab first.'}
+            </p>
+            <FieldRow label="Student">
+              {selectedStudent ? (
+                <div className="set-list-row">
+                  <div className="set-list-row-info">
+                    <p className="set-list-row-name">{selectedStudent.full_name}</p>
+                    <p className="set-list-row-meta">{selectedStudent.matric_number ?? 'No matric number yet'}</p>
+                  </div>
+                  <button className="set-edit-btn" onClick={() => { setSelectedStudent(null); setStudentQuery('') }}>Change</button>
+                </div>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    className="set-input set-search-input"
+                    placeholder="Search by name or matric number…"
+                    value={studentQuery}
+                    onChange={e => setStudentQuery(e.target.value)}
+                  />
+                  {studentSearching && <p className="set-hint-text">Searching…</p>}
+                  {!studentSearching && studentQuery.trim().length >= 2 && studentResults.length === 0 && (
+                    <p className="set-empty-hint">No students match.</p>
+                  )}
+                  {studentResults.map(s => (
+                    <div key={s.id} className="set-list-row" onClick={() => setSelectedStudent(s)} style={{ cursor: 'pointer' }}>
+                      <div className="set-list-row-info">
+                        <p className="set-list-row-name">{s.full_name}</p>
+                        <p className="set-list-row-meta">{s.matric_number ?? 'No matric number yet'}</p>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </FieldRow>
+            {plError && <p className="set-form-error">{plError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowPlacementForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSavePlacement} disabled={plSaving || !currentSessionId}>{plSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const AWARD_TYPE_OPTIONS_SETTINGS = [
+  { value: 'degree', label: 'Degree (B.Sc/B.A/B.Eng etc.)' },
+  { value: 'hnd', label: 'HND' },
+  { value: 'nd', label: 'ND' },
+  { value: 'nce', label: 'NCE' },
+  { value: 'pgd', label: 'PGD' },
+  { value: 'other', label: 'Other' },
+]
+
+// §7.27.2: course_type is advisory only, no DB check constraint — this list
+// is the UI's own convention, matching the four values named in the schema
+// comment ('lecture' | 'lab' | 'practical' | 'tp').
+const COURSE_TYPE_OPTIONS_SETTINGS = [
+  { value: 'lecture', label: 'Lecture' },
+  { value: 'lab', label: 'Lab' },
+  { value: 'practical', label: 'Practical' },
+  { value: 'tp', label: 'TP (Teaching Practice)' },
+]
+
+// ─── Tab: Curriculum ──────────────────────────────────────────────────────────
+// §7.27.2 programme_curriculum — assigns courses (from the school-wide
+// catalogue managed in InstitutionTab) into a specific programme/level, with
+// an optional term when the school uses terms (term_id null otherwise, per
+// §7.4's convention — see loadCurriculum's own comment in settingsService.ts).
+// Picker chain: Programme → Level → (Term, only if the school has any) →
+// list of core/elective entries with add/remove.
+
+function CurriculumTab({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [levelsByProgramme, setLevelsByProgramme] = useState<Record<string, ProgrammeLevel[]>>({})
+  const [courses, setCourses] = useState<Course[]>([])
+  const [terms, setTerms] = useState<Term[]>([])
+
+  const [selectedProgrammeId, setSelectedProgrammeId] = useState<string | null>(null)
+  const [selectedLevelId, setSelectedLevelId] = useState<string | null>(null)
+  const [selectedTermId, setSelectedTermId] = useState<string | null>(null)
+
+  const [entries, setEntries] = useState<CurriculumEntry[]>([])
+  const [entriesLoading, setEntriesLoading] = useState(false)
+
+  // Add-entry form
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [addCourseId, setAddCourseId] = useState<string | null>(null)
+  const [addReqType, setAddReqType] = useState<'core' | 'elective'>('core')
+  const [addPrereqId, setAddPrereqId] = useState<string | null>(null)
+  const [addSaving, setAddSaving] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [pRes, sessRes, cRes] = await Promise.all([
+      loadProgrammes(schoolId),
+      loadCurrentSession(schoolId),
+      loadCourses(schoolId),
+    ])
+    if (pRes.error) { setError(pRes.error); setLoading(false); return }
+    if (cRes.error) { setError(cRes.error); setLoading(false); return }
+    setProgrammes(pRes.data)
+    setCourses(cRes.data)
+    const levelEntries = await Promise.all(
+      pRes.data.map(async (prog) => [prog.id, (await loadProgrammeLevels(prog.id)).data] as const),
+    )
+    setLevelsByProgramme(Object.fromEntries(levelEntries))
+    // Terms are only meaningful once we know the current session — a school
+    // with uses_terms=false (or between sessions) simply has an empty terms
+    // list, and the term picker below stays hidden rather than showing a
+    // disabled/empty control (mirrors InstitutionTab's own between-sessions
+    // handling for placements).
+    if (!sessRes.error && sessRes.data) {
+      const tRes = await loadTerms(schoolId, sessRes.data.id)
+      if (!tRes.error) setTerms(tRes.data)
+    }
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  const loadEntries = useCallback(async () => {
+    if (!selectedLevelId) { setEntries([]); return }
+    setEntriesLoading(true)
+    const res = await loadCurriculum(selectedLevelId, terms.length > 0 ? selectedTermId : null)
+    setEntries(res.error ? [] : res.data)
+    setEntriesLoading(false)
+  }, [selectedLevelId, selectedTermId, terms.length])
+
+  useEffect(() => { loadEntries() }, [loadEntries])
+
+  const selectedLevels = selectedProgrammeId ? (levelsByProgramme[selectedProgrammeId] ?? []) : []
+
+  function openAddForm() {
+    setAddCourseId(null)
+    setAddReqType('core')
+    setAddPrereqId(null)
+    setAddError(null)
+    setShowAddForm(true)
+  }
+
+  async function handleAddEntry() {
+    if (!selectedProgrammeId || !selectedLevelId) { setAddError('Choose a programme and level first.'); return }
+    if (!addCourseId) { setAddError('Choose a course.'); return }
+    setAddSaving(true)
+    const res = await addCurriculumEntry({
+      programme_id: selectedProgrammeId,
+      programme_level_id: selectedLevelId,
+      course_id: addCourseId,
+      term_id: terms.length > 0 ? selectedTermId : null,
+      requirement_type: addReqType,
+      prerequisite_course_id: addPrereqId,
+    })
+    if (res.error) { setAddError(res.error); setAddSaving(false); return }
+    setShowAddForm(false)
+    setAddSaving(false)
+    await loadEntries()
+  }
+
+  async function handleRemoveEntry(entryId: string) {
+    const res = await removeCurriculumEntry(entryId)
+    if (!res.error) await loadEntries()
+  }
+
+  if (loading) return <div className="set-tab-content"><p className="set-hint-text">Loading…</p></div>
+  if (error) return <div className="set-tab-content"><p className="set-form-error">{error}</p></div>
+
+  return (
+    <div className="set-tab-content">
+      <FieldRow label="Programme">
+        <select
+          className="set-select"
+          value={selectedProgrammeId ?? ''}
+          onChange={e => { setSelectedProgrammeId(e.target.value || null); setSelectedLevelId(null) }}
+        >
+          <option value="">Choose a programme</option>
+          {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </FieldRow>
+
+      {selectedProgrammeId && (
+        <FieldRow label="Level">
+          <select
+            className="set-select"
+            value={selectedLevelId ?? ''}
+            onChange={e => setSelectedLevelId(e.target.value || null)}
+          >
+            <option value="">Choose a level</option>
+            {selectedLevels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+          </select>
+        </FieldRow>
+      )}
+
+      {/* Term picker only appears when this school actually has terms
+          defined for the current session — otherwise curriculum is scoped
+          by session alone (term_id stays null throughout), per §7.4. */}
+      {selectedLevelId && terms.length > 0 && (
+        <FieldRow label="Term">
+          <select
+            className="set-select"
+            value={selectedTermId ?? ''}
+            onChange={e => setSelectedTermId(e.target.value || null)}
+          >
+            <option value="">Choose a term</option>
+            {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </FieldRow>
+      )}
+
+      {selectedLevelId && (terms.length === 0 || selectedTermId) && (
+        <>
+          <div className="set-section-header">
+            <SectionLabel>Curriculum</SectionLabel>
+            <button className="set-add-btn" onClick={openAddForm} disabled={courses.length === 0}>+ Add course</button>
+          </div>
+          {courses.length === 0 ? (
+            <p className="set-empty-hint">No courses in the catalogue yet — add some in the Institution tab first.</p>
+          ) : entriesLoading ? (
+            <p className="set-hint-text">Loading…</p>
+          ) : entries.length === 0 ? (
+            <p className="set-empty-hint">No courses assigned yet for this {terms.length > 0 ? 'level/term' : 'level'}.</p>
+          ) : (
+            <>
+              <p className="set-hint-text">
+                {entries.reduce((sum, e) => sum + e.credit_units, 0)} total credit units
+                {' · '}{entries.filter(e => e.requirement_type === 'core').length} core
+                {' · '}{entries.filter(e => e.requirement_type === 'elective').length} elective
+              </p>
+              {entries.map(e => (
+                <div key={e.id} className="set-list-row">
+                  <div className="set-list-row-info">
+                    <p className="set-list-row-name">{e.course_code} — {e.course_title}</p>
+                    <p className="set-list-row-meta">
+                      {e.credit_units} unit{e.credit_units === 1 ? '' : 's'}
+                      {' · '}<span className="set-type-chip">{e.requirement_type}</span>
+                      {e.prerequisite_course_code ? ` · Prerequisite: ${e.prerequisite_course_code}` : ''}
+                    </p>
+                  </div>
+                  <button className="set-edit-btn" onClick={() => handleRemoveEntry(e.id)}>Remove</button>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
+      {selectedLevelId && terms.length > 0 && !selectedTermId && (
+        <p className="set-empty-hint">Choose a term to view or edit that term's curriculum.</p>
+      )}
+
+      {showAddForm && (
+        <div className="set-overlay" onClick={() => setShowAddForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">Add course to curriculum</h2>
+            <FieldRow label="Course">
+              <select className="set-select" value={addCourseId ?? ''} onChange={e => setAddCourseId(e.target.value || null)}>
+                <option value="">Choose a course</option>
+                {courses
+                  .filter(c => !entries.some(e => e.course_id === c.id))
+                  .map(c => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Requirement type">
+              <select className="set-select" value={addReqType} onChange={e => setAddReqType(e.target.value as 'core' | 'elective')}>
+                <option value="core">Core</option>
+                <option value="elective">Elective</option>
+              </select>
+            </FieldRow>
+            <FieldRow label="Prerequisite (optional)">
+              <select className="set-select" value={addPrereqId ?? ''} onChange={e => setAddPrereqId(e.target.value || null)}>
+                <option value="">None</option>
+                {courses.filter(c => c.id !== addCourseId).map(c => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+              </select>
+            </FieldRow>
+            {addError && <p className="set-form-error">{addError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowAddForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleAddEntry} disabled={addSaving}>{addSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab: Course offerings ─────────────────────────────────────────────────
+//
+// Unscheduled interim step before SESSION 60, PRD Tier 8 / Problem 8.7 —
+// closes the gap SESSION 58's close-out surfaced: "no course_offerings
+// creation UI exists anywhere ... every test in this session used a direct
+// SQL insert." An offering is "this course, this session/term, this
+// lecturer" — the real per-session object course_registrations and
+// course_attendance_sessions both key off, distinct from the catalogue
+// (courses, InstitutionTab) and the requirement structure (programme_
+// curriculum, CurriculumTab above).
+//
+// course_offerings has no school_id column of its own — every write here
+// is scoped purely by RLS (join through course_id -> courses.school_id,
+// confirmed via direct SQL read before this was built, not assumed). The
+// course/session/term pickers are still filtered to this school's own data
+// via loadCourses()/loadSessions()/loadTerms(), so the UI can never even
+// offer a cross-school id, though RLS is the real enforcement either way.
+//
+// venue_id is deliberately not exposed in this form — §7.15's venues table
+// doesn't exist yet (Problem 8.4 not accepted); the column is nullable, so
+// omitting it is correct, not a stopgap.
+function OfferingsTab({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [terms, setTerms] = useState<Term[]>([])
+  const [courses, setCourses] = useState<Course[]>([])
+  const [staff, setStaff] = useState<StaffListItem[]>([])
+
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [selectedTermId, setSelectedTermId] = useState<string | null>(null)
+
+  const [offerings, setOfferings] = useState<CourseOffering[]>([])
+  const [offeringsLoading, setOfferingsLoading] = useState(false)
+
+  const [showForm, setShowForm] = useState(false)
+  const [editingOffering, setEditingOffering] = useState<CourseOffering | null>(null)
+  const [fCourseId, setFCourseId] = useState<string | null>(null)
+  const [fStaffId, setFStaffId] = useState<string | null>(null)
+  const [fThreshold, setFThreshold] = useState('')
+  const [fSaving, setFSaving] = useState(false)
+  const [fError, setFError] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [sessRes, cRes, stRes, curRes] = await Promise.all([
+      loadSessions(schoolId),
+      loadCourses(schoolId),
+      loadStaffWithRoles(schoolId),
+      loadCurrentSession(schoolId),
+    ])
+    if (sessRes.error) { setError(sessRes.error); setLoading(false); return }
+    if (cRes.error) { setError(cRes.error); setLoading(false); return }
+    if (stRes.error) { setError(stRes.error); setLoading(false); return }
+    setSessions(sessRes.data)
+    setCourses(cRes.data)
+    setStaff(stRes.data)
+    // Default the picker to the current session, same convention
+    // CurriculumTab uses for its own term default — an admin opening this
+    // tab almost always wants to see/build the current session's offerings
+    // first, not an empty picker.
+    if (!curRes.error && curRes.data) setSelectedSessionId(curRes.data.id)
+    else if (sessRes.data.length > 0) setSelectedSessionId(sessRes.data[0].id)
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  const loadTermsForSession = useCallback(async () => {
+    if (!selectedSessionId) { setTerms([]); return }
+    const res = await loadTerms(schoolId, selectedSessionId)
+    setTerms(res.error ? [] : res.data)
+    setSelectedTermId(null)
+  }, [schoolId, selectedSessionId])
+
+  useEffect(() => { loadTermsForSession() }, [loadTermsForSession])
+
+  const loadOfferingsList = useCallback(async () => {
+    if (!selectedSessionId) { setOfferings([]); return }
+    if (terms.length > 0 && !selectedTermId) { setOfferings([]); return }
+    setOfferingsLoading(true)
+    const res = await loadCourseOfferings(selectedSessionId, terms.length > 0 ? selectedTermId : null)
+    setOfferings(res.error ? [] : res.data)
+    setOfferingsLoading(false)
+  }, [schoolId, selectedSessionId, selectedTermId, terms.length])
+
+  useEffect(() => { loadOfferingsList() }, [loadOfferingsList])
+
+  function openForm(o?: CourseOffering) {
+    setEditingOffering(o ?? null)
+    setFCourseId(o?.course_id ?? null)
+    setFStaffId(o?.staff_id ?? null)
+    setFThreshold(o?.attendance_eligibility_threshold_pct != null ? String(o.attendance_eligibility_threshold_pct) : '')
+    setFError(null)
+    setShowForm(true)
+  }
+
+  async function handleSave() {
+    if (!selectedSessionId) { setFError('Choose a session first.'); return }
+    if (!fCourseId) { setFError('Choose a course.'); return }
+    let threshold: number | null = null
+    if (fThreshold) {
+      threshold = Number(fThreshold)
+      if (Number.isNaN(threshold) || threshold < 0 || threshold > 100) {
+        setFError('Eligibility threshold must be a percentage between 0 and 100.')
+        return
+      }
+    }
+    setFSaving(true)
+    const res = await upsertCourseOffering({
+      id: editingOffering?.id,
+      course_id: fCourseId,
+      session_id: selectedSessionId,
+      term_id: terms.length > 0 ? selectedTermId : null,
+      staff_id: fStaffId,
+      attendance_eligibility_threshold_pct: threshold,
+    })
+    if (res.error) { setFError(res.error); setFSaving(false); return }
+    setShowForm(false)
+    setFSaving(false)
+    await loadOfferingsList()
+  }
+
+  async function handleDelete(offeringId: string, label: string) {
+    if (!confirm(`Delete the offering "${label}"? This cannot be undone if course registrations or attendance already reference it.`)) return
+    setDeletingId(offeringId)
+    const res = await deleteCourseOffering(offeringId)
+    if (res.error) { alert(res.error); setDeletingId(null); return }
+    setOfferings(prev => prev.filter(o => o.id !== offeringId))
+    setDeletingId(null)
+  }
+
+  if (loading) return <Skeleton />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <FieldRow label="Session">
+        <select
+          className="set-select"
+          value={selectedSessionId ?? ''}
+          onChange={e => setSelectedSessionId(e.target.value || null)}
+        >
+          <option value="">Choose a session</option>
+          {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </FieldRow>
+
+      {selectedSessionId && terms.length > 0 && (
+        <FieldRow label="Term">
+          <select
+            className="set-select"
+            value={selectedTermId ?? ''}
+            onChange={e => setSelectedTermId(e.target.value || null)}
+          >
+            <option value="">Choose a term</option>
+            {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </FieldRow>
+      )}
+
+      {selectedSessionId && (terms.length === 0 || selectedTermId) && (
+        <>
+          <div className="set-section-header">
+            <SectionLabel>Offerings</SectionLabel>
+            <button className="set-add-btn" onClick={() => openForm()} disabled={courses.length === 0}>+ Add offering</button>
+          </div>
+          {courses.length === 0 ? (
+            <p className="set-empty-hint">No courses in the catalogue yet — add some in the Institution tab first.</p>
+          ) : offeringsLoading ? (
+            <p className="set-hint-text">Loading…</p>
+          ) : offerings.length === 0 ? (
+            <p className="set-empty-hint">No offerings yet for this {terms.length > 0 ? 'session/term' : 'session'}.</p>
+          ) : (
+            offerings.map(o => (
+              <div key={o.id} className="set-list-row">
+                <div className="set-list-row-info">
+                  <p className="set-list-row-name">{o.course_code} — {o.course_title}</p>
+                  <p className="set-list-row-meta">
+                    {o.staff_name ? `Lecturer: ${o.staff_name}` : 'No lecturer assigned'}
+                    {o.attendance_eligibility_threshold_pct != null ? ` · ${o.attendance_eligibility_threshold_pct}% eligibility threshold` : ''}
+                  </p>
+                </div>
+                <div className="set-list-row-actions">
+                  <button className="set-edit-btn" onClick={() => openForm(o)}>Edit</button>
+                  <button
+                    className="set-delete-btn"
+                    onClick={() => handleDelete(o.id, `${o.course_code} — ${o.course_title}`)}
+                    disabled={deletingId === o.id}
+                    aria-label={`Delete offering ${o.course_code}`}
+                  >
+                    <Icon name="x" size={16} />
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </>
+      )}
+
+      {selectedSessionId && terms.length > 0 && !selectedTermId && (
+        <p className="set-empty-hint">Choose a term to view or add offerings for that term.</p>
+      )}
+
+      {showForm && (
+        <div className="set-overlay" onClick={() => setShowForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingOffering ? 'Edit offering' : 'Add offering'}</h2>
+            <FieldRow label="Course">
+              <select className="set-select" value={fCourseId ?? ''} onChange={e => setFCourseId(e.target.value || null)}>
+                <option value="">Choose a course</option>
+                {courses.map(c => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Lecturer (optional)">
+              <select className="set-select" value={fStaffId ?? ''} onChange={e => setFStaffId(e.target.value || null)}>
+                <option value="">Unassigned</option>
+                {staff.map(s => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+              </select>
+            </FieldRow>
+            <FieldRow label="Attendance eligibility threshold % (optional)">
+              <Input value={fThreshold} onChange={v => setFThreshold(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 75" />
+            </FieldRow>
+            {fError && <p className="set-form-error">{fError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSave} disabled={fSaving}>{fSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab: Grading (grade scale + CGPA policy) ─────────────────────────────────
+//
+// PRD Tier 8 / Problem 8.7, SESSION 59, §7.27.4. Higher-ed-only (gated in
+// buildTabs, above). Two independent sections on one tab, matching the size
+// of the feature (neither alone is big enough to earn its own tab):
+//   - Grade scale bands: multiple rows per school, add/edit/delete — same
+//     shape as CalendarTab's periods list, template followed directly below
+//     (set-list-row-actions with Edit + Delete buttons, window.confirm on
+//     delete, hard delete per the catalogue/config carve-out already used
+//     by deletePeriod/deleteRole/deleteStudentRole).
+//   - CGPA policy: at most one row per school (cgpa_policy.school_id is
+//     unique) — a plain settings form, not a list. loadCgpaPolicy()
+//     returning { data: null } is expected or an "Other"-category school
+//     that has never configured this (Phase 0 Decision 5) and is rendered
+//     as an unfilled form, not an error.
+//
+// Numeric fields (min_pct, max_pct, grade_point, scale_max, credit loads)
+// are held as raw strings during editing and coerced with Number() only at
+// save time — the same pattern CurriculumTab's credit-units field uses,
+// fixing the per-keystroke-coercion bug recorded for that field.
+function GradingTab({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [bands, setBands] = useState<GradeScaleBand[]>([])
+  const [policy, setPolicy] = useState<CgpaPolicy | null>(null)
+
+  // Add/edit grade band form
+  const [showBandForm, setShowBandForm] = useState(false)
+  const [editingBand, setEditingBand] = useState<GradeScaleBand | null>(null)
+  const [bLabel, setBLabel] = useState('')
+  const [bMinPct, setBMinPct] = useState('')
+  const [bMaxPct, setBMaxPct] = useState('')
+  const [bGradePoint, setBGradePoint] = useState('')
+  const [bScaleMax, setBScaleMax] = useState('5')
+  const [bRemark, setBRemark] = useState('')
+  const [bSaving, setBSaving] = useState(false)
+  const [bError, setBError] = useState<string | null>(null)
+  const [deletingBandId, setDeletingBandId] = useState<string | null>(null)
+
+  // CGPA policy form — held as its own editable draft, separate from the
+  // loaded `policy`, so "no policy configured yet" still renders a normal
+  // (empty) form rather than a hint-only state; same reasoning InstitutionTab
+  // uses for a school with no programmes yet.
+  const [rollupMethod, setRollupMethod] = useState<'weighted_all_attempts' | 'average_of_semester_gpas' | ''>('')
+  const [retakeTreatment, setRetakeTreatment] = useState<'replacement' | 'dilution' | ''>('')
+  const [minCreditLoad, setMinCreditLoad] = useState('')
+  const [maxCreditLoad, setMaxCreditLoad] = useState('')
+  const [policySaving, setPolicySaving] = useState(false)
+  const [policyError, setPolicyError] = useState<string | null>(null)
+  const [policySaved, setPolicySaved] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [bRes, pRes] = await Promise.all([
+      loadHigherEdGradeScale(schoolId),
+      loadCgpaPolicy(schoolId),
+    ])
+    if (bRes.error) { setError(bRes.error); setLoading(false); return }
+    if (pRes.error) { setError(pRes.error); setLoading(false); return }
+    setBands(bRes.data)
+    setPolicy(pRes.data)
+    setRollupMethod(pRes.data?.rollup_method ?? '')
+    setRetakeTreatment(pRes.data?.retake_treatment ?? '')
+    setMinCreditLoad(pRes.data?.min_credit_load != null ? String(pRes.data.min_credit_load) : '')
+    setMaxCreditLoad(pRes.data?.max_credit_load != null ? String(pRes.data.max_credit_load) : '')
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  function openBandForm(b?: GradeScaleBand) {
+    setEditingBand(b ?? null)
+    setBLabel(b?.grade_label ?? '')
+    setBMinPct(b?.min_score != null ? String(b.min_score) : '')
+    setBMaxPct(b?.max_score != null ? String(b.max_score) : '')
+    setBGradePoint(b?.grade_point != null ? String(b.grade_point) : '')
+    setBScaleMax(b?.scale_max != null ? String(b.scale_max) : (bands[0]?.scale_max != null ? String(bands[0].scale_max) : '5'))
+    setBRemark(b?.remark ?? '')
+    setBError(null)
+    setShowBandForm(true)
+  }
+
+  async function handleSaveBand() {
+    if (!bLabel) { setBError('Grade letter is required.'); return }
+    const minPct = Number(bMinPct)
+    const maxPct = Number(bMaxPct)
+    const gradePoint = Number(bGradePoint)
+    const scaleMax = Number(bScaleMax)
+    if (!bMinPct || !bMaxPct || Number.isNaN(minPct) || Number.isNaN(maxPct)) {
+      setBError('Min and max percentage are required numbers.')
+      return
+    }
+    if (minPct < 0 || maxPct > 100 || minPct > maxPct) {
+      setBError('Percentage range must be between 0 and 100, with min ≤ max.')
+      return
+    }
+    if (!bGradePoint || Number.isNaN(gradePoint) || gradePoint < 0) {
+      setBError('Grade point is required and must be 0 or more.')
+      return
+    }
+    if (!bScaleMax || Number.isNaN(scaleMax) || scaleMax <= 0) {
+      setBError('Scale max (e.g. 5.0 or 4.0) is required.')
+      return
+    }
+    setBSaving(true)
+    const res = await upsertHigherEdGradeBand(schoolId, {
+      id: editingBand?.id,
+      min_score: minPct,
+      max_score: maxPct,
+      grade_label: bLabel,
+      grade_point: gradePoint,
+      scale_max: scaleMax,
+      remark: bRemark || null,
+      sort_order: editingBand?.sort_order ?? bands.length,
+    })
+    if (res.error) { setBError(res.error); setBSaving(false); return }
+    setShowBandForm(false)
+    setBSaving(false)
+    await load()
+  }
+
+  async function handleDeleteBand(bandId: string, label: string) {
+    if (!confirm(`Delete the "${label}" grade band?`)) return
+    setDeletingBandId(bandId)
+    const res = await deleteHigherEdGradeBand(schoolId, bandId)
+    if (res.error) { alert(res.error); setDeletingBandId(null); return }
+    setBands(prev => prev.filter(b => b.id !== bandId))
+    setDeletingBandId(null)
+  }
+
+  async function handleSavePolicy() {
+    setPolicySaved(false)
+    if (!rollupMethod) { setPolicyError('Choose a CGPA roll-up method.'); return }
+    if (!retakeTreatment) { setPolicyError('Choose how retakes are treated.'); return }
+    const minLoad = minCreditLoad ? Number(minCreditLoad) : null
+    const maxLoad = maxCreditLoad ? Number(maxCreditLoad) : null
+    if (minCreditLoad && (minLoad === null || Number.isNaN(minLoad) || minLoad < 0)) {
+      setPolicyError('Min credit load must be a non-negative number.')
+      return
+    }
+    if (maxCreditLoad && (maxLoad === null || Number.isNaN(maxLoad) || maxLoad < 0)) {
+      setPolicyError('Max credit load must be a non-negative number.')
+      return
+    }
+    if (minLoad !== null && maxLoad !== null && minLoad > maxLoad) {
+      setPolicyError('Min credit load cannot exceed max credit load.')
+      return
+    }
+    setPolicyError(null)
+    setPolicySaving(true)
+    const res = await upsertCgpaPolicy(schoolId, {
+      rollup_method: rollupMethod,
+      retake_treatment: retakeTreatment,
+      min_credit_load: minLoad,
+      max_credit_load: maxLoad,
+    })
+    if (res.error) { setPolicyError(res.error); setPolicySaving(false); return }
+    setPolicySaving(false)
+    setPolicySaved(true)
+    await load()
+  }
+
+  if (loading) return <Skeleton />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <div className="set-section-header">
+        <SectionLabel>Grade scale</SectionLabel>
+        <button className="set-add-btn" onClick={() => openBandForm()}>+ Add band</button>
+      </div>
+
+      {bands.length === 0 ? (
+        <p className="set-empty-hint">No grade bands yet. Add one for each letter grade — e.g. A: 70–100, 5.0 points.</p>
+      ) : (
+        bands.map(b => (
+          <div key={b.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{b.grade_label}</p>
+              <p className="set-list-row-meta">
+                {b.min_score}–{b.max_score}%
+                {b.grade_point != null ? ` · ${b.grade_point} pts` : ''}
+                {b.scale_max != null ? ` (of ${b.scale_max})` : ''}
+                {b.remark ? ` · ${b.remark}` : ''}
+              </p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openBandForm(b)}>Edit</button>
+              <button
+                className="set-delete-btn"
+                onClick={() => handleDeleteBand(b.id, b.grade_label)}
+                disabled={deletingBandId === b.id}
+                aria-label={`Delete grade band ${b.grade_label}`}
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          </div>
+        ))
+      )}
+
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>CGPA policy</SectionLabel>
+      </div>
+      <p className="set-hint-text">Applies once, school-wide. Controls how course results roll up into a student's GPA and CGPA.</p>
+
+      <FieldRow label="Roll-up method">
+        <select
+          className="set-select"
+          value={rollupMethod}
+          onChange={e => { setRollupMethod(e.target.value as typeof rollupMethod); setPolicySaved(false) }}
+        >
+          <option value="">Choose a method</option>
+          <option value="weighted_all_attempts">Weighted across all attempts</option>
+          <option value="average_of_semester_gpas">Average of semester GPAs</option>
+        </select>
+      </FieldRow>
+
+      <FieldRow label="Retake treatment">
+        <select
+          className="set-select"
+          value={retakeTreatment}
+          onChange={e => { setRetakeTreatment(e.target.value as typeof retakeTreatment); setPolicySaved(false) }}
+        >
+          <option value="">Choose a treatment</option>
+          <option value="replacement">Replacement (retake score replaces the original)</option>
+          <option value="dilution">Dilution (both attempts count toward CGPA)</option>
+        </select>
+      </FieldRow>
+
+      <FieldRow label="Min credit load (optional)">
+        <Input value={minCreditLoad} onChange={v => { setMinCreditLoad(v.replace(/[^0-9]/g, '')); setPolicySaved(false) }} placeholder="e.g. 15" />
+      </FieldRow>
+      <FieldRow label="Max credit load (optional)">
+        <Input value={maxCreditLoad} onChange={v => { setMaxCreditLoad(v.replace(/[^0-9]/g, '')); setPolicySaved(false) }} placeholder="e.g. 24" />
+      </FieldRow>
+
+      {policyError && <p className="set-form-error">{policyError}</p>}
+      {policySaved && !policyError && <p className="set-hint-text">Saved.</p>}
+      <div className="set-sheet-footer" style={{ paddingLeft: 0 }}>
+        <button className="set-save-btn" onClick={handleSavePolicy} disabled={policySaving}>
+          {policySaving ? 'Saving…' : policy ? 'Update policy' : 'Save policy'}
+        </button>
+      </div>
+
+      {showBandForm && (
+        <div className="set-overlay" onClick={() => setShowBandForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingBand ? 'Edit grade band' : 'Add grade band'}</h2>
+            <FieldRow label="Letter grade">
+              <Input value={bLabel} onChange={setBLabel} placeholder="e.g. A, B, C, F" />
+            </FieldRow>
+            <FieldRow label="Min %">
+              <Input value={bMinPct} onChange={v => setBMinPct(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 70" />
+            </FieldRow>
+            <FieldRow label="Max %">
+              <Input value={bMaxPct} onChange={v => setBMaxPct(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 100" />
+            </FieldRow>
+            <FieldRow label="Grade point">
+              <Input value={bGradePoint} onChange={v => setBGradePoint(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 5.0" />
+            </FieldRow>
+            <FieldRow label="Scale max">
+              <Input value={bScaleMax} onChange={v => setBScaleMax(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 5.0 or 4.0" />
+            </FieldRow>
+            <FieldRow label="Remark (optional)">
+              <Input value={bRemark} onChange={setBRemark} placeholder="e.g. Excellent, Fail" />
+            </FieldRow>
+            {bError && <p className="set-form-error">{bError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowBandForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveBand} disabled={bSaving}>{bSaving ? 'Saving…' : 'Save'}</button>
             </div>
           </div>
         </div>

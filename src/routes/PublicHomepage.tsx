@@ -28,6 +28,7 @@ import {
   type PublicHomepagePost,
   type WelcomePost,
   type WelcomePostBlock,
+  type WelcomePostTextRun,
 } from '../services/publicHomepageService'
 
 // ─── Skeleton (same minimal convention as AdminDashboard.tsx's own) ───────
@@ -42,19 +43,44 @@ function Skeleton({ className = '' }: { className?: string }) {
 // PublicHomepageProps's caller — the parent component decides which of
 // the two to render, this component only ever renders a real post).
 
+function TextRuns({ runs }: { runs: WelcomePostTextRun[] }) {
+  return (
+    <>
+      {runs.map((run, i) => {
+        let node: React.ReactNode = run.text
+        if (run.bold) node = <strong>{node}</strong>
+        if (run.italic) node = <em>{node}</em>
+        return <span key={i}>{node}</span>
+      })}
+    </>
+  )
+}
+
 function BlocksView({ blocks }: { blocks: WelcomePostBlock[] }) {
   return (
     <>
-      {blocks.map((block, i) =>
-        block.type === 'paragraph' ? (
-          <p key={i} className="public-home-post-paragraph">{block.text}</p>
-        ) : (
-          <figure key={i} className="public-home-post-figure">
-            <img src={block.url} alt={block.caption ?? ''} className="public-home-post-image" loading="lazy" />
-            {block.caption && <figcaption className="public-home-post-caption">{block.caption}</figcaption>}
-          </figure>
+      {blocks.map((block, i) => {
+        if (block.type === 'image') {
+          return (
+            <figure key={i} className="public-home-post-figure">
+              <img src={block.url} alt={block.caption ?? ''} className="public-home-post-image" loading="lazy" />
+              {block.caption && <figcaption className="public-home-post-caption">{block.caption}</figcaption>}
+            </figure>
+          )
+        }
+        // Heading level is block-level — the whole line is either a real
+        // h2/h3/h4 or a plain paragraph, matching how the block was
+        // authored in Settings. Genuine heading elements, not just a
+        // bigger font size on a <p>, so the public page's own document
+        // structure (screen readers, browser "outline") reflects what
+        // the admin actually wrote.
+        const TextTag = block.level === 'p' ? 'p' : block.level
+        return (
+          <TextTag key={i} className={`public-home-post-paragraph public-home-post-paragraph--${block.level}`}>
+            <TextRuns runs={block.runs} />
+          </TextTag>
         )
-      )}
+      })}
     </>
   )
 }

@@ -508,6 +508,22 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
       setStaffAssignmentsState('error')
     }
 
+    // Tier 8 fix: assignmentOptions (specifically currentSessionId) was
+    // previously only loaded lazily, on Edit-mode entry (see
+    // ensureAssignmentOptionsLoaded, still used for that path too — it's a
+    // no-op once state is 'ready'). But the "Currently teaching" / "Teaching
+    // history" split just above reads assignmentOptions?.currentSessionId on
+    // every render of this panel, before Edit is ever opened. With
+    // currentSessionId still null at that point, the split's `currentId ??
+    // undefined` comparison put every real assignment — including the
+    // current session's — into "Teaching history," and "Currently teaching"
+    // always read empty, even though teaching_assignments had correct rows
+    // (confirmed correct independently by Timetable/TeacherDashboard).
+    // Loading it here, alongside staffAssignments, means the split is
+    // correct the moment the panel opens, not only after Edit has been
+    // clicked once.
+    void ensureAssignmentOptionsLoaded()
+
     // Default password (Session 10b) — also loads independently. A non-admin
     // caller gets { ok: true, data: null } (the view's own RLS scoping, not
     // an error), so this naturally resolves to 'empty' for them and the
@@ -633,8 +649,11 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
   }
 
   // Lazy-load subjects/leaf-classes/current-session-id for the teaching
-  // assignment picker (Session 10b) — same lazy-on-edit-entry rationale as
-  // the roles catalog above.
+  // assignment picker (Session 10b). Originally edit-only-lazy, same
+  // rationale as the roles catalog above; now (Tier 8 fix) also called
+  // eagerly from openStaffDetail() so currentSessionId is available for the
+  // "Currently teaching" / "Teaching history" split before Edit is ever
+  // opened — the guard below still makes this a no-op if already loaded.
   async function ensureAssignmentOptionsLoaded() {
     if (assignmentOptionsState === 'ready') return
     setAssignmentOptionsState('loading')

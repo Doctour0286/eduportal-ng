@@ -16,6 +16,30 @@
  *   saveStudentRole()    — create/update a role definition
  *   deleteStudentRole()  — remove a role definition (hard delete — see §7.8a)
  *
+ * Grade scale & CGPA policy exports (Session 59, PRD Tier 8 / Problem 8.7, §7.27.4):
+ *   loadHigherEdGradeScale()    — this school's grade bands (grade_scales;
+ *                                 extended, not new — shared with the
+ *                                 secondary-school Results module)
+ *   upsertHigherEdGradeBand()   — create/update one band
+ *   deleteHigherEdGradeBand()   — remove one band (hard delete)
+ *   loadCgpaPolicy()            — this school's CGPA policy (null if unconfigured —
+ *                                 expected for an "Other"-category school, Decision 5)
+ *   upsertCgpaPolicy()          — create/update the one-row-per-school policy
+ *
+ * Course offering exports (unscheduled interim step before Session 60,
+ * PRD Tier 8 / Problem 8.7 — closes the gap Session 58's close-out surfaced,
+ * "no course_offerings creation UI exists anywhere"):
+ *   loadCourseOfferings()  — offerings for a session (+ optional term), joined
+ *                            to course code/title and lecturer name for display
+ *   upsertCourseOffering() — create/update one offering ("this course, this
+ *                            session/term, this lecturer")
+ *   deleteCourseOffering() — remove one offering (hard delete)
+ *   course_offerings carries no school_id column of its own — every function
+ *   here relies on RLS (join through course_id -> courses.school_id, the
+ *   real live policy, confirmed via direct SQL read before writing this
+ *   section rather than assumed from the master plan's [STD] shorthand) as
+ *   the sole scoping mechanism; there is no .eq('school_id', ...) to write.
+ *
  * Pattern rules (consistent with every other service in this project):
  *   - No hard deletes — status changes only (roles: is_admin_role toggle;
  *     subjects/class_nodes/periods: soft-delete via status when needed)
@@ -52,9 +76,30 @@ export interface SchoolSettings {
 // school that saved a plain message before this feature existed doesn't
 // go blank. This editor no longer writes welcome_message going forward.
 
-export interface WelcomePostParagraphBlock {
-  type: 'paragraph'
+export interface WelcomePostTextRun {
   text: string
+  bold?: boolean
+  italic?: boolean
+}
+
+/** Heading level is block-level (the whole line either is a heading or
+ *  isn't), matching how every real block/rich-text editor treats
+ *  headings (WordPress, dotCMS, Contentstack). H1 is deliberately not an
+ *  option — the post's own heading field (and the school name above it)
+ *  already fill that role; offering a second H1 in body content is a
+ *  real accessibility/SEO anti-pattern (duplicate top-level heading),
+ *  not just an unlikely case to skip. 'p' = normal text. */
+export type WelcomePostTextLevel = 'p' | 'h2' | 'h3' | 'h4'
+
+export interface WelcomePostTextBlock {
+  type: 'text'
+  level: WelcomePostTextLevel
+  /** Bold/italic are inline "runs" within one text block, not a
+   *  block-level flag — matches the standard {text, marks} rich-text
+   *  shape (Contentstack/Sanity/Payload all model bold/italic this way)
+   *  since a real sentence often needs a bold word mid-run, not the
+   *  whole line bolded. */
+  runs: WelcomePostTextRun[]
 }
 
 export interface WelcomePostImageBlock {
@@ -63,7 +108,31 @@ export interface WelcomePostImageBlock {
   caption?: string
 }
 
-export type WelcomePostBlock = WelcomePostParagraphBlock | WelcomePostImageBlock
+export type WelcomePostBlock = WelcomePostTextBlock | WelcomePostImageBlock
+
+/** Legacy shape saved before the rich-text upgrade (2026-07-11 follow-up
+ *  #3) — a block used to be exactly { type: 'paragraph', text: string }.
+ *  Never migrated destructively in the database; instead every read path
+ *  normalizes through this so old posts keep rendering exactly as
+ *  before (plain, unstyled paragraph) without a one-time migration
+ *  script or any risk of silently losing old content. */
+interface LegacyParagraphBlock {
+  type: 'paragraph'
+  text: string
+}
+
+export function normalizeBlock(raw: WelcomePostBlock | LegacyParagraphBlock): WelcomePostBlock {
+  if ((raw as LegacyParagraphBlock).type === 'paragraph') {
+    const legacy = raw as LegacyParagraphBlock
+    return { type: 'text', level: 'p', runs: [{ text: legacy.text }] }
+  }
+  return raw as WelcomePostBlock
+}
+
+export function normalizeBlocks(raw: unknown): WelcomePostBlock[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map(normalizeBlock)
+}
 
 export interface WelcomePost {
   heading: string
@@ -110,6 +179,43 @@ export interface ClassNode {
   sort_order: number
   is_leaf_enrollable: boolean
   children?: ClassNode[]
+}
+
+// ─── Institution hierarchy (§7.27.1, PRD SESSION 55) ──────────────────────
+// Deliberately separate from ClassNode/class_nodes — see §7.27.1's own note:
+// programme_levels is administrative metadata a student's course
+// registrations cluster under, not a live daily container. Post-onboarding
+// admin UI for these lives in InstitutionTab, hidden unless school_type is a
+// higher-institution category (see SettingsModule.tsx).
+
+export interface Faculty {
+  id: string
+  name: string
+  code: string | null
+}
+
+export interface Department {
+  id: string
+  name: string
+  code: string | null
+  faculty_id: string | null
+}
+
+export interface Programme {
+  id: string
+  name: string
+  award_type: string
+  department_id: string
+  duration_sessions: number
+  min_credit_load: number | null
+  max_credit_load: number | null
+}
+
+export interface ProgrammeLevel {
+  id: string
+  programme_id: string
+  level_label: string
+  sequence_order: number
 }
 
 export interface Role {
@@ -399,10 +505,15 @@ export async function loadPublicConfig(schoolId: string): Promise<{ data: School
     .maybeSingle()
 
   if (error) return { data: null, error: error.message }
+  if (!data) {
+    return { data: { welcome_message: null, welcome_post: null, contact_info: null, show_announcements: true }, error: null }
+  }
+  const raw = data.welcome_post as { heading?: string; blocks?: unknown } | null
   return {
-    data: data
-      ? (data as SchoolPublicConfig)
-      : { welcome_message: null, welcome_post: null, contact_info: null, show_announcements: true },
+    data: {
+      ...(data as SchoolPublicConfig),
+      welcome_post: raw ? { heading: raw.heading ?? '', blocks: normalizeBlocks(raw.blocks) } : null,
+    },
     error: null,
   }
 }
@@ -495,6 +606,83 @@ export async function uploadWelcomePostImage(
   }
 }
 
+// ─── School logo upload (owner request, 2026-07-11 follow-up) ─────────────
+//
+// Before this: "Logo" in the School tab was a plain text URL input — the
+// admin had to already have the image hosted elsewhere and paste a link
+// in by hand. logo_url is read downstream in five places (public
+// homepage header, login page brand strip, app header chrome, App.tsx's
+// school-lookup skeleton, and the student ID card print feature via
+// schoolLogoUrl) — all as a plain <img src={...}>, none of them caring
+// how the URL got there. That's what makes this safe to upgrade without
+// touching any downstream consumer: this still just writes a public URL
+// string into the same schools.logo_url column.
+//
+// Own bucket (school-logos, see school_logos_bucket_setup.sql) rather
+// than reusing school-homepage-images — a logo is school-identity
+// content, not homepage-post content, and shouldn't share a path prefix
+// with ad-hoc post images an admin might later bulk-manage or delete.
+//
+// Smaller max dimension than homepage post images (a logo only ever
+// renders at avatar/header sizes, never hero-image size) and PNG instead
+// of JPEG — a real school badge/crest logo very often has transparency,
+// and JPEG would silently flatten that to a white or black square.
+
+const LOGO_MAX_DIMENSION = 512
+
+async function resizeLogoToBlob(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, LOGO_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height))
+  const width = Math.round(bitmap.width * scale)
+  const height = Math.round(bitmap.height * scale)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not prepare image for upload')
+  ctx.drawImage(bitmap, 0, 0, width, height)
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      blob => (blob ? resolve(blob) : reject(new Error('Could not prepare image for upload'))),
+      'image/png'
+    )
+  })
+}
+
+/**
+ * Uploads a school logo and returns its public URL. Mirrors
+ * uploadWelcomePostImage's proven pattern (client-side resize, public
+ * bucket, public URL returned) — same "always resize, no exceptions"
+ * exception to this file's general no-browser-only-APIs convention.
+ * upsert:true (unlike uploadWelcomePostImage) since a logo is a single
+ * per-school identity asset the admin replaces, not an accumulating list
+ * of post images — old objects under this school's folder are harmless
+ * leftovers, not a correctness issue, so no cleanup step is added here.
+ */
+export async function uploadSchoolLogo(
+  schoolId: string,
+  file: File
+): Promise<{ url: string | null; error: string | null }> {
+  try {
+    const blob = await resizeLogoToBlob(file)
+    const filename = `logo-${Date.now()}.png`
+    const path = `${schoolId}/${filename}`
+
+    const { error: uploadErr } = await supabase.storage
+      .from('school-logos')
+      .upload(path, blob, { contentType: 'image/png', upsert: true })
+
+    if (uploadErr) return { url: null, error: uploadErr.message }
+
+    const { data } = supabase.storage.from('school-logos').getPublicUrl(path)
+    return { url: data.publicUrl, error: null }
+  } catch (e) {
+    return { url: null, error: (e as Error).message }
+  }
+}
+
 // ─── Homepage posts (owner request, 2026-07-11 follow-up — upgrades the
 // single welcome_post above to a real list of several expandable posts) ────
 //
@@ -531,7 +719,10 @@ export async function loadHomepagePosts(
     .order('sort_order', { ascending: true })
 
   if (error) return { data: [], error: error.message }
-  return { data: (data ?? []) as HomepagePost[], error: null }
+  return {
+    data: (data ?? []).map(row => ({ ...row, blocks: normalizeBlocks(row.blocks) })) as HomepagePost[],
+    error: null,
+  }
 }
 
 export async function createHomepagePost(
@@ -926,6 +1117,416 @@ export async function upsertClassNode(
   }
 }
 
+// ─── Institution hierarchy: faculties → departments → programmes → levels ─
+// §7.27.1. Same {id?} upsert shape as upsertClassNode above, for consistency.
+
+export async function loadFaculties(schoolId: string): Promise<{ data: Faculty[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('faculties')
+    .select('id, name, code')
+    .eq('school_id', schoolId)
+    .order('name', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as Faculty[], error: null }
+}
+
+export async function upsertFaculty(
+  schoolId: string,
+  faculty: { id?: string; name: string; code?: string | null },
+): Promise<{ error: string | null }> {
+  if (faculty.id) {
+    const { error } = await supabase
+      .from('faculties')
+      .update({ name: faculty.name, code: faculty.code ?? null, updated_at: new Date().toISOString() })
+      .eq('id', faculty.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('faculties')
+    .insert({ school_id: schoolId, name: faculty.name, code: faculty.code ?? null })
+  return { error: error?.message ?? null }
+}
+
+export async function loadDepartments(schoolId: string): Promise<{ data: Department[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('departments')
+    .select('id, name, code, faculty_id')
+    .eq('school_id', schoolId)
+    .order('name', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as Department[], error: null }
+}
+
+export async function upsertDepartment(
+  schoolId: string,
+  department: { id?: string; name: string; code?: string | null; faculty_id: string | null },
+): Promise<{ error: string | null }> {
+  if (department.id) {
+    const { error } = await supabase
+      .from('departments')
+      .update({
+        name: department.name,
+        code: department.code ?? null,
+        faculty_id: department.faculty_id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', department.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('departments')
+    .insert({
+      school_id: schoolId,
+      name: department.name,
+      code: department.code ?? null,
+      faculty_id: department.faculty_id,
+    })
+  return { error: error?.message ?? null }
+}
+
+export async function loadProgrammes(schoolId: string): Promise<{ data: Programme[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('programmes')
+    .select('id, name, award_type, department_id, duration_sessions, min_credit_load, max_credit_load')
+    .eq('school_id', schoolId)
+    .order('name', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as Programme[], error: null }
+}
+
+export async function upsertProgramme(
+  schoolId: string,
+  programme: {
+    id?: string
+    name: string
+    award_type: string
+    department_id: string
+    duration_sessions: number
+    min_credit_load?: number | null
+    max_credit_load?: number | null
+  },
+): Promise<{ error: string | null }> {
+  const payload = {
+    name: programme.name,
+    award_type: programme.award_type,
+    department_id: programme.department_id,
+    duration_sessions: programme.duration_sessions,
+    min_credit_load: programme.min_credit_load ?? null,
+    max_credit_load: programme.max_credit_load ?? null,
+  }
+  if (programme.id) {
+    const { error } = await supabase
+      .from('programmes')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', programme.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('programmes')
+    .insert({ school_id: schoolId, ...payload })
+  return { error: error?.message ?? null }
+}
+
+// programme_levels has no school_id of its own (per §7.27.1) — school
+// scoping for writes is enforced by RLS via the programme_id join (see
+// migration_session_55.sql), matching role_permissions' own pattern.
+// §7.27.1a — student_programme_placements. Admits a student into a specific
+// programme level for a given session. History table (not a direct FK on
+// students), per the owner's explicit decision: `class_node_id` (§7.5) is a
+// bare overwritten FK with no history table behind it anywhere, and this
+// school has a real, stated need for retroactive "what level was this
+// student in last session" lookups that a direct FK would silently lose.
+export interface StudentSearchResult {
+  id: string
+  full_name: string
+  matric_number: string | null
+}
+
+export interface StudentProgrammePlacement {
+  id: string
+  student_id: string
+  student_name: string
+  student_matric_number: string | null
+  programme_level_id: string
+  session_id: string
+  is_current: boolean
+}
+
+export async function loadProgrammeLevels(programmeId: string): Promise<{ data: ProgrammeLevel[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('programme_levels')
+    .select('id, programme_id, level_label, sequence_order')
+    .eq('programme_id', programmeId)
+    .order('sequence_order', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as ProgrammeLevel[], error: null }
+}
+
+export async function upsertProgrammeLevel(
+  level: { id?: string; programme_id: string; level_label: string; sequence_order: number },
+): Promise<{ error: string | null }> {
+  if (level.id) {
+    const { error } = await supabase
+      .from('programme_levels')
+      .update({ level_label: level.level_label, sequence_order: level.sequence_order })
+      .eq('id', level.id)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('programme_levels')
+    .insert({ programme_id: level.programme_id, level_label: level.level_label, sequence_order: level.sequence_order })
+  return { error: error?.message ?? null }
+}
+
+// Current session for a school — used to default the placement form and to
+// gate it off entirely when no session is set, rather than inventing one.
+export async function loadCurrentSession(schoolId: string): Promise<{ data: Session | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('id, name, start_date, end_date, is_current')
+    .eq('school_id', schoolId)
+    .eq('is_current', true)
+    .maybeSingle()
+  if (error) return { data: null, error: error.message }
+  return { data: (data ?? null) as Session | null, error: null }
+}
+
+// Debounced type-to-search over this school's own students only — a plain
+// dropdown doesn't scale past a few dozen students, so this mirrors the
+// search-as-you-type pattern used elsewhere for large lists, rather than
+// the load-everything-then-filter pattern this file uses for small ones
+// (staff, class nodes).
+export async function searchStudents(
+  schoolId: string,
+  query: string,
+): Promise<{ data: StudentSearchResult[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('students')
+    .select('id, full_name, matric_number')
+    .eq('school_id', schoolId)
+    .or(`full_name.ilike.%${query}%,matric_number.ilike.%${query}%`)
+    .order('full_name', { ascending: true })
+    .limit(20)
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as StudentSearchResult[], error: null }
+}
+
+// Currently-placed students for one programme level — the admin's day-to-day
+// view ("who's placed into this level right now"). Historical placements
+// stay queryable directly via SQL per the PRD's Done Check; this deliberately
+// only surfaces is_current rows.
+export async function loadPlacementsForProgramme(
+  programmeLevelId: string,
+): Promise<{ data: StudentProgrammePlacement[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('student_programme_placements')
+    .select('id, student_id, programme_level_id, session_id, is_current, students(full_name, matric_number)')
+    .eq('programme_level_id', programmeLevelId)
+    .eq('is_current', true)
+  if (error) return { data: [], error: error.message }
+  // Joined relations cast through unknown → array before plucking [0], per
+  // this file's own established convention (see header comment).
+  const mapped = (data ?? []).map((row: any) => {
+    const student = (Array.isArray(row.students) ? row.students[0] : row.students) as
+      | { full_name: string; matric_number: string | null }
+      | undefined
+    return {
+      id: row.id,
+      student_id: row.student_id,
+      student_name: student?.full_name ?? 'Unknown student',
+      student_matric_number: student?.matric_number ?? null,
+      programme_level_id: row.programme_level_id,
+      session_id: row.session_id,
+      is_current: row.is_current,
+    }
+  })
+  return { data: mapped as StudentProgrammePlacement[], error: null }
+}
+
+// Admits a student into a programme level for a session. Demotes any prior
+// current placement for that student first — same demote-then-insert shape
+// as sessions.is_current — rather than relying on the DB's partial-unique
+// index alone to reject a second concurrent "current" row.
+export async function upsertPlacement(placement: {
+  school_id: string
+  student_id: string
+  programme_level_id: string
+  session_id: string
+}): Promise<{ error: string | null }> {
+  const { error: demoteError } = await supabase
+    .from('student_programme_placements')
+    .update({ is_current: false })
+    .eq('student_id', placement.student_id)
+    .eq('is_current', true)
+  if (demoteError) return { error: demoteError.message }
+
+  const { error } = await supabase
+    .from('student_programme_placements')
+    .insert({
+      school_id: placement.school_id,
+      student_id: placement.student_id,
+      programme_level_id: placement.programme_level_id,
+      session_id: placement.session_id,
+      is_current: true,
+    })
+  return { error: error?.message ?? null }
+}
+
+// ─── Course catalogue & curriculum (§7.27.2, PRD SESSION 56) ──────────────
+// courses is school-wide institutional metadata, scoped by school_id +
+// department_id, the same shape as Faculty/Department/Programme above — a
+// course exists independently of any one curriculum and is reused across
+// many. programme_curriculum is the assignment of a course into a specific
+// programme/level/term with a requirement_type and optional prerequisite;
+// deliberately its own concern (see SettingsModule.tsx's CurriculumTab),
+// mirroring the same "definition vs. per-target assignment" split already
+// drawn between ProgrammeLevel (definition) and StudentProgrammePlacement
+// (assignment) above.
+
+export interface Course {
+  id: string
+  school_id: string
+  department_id: string
+  code: string
+  title: string
+  credit_units: number
+  course_type: string | null
+}
+
+export interface CurriculumEntry {
+  id: string
+  programme_id: string
+  programme_level_id: string
+  course_id: string
+  course_code: string
+  course_title: string
+  credit_units: number
+  term_id: string | null
+  requirement_type: 'core' | 'elective'
+  prerequisite_course_id: string | null
+  prerequisite_course_code: string | null
+}
+
+export async function loadCourses(schoolId: string): Promise<{ data: Course[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('courses')
+    .select('id, school_id, department_id, code, title, credit_units, course_type')
+    .eq('school_id', schoolId)
+    .order('code', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as Course[], error: null }
+}
+
+export async function upsertCourse(
+  schoolId: string,
+  course: {
+    id?: string
+    department_id: string
+    code: string
+    title: string
+    credit_units: number
+    course_type?: string | null
+  },
+): Promise<{ error: string | null }> {
+  const payload = {
+    department_id: course.department_id,
+    code: course.code,
+    title: course.title,
+    credit_units: course.credit_units,
+    course_type: course.course_type ?? null,
+  }
+  if (course.id) {
+    const { error } = await supabase
+      .from('courses')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', course.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('courses')
+    .insert({ school_id: schoolId, ...payload })
+  return { error: error?.message ?? null }
+}
+
+// Curriculum rows for one programme level, optionally scoped to a term (for
+// schools with uses_terms = true). When termId is null, rows with a null
+// term_id are read — matching term_id's own "falls back to session_id when
+// uses_terms = false" convention (§7.4): a term-less school's curriculum is
+// simply not term-partitioned.
+export async function loadCurriculum(
+  programmeLevelId: string,
+  termId: string | null,
+): Promise<{ data: CurriculumEntry[]; error: string | null }> {
+  let query = supabase
+    .from('programme_curriculum')
+    .select(`
+      id, programme_id, programme_level_id, course_id, term_id, requirement_type, prerequisite_course_id,
+      courses!programme_curriculum_course_id_fkey(code, title, credit_units),
+      prerequisite:courses!programme_curriculum_prerequisite_course_id_fkey(code)
+    `)
+    .eq('programme_level_id', programmeLevelId)
+  query = termId ? query.eq('term_id', termId) : query.is('term_id', null)
+  const { data, error } = await query.order('created_at', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  // Joined relations cast through unknown → array before plucking [0], per
+  // this file's own established convention (see header comment).
+  const mapped = (data ?? []).map((row: any) => {
+    const course = (Array.isArray(row.courses) ? row.courses[0] : row.courses) as
+      | { code: string; title: string; credit_units: number }
+      | undefined
+    const prereq = (Array.isArray(row.prerequisite) ? row.prerequisite[0] : row.prerequisite) as
+      | { code: string }
+      | undefined
+    return {
+      id: row.id,
+      programme_id: row.programme_id,
+      programme_level_id: row.programme_level_id,
+      course_id: row.course_id,
+      course_code: course?.code ?? '—',
+      course_title: course?.title ?? 'Unknown course',
+      credit_units: course?.credit_units ?? 0,
+      term_id: row.term_id,
+      requirement_type: row.requirement_type,
+      prerequisite_course_id: row.prerequisite_course_id,
+      prerequisite_course_code: prereq?.code ?? null,
+    }
+  })
+  return { data: mapped as CurriculumEntry[], error: null }
+}
+
+export async function addCurriculumEntry(entry: {
+  programme_id: string
+  programme_level_id: string
+  course_id: string
+  term_id: string | null
+  requirement_type: 'core' | 'elective'
+  prerequisite_course_id?: string | null
+}): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('programme_curriculum')
+    .insert({
+      programme_id: entry.programme_id,
+      programme_level_id: entry.programme_level_id,
+      course_id: entry.course_id,
+      term_id: entry.term_id,
+      requirement_type: entry.requirement_type,
+      prerequisite_course_id: entry.prerequisite_course_id ?? null,
+    })
+  return { error: error?.message ?? null }
+}
+
+export async function removeCurriculumEntry(curriculumEntryId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('programme_curriculum')
+    .delete()
+    .eq('id', curriculumEntryId)
+  return { error: error?.message ?? null }
+}
+
 // ─── Roles & permissions ──────────────────────────────────────────────────────
 
 export async function loadPermissionsCatalog(): Promise<{ data: Permission[]; error: string | null }> {
@@ -1130,4 +1731,268 @@ export async function loadAuditTableNames(schoolId: string): Promise<string[]> {
   if (!data) return []
   const names = new Set(data.map((r: { table_name: string }) => r.table_name))
   return Array.from(names).sort()
+}
+
+// ─── Grade scale & CGPA policy (PRD Tier 8 / Problem 8.7, SESSION 59, §7.27.4) ─
+//
+// grade_scales is NOT a new table — it already existed for the secondary-school
+// Results module (school_id, min_score, max_score, grade_label, remark,
+// sort_order; see resultsService.ts's loadGradeScale()). SESSION 59 extended it
+// with two new nullable columns (scale_max, grade_point) for the higher-ed
+// shape, rather than creating a second colliding table — see master-plan
+// §7.27.4 for the full reconciliation record. A higher-ed grade band therefore
+// reuses grade_label as "the letter," min_score/max_score as the pct bounds,
+// and additionally sets scale_max/grade_point — the same row shape a
+// secondary-school band uses, just with two more fields populated.
+//
+// cgpa_policy is genuinely new (Phase 0 Decision 2) — one row per school,
+// unique on school_id. Per Decision 5, an "Other"-category school (this real
+// school's own category) gets NO smart default pre-filled for rollup_method/
+// retake_treatment — loadCgpaPolicy() returning { data: null } is a normal,
+// expected "not configured yet" state, not an error.
+
+export interface GradeScaleBand {
+  id: string
+  min_score: number   // higher-ed: min_pct
+  max_score: number   // higher-ed: max_pct
+  grade_label: string // higher-ed: the letter grade
+  remark: string | null
+  sort_order: number
+  scale_max: number | null   // null on pre-existing secondary-school rows
+  grade_point: number | null // null on pre-existing secondary-school rows
+}
+
+export async function loadHigherEdGradeScale(schoolId: string): Promise<{ data: GradeScaleBand[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('grade_scales')
+    .select('id, min_score, max_score, grade_label, remark, sort_order, scale_max, grade_point')
+    .eq('school_id', schoolId)
+    .order('sort_order', { ascending: true })
+
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((g: any) => ({
+      id: g.id,
+      min_score: Number(g.min_score),
+      max_score: Number(g.max_score),
+      grade_label: g.grade_label,
+      remark: g.remark ?? null,
+      sort_order: g.sort_order,
+      scale_max: g.scale_max === null ? null : Number(g.scale_max),
+      grade_point: g.grade_point === null ? null : Number(g.grade_point),
+    })),
+    error: null,
+  }
+}
+
+export async function upsertHigherEdGradeBand(
+  schoolId: string,
+  band: {
+    id?: string
+    min_score: number
+    max_score: number
+    grade_label: string
+    grade_point: number
+    scale_max: number
+    remark?: string | null
+    sort_order: number
+  },
+): Promise<{ error: string | null }> {
+  const payload = {
+    min_score: band.min_score,
+    max_score: band.max_score,
+    grade_label: band.grade_label,
+    grade_point: band.grade_point,
+    scale_max: band.scale_max,
+    remark: band.remark ?? null,
+    sort_order: band.sort_order,
+  }
+  if (band.id) {
+    const { error } = await supabase
+      .from('grade_scales')
+      .update(payload)
+      .eq('id', band.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('grade_scales')
+    .insert({ school_id: schoolId, ...payload })
+  return { error: error?.message ?? null }
+}
+
+// Catalogue/config data, not a person or financial record — real hard delete,
+// same carve-out this file's header rule already documents for periods/roles/
+// student roles (§7.8a's deleteStudentRole is the precedent cited there).
+export async function deleteHigherEdGradeBand(schoolId: string, bandId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('grade_scales')
+    .delete()
+    .eq('id', bandId)
+    .eq('school_id', schoolId)
+  return { error: error?.message ?? null }
+}
+
+export interface CgpaPolicy {
+  id: string
+  rollup_method: 'weighted_all_attempts' | 'average_of_semester_gpas'
+  retake_treatment: 'replacement' | 'dilution'
+  min_credit_load: number | null
+  max_credit_load: number | null
+}
+
+// Returns { data: null } when the school has never configured this — a real,
+// expected state for an "Other"-category school per Phase 0 Decision 5, not
+// an error to surface as one. cgpa_policy.school_id is unique, so at most one
+// row can ever exist.
+export async function loadCgpaPolicy(schoolId: string): Promise<{ data: CgpaPolicy | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('cgpa_policy')
+    .select('id, rollup_method, retake_treatment, min_credit_load, max_credit_load')
+    .eq('school_id', schoolId)
+    .maybeSingle()
+
+  if (error) return { data: null, error: error.message }
+  return { data: data as CgpaPolicy | null, error: null }
+}
+
+export async function upsertCgpaPolicy(
+  schoolId: string,
+  policy: {
+    rollup_method: 'weighted_all_attempts' | 'average_of_semester_gpas'
+    retake_treatment: 'replacement' | 'dilution'
+    min_credit_load: number | null
+    max_credit_load: number | null
+  },
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('cgpa_policy')
+    .upsert(
+      {
+        school_id: schoolId,
+        rollup_method: policy.rollup_method,
+        retake_treatment: policy.retake_treatment,
+        min_credit_load: policy.min_credit_load,
+        max_credit_load: policy.max_credit_load,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'school_id' },
+    )
+  return { error: error?.message ?? null }
+}
+
+// ─── Course offerings (PRD Tier 8 / Problem 8.7, unscheduled interim step ──
+// before SESSION 60, closing the gap SESSION 58's close-out surfaced: "no
+// course_offerings creation UI exists anywhere ... every test in this
+// session used a direct SQL insert.") ─────────────────────────────────────
+//
+// course_offerings has no school_id column of its own — confirmed directly
+// against the live RLS policy before writing any function here, not assumed
+// from the table's [STD] label in the master plan (which is shorthand, not
+// literal, for this table): the real policy is
+//   EXISTS (SELECT 1 FROM courses c WHERE c.id = course_offerings.course_id
+//           AND c.school_id = current_school_id())
+// — the same join-through-parent shape course_results already uses. This
+// means every read/write is scoped via course_id, not a literal school_id
+// column, and the course picker itself must only ever list this school's
+// own courses (loadCourses() already does, reused as-is below).
+//
+// venue_id is deliberately not exposed anywhere in this section — §7.15's
+// venues table doesn't exist yet (Problem 8.4 not yet accepted); the column
+// is nullable, so simply never setting it is correct, not a workaround.
+
+export interface CourseOffering {
+  id: string
+  course_id: string
+  course_code: string
+  course_title: string
+  session_id: string
+  term_id: string | null
+  staff_id: string | null
+  staff_name: string | null
+  attendance_eligibility_threshold_pct: number | null
+}
+
+// Scoped to the given session (and term, when this school uses terms) —
+// mirrors loadCurriculum()'s own session/term-scoping shape, since an
+// offering is meaningless outside a specific session/term. No schoolId
+// param: session_id/term_id are themselves already school-scoped uuids
+// (the caller only ever passes an id it already loaded via loadSessions()/
+// loadTerms(), both school-filtered), and RLS (join through course_id ->
+// courses.school_id, confirmed live) is the real cross-school enforcement
+// regardless — an explicit .eq('school_id', ...) isn't possible here since
+// the column doesn't exist on this table, and wouldn't add any real
+// boundary beyond what the session/term id and RLS already guarantee.
+export async function loadCourseOfferings(
+  sessionId: string,
+  termId?: string | null,
+): Promise<{ data: CourseOffering[]; error: string | null }> {
+  let q = supabase
+    .from('course_offerings')
+    .select('id, course_id, session_id, term_id, staff_id, attendance_eligibility_threshold_pct, courses(code, title), staff(full_name)')
+    .eq('session_id', sessionId)
+
+  if (termId) q = q.eq('term_id', termId)
+
+  const { data, error } = await q
+  if (error) return { data: [], error: error.message }
+
+  return {
+    data: (data ?? []).map((o: any) => ({
+      id: o.id,
+      course_id: o.course_id,
+      course_code: o.courses?.code ?? '',
+      course_title: o.courses?.title ?? '',
+      session_id: o.session_id,
+      term_id: o.term_id,
+      staff_id: o.staff_id,
+      staff_name: o.staff?.full_name ?? null,
+      attendance_eligibility_threshold_pct: o.attendance_eligibility_threshold_pct === null ? null : Number(o.attendance_eligibility_threshold_pct),
+    })),
+    error: null,
+  }
+}
+
+export async function upsertCourseOffering(
+  offering: {
+    id?: string
+    course_id: string
+    session_id: string
+    term_id?: string | null
+    staff_id?: string | null
+    attendance_eligibility_threshold_pct?: number | null
+  },
+): Promise<{ error: string | null }> {
+  const payload = {
+    course_id: offering.course_id,
+    session_id: offering.session_id,
+    term_id: offering.term_id ?? null,
+    staff_id: offering.staff_id ?? null,
+    attendance_eligibility_threshold_pct: offering.attendance_eligibility_threshold_pct ?? null,
+  }
+  // No .eq('school_id', ...) — the column doesn't exist on this table.
+  // RLS (join through course_id -> courses.school_id, confirmed live)
+  // is the only scoping mechanism for both branches below.
+  if (offering.id) {
+    const { error } = await supabase
+      .from('course_offerings')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', offering.id)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('course_offerings')
+    .insert(payload)
+  return { error: error?.message ?? null }
+}
+
+// Catalogue/config data, not a person or financial record — real hard
+// delete, same carve-out as deletePeriod/deleteRole/deleteHigherEdGradeBand.
+// No .eq('school_id', ...) for the same reason as upsertCourseOffering above.
+export async function deleteCourseOffering(offeringId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('course_offerings')
+    .delete()
+    .eq('id', offeringId)
+  return { error: error?.message ?? null }
 }

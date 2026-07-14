@@ -77,6 +77,61 @@ export interface StaffInput {
   role_ids: string[]
 }
 
+// ─── Institution category (Phase 0 Decision 1 / §3.16 amendment) ──────────
+// `school_type` remains a plain `text` column on `schools` (§7.27.1 does not
+// change its column type) — the "structured category" is enforced at the
+// application layer only, as this fixed union of accepted values. Do not
+// widen this union without a matching PRD/master-plan decision recorded in
+// §12, since `school_type` is read exactly once elsewhere in the app
+// (App.tsx's academic-engine branch, per the §3.16 amendment) and every
+// value written here must be a value that branch point recognizes.
+export type InstitutionCategory = 'secondary' | 'university' | 'polytechnic' | 'college_of_education' | 'other'
+
+export const HIGHER_INSTITUTION_CATEGORIES: InstitutionCategory[] = [
+  'university',
+  'polytechnic',
+  'college_of_education',
+  'other',
+]
+
+// All values this app's InstitutionCategory type actually recognizes,
+// including 'secondary'. Used to validate schools.school_type before
+// trusting it as a category — see getInstitutionCategory below. Distinct
+// from HIGHER_INSTITUTION_CATEGORIES, which excludes 'secondary' on
+// purpose (it's used to answer "is this a higher-ed school", not
+// "is this a valid value at all").
+const ALL_RECOGNIZED_CATEGORIES: InstitutionCategory[] = ['secondary', ...HIGHER_INSTITUTION_CATEGORIES]
+
+export function isHigherInstitution(category: InstitutionCategory | null | undefined): boolean {
+  return !!category && HIGHER_INSTITUTION_CATEGORIES.includes(category)
+}
+
+export interface FacultyInput {
+  name: string
+  code?: string
+}
+
+export interface DepartmentInput {
+  name: string
+  code?: string
+  faculty_id: string | null
+}
+
+export interface ProgrammeInput {
+  name: string
+  award_type: string
+  department_id: string
+  duration_sessions: number
+  min_credit_load?: number
+  max_credit_load?: number
+}
+
+export interface ProgrammeLevelInput {
+  programme_id: string
+  level_label: string
+  sequence_order: number
+}
+
 // ─── Progress tracking ────────────────────────────────────────────────────
 
 export async function getOnboardingProgress(
@@ -147,6 +202,166 @@ export async function saveLanguage(
     .eq('id', schoolId)
   if (error) return { ok: false, error: error.message }
   return { ok: true }
+}
+
+// ─── Institution category (new wizard step, inserted at the Step 6 slot) ──
+// Per §3.16's 2026-07-13 amendment: this is the ONE place `school_type` is
+// written from the wizard. It gets read back exactly once elsewhere in the
+// app (the academic-engine branch) — do not add a second write site without
+// re-reading §3.16 first.
+
+export async function saveInstitutionCategory(
+  schoolId: string,
+  category: InstitutionCategory,
+): Promise<{ ok: boolean; error?: string }> {
+  const { error } = await supabase
+    .from('schools')
+    .update({ school_type: category, updated_at: new Date().toISOString() })
+    .eq('id', schoolId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+export async function getInstitutionCategory(
+  schoolId: string,
+): Promise<InstitutionCategory | null> {
+  const { data } = await supabase
+    .from('schools')
+    .select('school_type')
+    .eq('id', schoolId)
+    .maybeSingle()
+  const raw = data?.school_type ?? null
+  // schools.school_type predates this wizard step and, until the SchoolTab
+  // free-text input is locked down, could still contain human-typed values
+  // ("Secondary", "Madrasa", "Primary", etc.) rather than one of this app's
+  // recognized category literals. Blindly casting that string would make
+  // getInstitutionCategory silently return a value that looks valid but
+  // isn't — which is exactly what caused the wizard to look unchanged for
+  // existing schools (a truthy-but-unrecognized value skipped the picker
+  // entirely). Validate before trusting it; anything unrecognized is
+  // treated as unset so the admin makes an explicit, current choice.
+  if (raw && ALL_RECOGNIZED_CATEGORIES.includes(raw as InstitutionCategory)) {
+    return raw as InstitutionCategory
+  }
+  return null
+}
+
+// ─── Institution hierarchy: faculties → departments → programmes → levels ─
+// §7.27.1. Mirrors the saveClassNode/getClassNodes shape below, since this
+// plays the equivalent structural role for a higher-institution school —
+// deliberately NOT class_nodes (Phase 0 Decision 3; see §7.27.1's own note:
+// programme_levels is administrative metadata, not a live daily container).
+
+export async function saveFaculty(
+  schoolId: string,
+  input: FacultyInput,
+): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const { data, error } = await supabase
+    .from('faculties')
+    .insert({ school_id: schoolId, name: input.name, code: input.code ?? null })
+    .select('id')
+    .single()
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, id: data.id }
+}
+
+export async function getFaculties(
+  schoolId: string,
+): Promise<{ id: string; name: string; code: string | null }[]> {
+  const { data } = await supabase
+    .from('faculties')
+    .select('id, name, code')
+    .eq('school_id', schoolId)
+    .order('name')
+  return data ?? []
+}
+
+export async function saveDepartment(
+  schoolId: string,
+  input: DepartmentInput,
+): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const { data, error } = await supabase
+    .from('departments')
+    .insert({
+      school_id: schoolId,
+      faculty_id: input.faculty_id,
+      name: input.name,
+      code: input.code ?? null,
+    })
+    .select('id')
+    .single()
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, id: data.id }
+}
+
+export async function getDepartments(
+  schoolId: string,
+): Promise<{ id: string; name: string; code: string | null; faculty_id: string | null }[]> {
+  const { data } = await supabase
+    .from('departments')
+    .select('id, name, code, faculty_id')
+    .eq('school_id', schoolId)
+    .order('name')
+  return data ?? []
+}
+
+export async function saveProgramme(
+  schoolId: string,
+  input: ProgrammeInput,
+): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const { data, error } = await supabase
+    .from('programmes')
+    .insert({
+      school_id: schoolId,
+      department_id: input.department_id,
+      name: input.name,
+      award_type: input.award_type,
+      duration_sessions: input.duration_sessions,
+      min_credit_load: input.min_credit_load ?? null,
+      max_credit_load: input.max_credit_load ?? null,
+    })
+    .select('id')
+    .single()
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, id: data.id }
+}
+
+export async function getProgrammes(
+  schoolId: string,
+): Promise<{ id: string; name: string; award_type: string; department_id: string; duration_sessions: number }[]> {
+  const { data } = await supabase
+    .from('programmes')
+    .select('id, name, award_type, department_id, duration_sessions')
+    .eq('school_id', schoolId)
+    .order('name')
+  return data ?? []
+}
+
+export async function saveProgrammeLevel(
+  input: ProgrammeLevelInput,
+): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const { data, error } = await supabase
+    .from('programme_levels')
+    .insert({
+      programme_id: input.programme_id,
+      level_label: input.level_label,
+      sequence_order: input.sequence_order,
+    })
+    .select('id')
+    .single()
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, id: data.id }
+}
+
+export async function getProgrammeLevels(
+  programmeId: string,
+): Promise<{ id: string; level_label: string; sequence_order: number }[]> {
+  const { data } = await supabase
+    .from('programme_levels')
+    .select('id, level_label, sequence_order')
+    .eq('programme_id', programmeId)
+    .order('sequence_order')
+  return data ?? []
 }
 
 // ─── Step 3: Calendar ─────────────────────────────────────────────────────

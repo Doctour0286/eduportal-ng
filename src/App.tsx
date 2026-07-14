@@ -33,7 +33,7 @@ import { Icon } from './components/icons'
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
 // but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
-type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences'
+type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance'
 
 // Intent payload — carried from dashboard quick actions into target modules.
 // Only the three intents that open a form on arrival are defined here.
@@ -57,6 +57,8 @@ import LibraryModule from './routes/LibraryModule'
 import AnnouncementsModule from './routes/AnnouncementsModule'
 import GuardianPortal from './routes/GuardianPortal'
 import SettingsModule from './routes/SettingsModule'
+import CourseRegistrationModule from './routes/CourseRegistrationModule'
+import CourseAttendanceModule from './routes/CourseAttendanceModule'
 import GuardianModule from './routes/GuardianModule'
 import AccountPreferencesScreen from './routes/AccountPreferencesScreen'
 
@@ -66,6 +68,15 @@ interface SchoolData {
   id: string
   name: string
   slug: string
+  // SESSION 55 addition — needed here for two separate, legitimate reasons:
+  // (1) SettingsModule's own tab-visibility check (Classes vs Institution
+  // tab), and (2) per the §3.16 amendment, this is where a future session's
+  // secondary-vs-higher-institution academic-engine branch will read it
+  // from. Neither of those exists in this file yet as actual branching
+  // logic — this addition only makes the column available; SESSION 56+
+  // scopes the actual engine-selection render branch. Do not read this as
+  // that branch already being implemented here.
+  school_type: string | null
   logo_url: string | null
   theme_color: string | null
   status: string
@@ -421,7 +432,7 @@ export default function App() {
 
     supabase
       .from('schools')
-      .select('id, name, slug, logo_url, theme_color, status, onboarding_complete, default_lang, enabled_langs, uses_terms, uses_ledger')
+      .select('id, name, slug, school_type, logo_url, theme_color, status, onboarding_complete, default_lang, enabled_langs, uses_terms, uses_ledger')
       .eq('slug', slug)
       .maybeSingle()
       .then(({ data }) => {
@@ -607,7 +618,7 @@ export default function App() {
           // second later, not an assumption about what the write did.
           const { data } = await supabase
             .from('schools')
-            .select('id, name, slug, logo_url, theme_color, status, onboarding_complete, default_lang, enabled_langs, uses_terms, uses_ledger')
+            .select('id, name, slug, school_type, logo_url, theme_color, status, onboarding_complete, default_lang, enabled_langs, uses_terms, uses_ledger')
             .eq('id', school.id)
             .maybeSingle()
           if (data) {
@@ -656,6 +667,7 @@ export default function App() {
           actorType === 'guardian' || actorType === 'student' ? null : (
             <MoreSheetContent
               isAdmin={isAdminRole || actorType === 'platform_admin'}
+              schoolType={school.school_type}
               onNavigate={(tab: NavTab, intent?: NavIntent) => onNavigate(tab, intent)}
               onOpenSetup={() => setForceShowOnboarding(true)}
             />
@@ -818,6 +830,7 @@ export default function App() {
           schoolId={school.id}
           schoolName={school.name}
           schoolLogoUrl={school.logo_url}
+          schoolType={school.school_type}
           authUserId={session.user.id}
           currentStaffId={currentStaffId}
           actorRecordId={actorRecordId}
@@ -871,6 +884,7 @@ export default function App() {
             />
             <MoreSheetContent
               isAdmin={isAdminRole || actorType === 'platform_admin'}
+              schoolType={school.school_type}
               onNavigate={(tab: NavTab, intent?: NavIntent) => {
                 // Selecting an item closes the sheet before navigating, not
                 // underneath it — per PRD Goal/Files: "should also close the
@@ -906,6 +920,12 @@ function TabContent({
   // and GuardianPortal/LoginPage's own logoUrl props — closed here rather
   // than silently left missing.
   schoolLogoUrl,
+  // SESSION 55 — needed only for the Settings tab's visibility check
+  // (whether to show the Institution tab vs. Classes tab). Same kind of
+  // pre-existing gap as schoolLogoUrl above: not previously threaded
+  // through TabContent despite school.school_type being read at the
+  // top-level App component already.
+  schoolType,
   authUserId,
   currentStaffId,
   actorRecordId,
@@ -920,6 +940,7 @@ function TabContent({
   schoolId: string
   schoolName: string
   schoolLogoUrl: string | null
+  schoolType: string | null
   authUserId: string
   currentStaffId: string | null
   actorRecordId: string | null
@@ -1093,7 +1114,35 @@ function TabContent({
   }
 
   if (tab === 'settings') {
-    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} />
+    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} schoolType={schoolType} />
+  }
+
+  if (tab === 'course_registration') {
+    // Higher-institution-only, same as SettingsModule's Institution/
+    // Curriculum tabs — CourseRegistrationModule itself also gates on
+    // isHigherInstitutionSchoolType internally (its own local copy of the
+    // same check, since it's a separate module and that helper isn't
+    // exported from SettingsModule.tsx), so this route-level branch is a
+    // defense-in-depth guard, not the only gate.
+    return <CourseRegistrationModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} />
+  }
+
+  if (tab === 'course_attendance') {
+    // Higher-institution-only (PRD Tier 8 / Problem 8.7, SESSION 58) — same
+    // shape as course_registration above, but unlike registration this is a
+    // per-lecturer operational task, not an admin/registrar one (SESSION
+    // 58's own card: "a lecturer takes attendance for a real course
+    // offering"), so it's NOT admin-gated at the nav level — see
+    // MoreSheetContent's canViewCourseAttendance below, which mirrors
+    // canViewHR/canViewGuardians' permission-based visibility, not
+    // isHigherEd-and-isAdmin's admin-only shape. CourseAttendanceModule
+    // resolves its own current session internally (loadCurrentSession(),
+    // same source AttendanceModule.tsx uses) — no sessionId prop needed.
+    // schoolType is passed through so the module can run its own internal
+    // isHigherInstitutionSchoolType gate (its own local copy, same pattern
+    // as CourseRegistrationModule's) — this route-level branch alone was
+    // not a real defense-in-depth guard until that internal gate existed.
+    return <CourseAttendanceModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} />
   }
 
   if (tab === 'guardians') {
@@ -1164,16 +1213,31 @@ function PlaceholderModule({
 // three together once those modules are actually converted.
 function MoreSheetContent({
   isAdmin,
+  schoolType,
   onNavigate,
   onOpenSetup,
 }: {
   isAdmin: boolean
+  schoolType: string | null
   onNavigate: (tab: NavTab, intent?: NavIntent) => void
   onOpenSetup: () => void
 }) {
   const can = useAuthStore((s) => s.can)
   const canViewHR = can('hr.staff.view') || isAdmin
   const canViewGuardians = can('students.records.view') || isAdmin
+  // Course attendance (PRD Tier 8 / Problem 8.7, SESSION 58) — permission-
+  // gated like HR/Guardians above, not admin-only: a non-admin lecturer with
+  // academics.course_attendance.mark still needs to reach this from
+  // somewhere, since it's not a BottomNav slot (all five are already taken —
+  // timetable/attendance/students/finance/more). isAdmin still sees it too,
+  // matching every other "or isAdmin" visibility check on this menu.
+  const canViewCourseAttendance = can('academics.course_attendance.mark') || isAdmin
+  // Duplicated from SettingsModule.tsx's own private (unexported) list —
+  // see CourseRegistrationModule.tsx's header note on the same
+  // duplication. Course registration is a higher-institution-only concept
+  // (PRD Tier 8 / Problem 8.7): a secondary school has no programme/level
+  // structure or course catalogue for this screen to operate on at all.
+  const isHigherEd = !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
 
   return (
     <div className="more-menu">
@@ -1223,6 +1287,16 @@ function MoreSheetContent({
             <span className="more-menu-item-arrow">›</span>
           </button>
         )}
+        {isHigherEd && canViewCourseAttendance && (
+          <button className="more-menu-item" onClick={() => onNavigate('course_attendance')}>
+            <span className="more-menu-item-icon"><Icon name="clipboard-list" /></span>
+            <div>
+              <p className="more-menu-item-label">Course Attendance</p>
+              <p className="more-menu-item-desc">Mark and review per-course attendance registers</p>
+            </div>
+            <span className="more-menu-item-arrow">›</span>
+          </button>
+        )}
       </div>
 
       {isAdmin && (
@@ -1236,6 +1310,16 @@ function MoreSheetContent({
             </div>
             <span className="more-menu-item-arrow">›</span>
           </button>
+          {isHigherEd && (
+            <button className="more-menu-item" onClick={() => onNavigate('course_registration')}>
+              <span className="more-menu-item-icon"><Icon name="book-open" /></span>
+              <div>
+                <p className="more-menu-item-label">Course Registration</p>
+                <p className="more-menu-item-desc">Register students into courses each session</p>
+              </div>
+              <span className="more-menu-item-arrow">›</span>
+            </button>
+          )}
           <button className="more-menu-item" onClick={onOpenSetup}>
             <span className="more-menu-item-icon"><Icon name="compass" /></span>
             <div>

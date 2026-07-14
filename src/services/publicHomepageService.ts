@@ -84,9 +84,18 @@ export interface ContactInfo {
 // exactly — this is a read-only view of the same admin-written data, not a
 // second, independently-evolving type. See add_welcome_post_column.sql.
 
-export interface WelcomePostParagraphBlock {
-  type: 'paragraph'
+export interface WelcomePostTextRun {
   text: string
+  bold?: boolean
+  italic?: boolean
+}
+
+export type WelcomePostTextLevel = 'p' | 'h2' | 'h3' | 'h4'
+
+export interface WelcomePostTextBlock {
+  type: 'text'
+  level: WelcomePostTextLevel
+  runs: WelcomePostTextRun[]
 }
 
 export interface WelcomePostImageBlock {
@@ -95,7 +104,29 @@ export interface WelcomePostImageBlock {
   caption?: string
 }
 
-export type WelcomePostBlock = WelcomePostParagraphBlock | WelcomePostImageBlock
+export type WelcomePostBlock = WelcomePostTextBlock | WelcomePostImageBlock
+
+interface LegacyParagraphBlock {
+  type: 'paragraph'
+  text: string
+}
+
+/** Same normalization as settingsService.ts's own copy — a block saved
+ *  before the rich-text upgrade (2026-07-11 follow-up #3) still reads
+ *  correctly as a plain, unstyled paragraph, no migration script or data
+ *  loss required. */
+export function normalizeBlock(raw: WelcomePostBlock | LegacyParagraphBlock): WelcomePostBlock {
+  if ((raw as LegacyParagraphBlock).type === 'paragraph') {
+    const legacy = raw as LegacyParagraphBlock
+    return { type: 'text', level: 'p', runs: [{ text: legacy.text }] }
+  }
+  return raw as WelcomePostBlock
+}
+
+export function normalizeBlocks(raw: unknown): WelcomePostBlock[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map(normalizeBlock)
+}
 
 export interface WelcomePost {
   heading: string
@@ -174,11 +205,13 @@ export async function loadPublicSchoolData(
     // error (configErr set) is still surfaced, distinct from "no row."
     if (configErr) return { ok: false, error: friendlyError(configErr, 'Failed to load school page config') }
 
+    const rawWelcomePost = config?.welcome_post as { heading?: string; blocks?: unknown } | null | undefined
+
     const resolvedConfig: PublicSchoolConfig = config
       ? {
           school_id:          config.school_id as string,
           welcome_message:    config.welcome_message as string | null,
-          welcome_post:       (config.welcome_post as WelcomePost | null) ?? null,
+          welcome_post:       rawWelcomePost ? { heading: rawWelcomePost.heading ?? '', blocks: normalizeBlocks(rawWelcomePost.blocks) } : null,
           contact_info:       (config.contact_info as ContactInfo | null) ?? null,
           show_announcements: (config.show_announcements as boolean | null) ?? false,
           custom_fields:      (config.custom_fields as Record<string, unknown> | null) ?? null,
@@ -285,7 +318,7 @@ export async function loadPublicHomepagePosts(
       data: (data ?? []).map((r: Record<string, unknown>) => ({
         id:              r.id as string,
         heading:         r.heading as string,
-        blocks:          (r.blocks as WelcomePostBlock[] | null) ?? [],
+        blocks:          normalizeBlocks(r.blocks),
         always_expanded: r.always_expanded as boolean,
         sort_order:      r.sort_order as number,
       })),

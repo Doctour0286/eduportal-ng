@@ -48,6 +48,17 @@
  * academics.scores.view_all gates the assignment-list scope (all
  * assignments vs. own) — a view-scope decision, not a write gate, same
  * shape as HRModule.tsx's hr.leave.view_all conversion.
+ *
+ * Updated (Tier 8, launch-blocking fix): staffId was previously resolved via
+ * a raw supabase.auth.getUser() call (auth.users.id), but
+ * teaching_assignments.staff_id / scores.entered_by / scores.approved_by are
+ * all FKs to staff(id) — a different row. This made loadMyTeachingAssignments
+ * always return empty for a real teacher (reported symptom: "isn't assigned
+ * any subject in this session," despite correct assignments showing in
+ * Timetable/TeacherDashboard, which both already resolved the right id).
+ * Fixed by reading actorRecordId from authStore instead — same fix pattern
+ * as Session 9's AttendanceModule.tsx markedBy bug and Finance's
+ * received_by/approved_by bug.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -101,6 +112,21 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
   const canViewAllAssignments = can('academics.scores.view_all')
   const canApproveScores      = can('academics.scores.approve')
 
+  // ── Staff identity (Tier 8 fix — see PRD row) ─────────────────────────────
+  // staff.id (actorRecordId), NOT auth.users.id. teaching_assignments.staff_id,
+  // scores.entered_by, and scores.approved_by are all FKs to staff(id) — a
+  // different row than the Supabase Auth user, joined only via
+  // app_identities.auth_user_id -> actor_record_id. This file previously
+  // resolved staffId via a raw supabase.auth.getUser() call (see removed
+  // effect below), which meant loadMyTeachingAssignments(staffId, sessionId)
+  // was always filtering staff_id against the wrong UUID -> always empty for
+  // a real teacher, even though teaching_assignments had correct rows (this
+  // is why Timetable/TeacherDashboard, which both correctly resolve
+  // actorRecordId, showed the same assignments fine). Same bug class Session 9
+  // found and fixed in AttendanceModule.tsx's markedBy, and Finance found and
+  // fixed in payments.received_by / fee_discounts.approved_by.
+  const staffId = useAuthStore((s) => s.actorRecordId) ?? ''
+
   // ── Session + assignments ─────────────────────────────────────────────────
   const [session,        setSession]        = useState<Session | null>(null)
   const [assignments,    setAssignments]    = useState<TeachingAssignment[]>([])
@@ -135,16 +161,6 @@ export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps)
   // ── Approval ──────────────────────────────────────────────────────────────
   const [approving,   setApproving]   = useState(false)
   const [approveErr,  setApproveErr]  = useState('')
-
-  // ── Staff ID (for entered_by / approved_by) ───────────────────────────────
-  const [staffId, setStaffId] = useState('')
-  useEffect(() => {
-    import('../lib/supabase').then(({ supabase }) => {
-      supabase.auth.getUser().then(({ data }) => {
-        if (data?.user?.id) setStaffId(data.user.id)
-      })
-    })
-  }, [])
 
   // ─── Online / offline detection ────────────────────────────────────────────
 
