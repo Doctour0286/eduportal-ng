@@ -94,6 +94,40 @@ import {
   type CgpaPolicy,
   type CourseOffering,
 } from '../services/settingsService'
+import {
+  // SESSION 60a: course_result_components' CRUD lives in
+  // courseResultsService.ts, not settingsService.ts — deliberately NOT
+  // duplicated here. That file already owns this table's read path for
+  // CourseResultsModule.tsx's lecturer-facing scoring grid, and its
+  // upsert/delete functions are already scoped correctly against the
+  // real admin-only RLS policy (migration_session_60a.sql,
+  // academics.course_result_components.manage). This is a genuine, new
+  // cross-service import for this file (admin UI reusing a function from
+  // the higher-ed lecturer-domain service) rather than the copy-into-
+  // settingsService.ts pattern every other higher-ed admin feature so far
+  // has followed (loadHigherEdGradeScale, loadCgpaPolicy, etc., all of
+  // which duplicate a courseResultsService.ts read for the settings UI's
+  // own use) — done this way specifically because course_result_components
+  // has no lecturer-facing write counterpart to keep separate from (unlike
+  // grade_scales/cgpa_policy, which both have a courseResultsService.ts
+  // read AND a settingsService.ts write); there is only ever one write
+  // path for this table, so one function set is correct, not two.
+  loadCourseResultComponents, upsertCourseResultComponent, deleteCourseResultComponent,
+  type CourseResultComponent,
+  // SESSION 60c: per-course overrides are FOLDED into course_result_
+  // components via a nullable course_id (migration_session_60c.sql) — the
+  // original separate course_result_component_overrides table was
+  // abandoned before any code shipped against it (see that migration's
+  // header: course_result_component_scores can only FK to
+  // course_result_components(id), so an override in its own table/id-space
+  // could never be scored against). loadCourseSpecificComponents() reads
+  // this course's own rows (course_id = courseId); resolveCourseResultComponents()
+  // + mergeCourseResultComponents() produce the merged/effective set for
+  // preview, using the SAME merge function finalizeWeightedCourseResult()
+  // uses server-side, so the two can never disagree.
+  loadCourseSpecificComponents, resolveCourseResultComponents, mergeCourseResultComponents,
+  type ResolvedCourseResultComponent,
+} from '../services/courseResultsService'
 
 // Same fixed union as onboardingService.ts's InstitutionCategory — kept in
 // sync manually since this file doesn't import from onboardingService.ts
@@ -3120,6 +3154,67 @@ function GradingTab({ schoolId }: { schoolId: string }) {
   const [bands, setBands] = useState<GradeScaleBand[]>([])
   const [policy, setPolicy] = useState<CgpaPolicy | null>(null)
 
+  // SESSION 60a: CA/exam component definitions (course_result_components).
+  // Admin-only write per RLS (migration_session_60a.sql) — this tab is
+  // already gated to isHigherInstitutionSchoolType admins by its own
+  // parent (buildTabs()), so no additional client-side permission check
+  // is added here; the RLS layer is the real enforcement per this file's
+  // own convention throughout (settingsService.ts's own header: "schoolId
+  // threaded on every call — never inferred client-side").
+  const [components, setComponents] = useState<CourseResultComponent[]>([])
+  const [showComponentForm, setShowComponentForm] = useState(false)
+  const [editingComponent, setEditingComponent] = useState<CourseResultComponent | null>(null)
+  const [cName, setCName] = useState('')
+  const [cWeightPct, setCWeightPct] = useState('')
+  const [cSaving, setCSaving] = useState(false)
+  const [cError, setCError] = useState<string | null>(null)
+  const [deletingComponentId, setDeletingComponentId] = useState<string | null>(null)
+
+  // SESSION 60c: per-course override of the school-wide components above.
+  // These are now folded into the SAME table (course_result_components,
+  // course_id set) rather than a separate override table/type — so
+  // `overrides` here is just CourseResultComponent[] filtered to one
+  // course, loaded via loadCourseSpecificComponents(), and the "merged
+  // preview" below is produced by the SAME mergeCourseResultComponents()
+  // function finalizeWeightedCourseResult() uses server-side, so the two
+  // can never disagree.
+  //
+  // `courses` is loaded once alongside everything else in `load()` below
+  // (loadCourses() already exists at module scope, reused as-is — same
+  // precedent noted in the cross-import comment for why this table's own
+  // CRUD lives in courseResultsService.ts but the *course list* itself
+  // still comes from settingsService.ts, since Course is a general
+  // catalogue entity this tab doesn't own). `overrides` is reloaded
+  // whenever `selectedCourseId` changes, not upfront for every course —
+  // a school could have hundreds of courses and only a handful with real
+  // overrides, so loading all of them eagerly would be wasted reads for
+  // the common case of "most courses use the school-wide set as-is."
+  const [courses, setCourses] = useState<Course[]>([])
+  const [selectedCourseId, setSelectedCourseId] = useState<string>('')
+  const [overrides, setOverrides] = useState<CourseResultComponent[]>([])
+  const [overridesLoading, setOverridesLoading] = useState(false)
+  const [overridesError, setOverridesError] = useState<string | null>(null)
+  const [showOverrideForm, setShowOverrideForm] = useState(false)
+  const [editingOverride, setEditingOverride] = useState<ResolvedCourseResultComponent | null>(null)
+  const [ovName, setOvName] = useState('')
+  const [ovWeightPct, setOvWeightPct] = useState('')
+  const [ovSaving, setOvSaving] = useState(false)
+  const [ovError, setOvError] = useState<string | null>(null)
+  const [deletingOverrideId, setDeletingOverrideId] = useState<string | null>(null)
+  // Merged/effective set for the currently selected course — resolved via
+  // resolveCourseResultComponents(schoolId, selectedCourseId), same
+  // function CourseResultsModule.tsx's scoring grid and
+  // finalizeWeightedCourseResult() both call. School-wide rows (source:
+  // 'school') are shown here for CONTEXT ONLY — this screen must never
+  // write to the real school-wide row (that would silently rebalance
+  // every other course that inherits it). "Editing" a school-derived row
+  // from here always creates/updates a course-SPECIFIC row of the same
+  // name (courseId: selectedCourseId), which by-name-overrides the
+  // school-wide value for THIS course only, leaving the real school-wide
+  // row untouched. A true global edit stays reachable only from the
+  // school-wide section above.
+  const [mergedPreview, setMergedPreview] = useState<ResolvedCourseResultComponent[]>([])
+
   // Add/edit grade band form
   const [showBandForm, setShowBandForm] = useState(false)
   const [editingBand, setEditingBand] = useState<GradeScaleBand | null>(null)
@@ -3148,14 +3243,20 @@ function GradingTab({ schoolId }: { schoolId: string }) {
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [bRes, pRes] = await Promise.all([
+    const [bRes, pRes, cRes, coursesRes] = await Promise.all([
       loadHigherEdGradeScale(schoolId),
       loadCgpaPolicy(schoolId),
+      loadCourseResultComponents(schoolId),
+      loadCourses(schoolId),
     ])
     if (bRes.error) { setError(bRes.error); setLoading(false); return }
     if (pRes.error) { setError(pRes.error); setLoading(false); return }
+    if (cRes.error) { setError(cRes.error); setLoading(false); return }
+    if (coursesRes.error) { setError(coursesRes.error); setLoading(false); return }
     setBands(bRes.data)
     setPolicy(pRes.data)
+    setComponents(cRes.data)
+    setCourses(coursesRes.data)
     setRollupMethod(pRes.data?.rollup_method ?? '')
     setRetakeTreatment(pRes.data?.retake_treatment ?? '')
     setMinCreditLoad(pRes.data?.min_credit_load != null ? String(pRes.data.min_credit_load) : '')
@@ -3164,6 +3265,27 @@ function GradingTab({ schoolId }: { schoolId: string }) {
   }, [schoolId])
 
   useEffect(() => { load() }, [load])
+
+  // SESSION 60c: reload overrides whenever the selected course changes.
+  // Guarded on schoolId's own boot (courses must exist to select one), and
+  // clears overrides immediately on an empty selection rather than leaving
+  // stale data from a previously-selected course visible.
+  const loadOverridesForSelectedCourse = useCallback(async () => {
+    if (!selectedCourseId) { setOverrides([]); setMergedPreview([]); return }
+    setOverridesLoading(true)
+    setOverridesError(null)
+    const [ownRes, mergedRes] = await Promise.all([
+      loadCourseSpecificComponents(selectedCourseId),
+      resolveCourseResultComponents(schoolId, selectedCourseId),
+    ])
+    if (ownRes.error) { setOverridesError(ownRes.error); setOverridesLoading(false); return }
+    if (mergedRes.error) { setOverridesError(mergedRes.error); setOverridesLoading(false); return }
+    setOverrides(ownRes.data)
+    setMergedPreview(mergedRes.data)
+    setOverridesLoading(false)
+  }, [selectedCourseId, schoolId])
+
+  useEffect(() => { loadOverridesForSelectedCourse() }, [loadOverridesForSelectedCourse])
 
   function openBandForm(b?: GradeScaleBand) {
     setEditingBand(b ?? null)
@@ -3223,6 +3345,204 @@ function GradingTab({ schoolId }: { schoolId: string }) {
     if (res.error) { alert(res.error); setDeletingBandId(null); return }
     setBands(prev => prev.filter(b => b.id !== bandId))
     setDeletingBandId(null)
+  }
+
+  function openComponentForm(c?: CourseResultComponent) {
+    setEditingComponent(c ?? null)
+    setCName(c?.name ?? '')
+    setCWeightPct(c?.weight_pct != null ? String(c.weight_pct) : '')
+    setCError(null)
+    setShowComponentForm(true)
+  }
+
+  /**
+   * Sum-to-100 is a genuine invariant of the *finished* set, not of any one
+   * save — building a set is inherently incremental (add "CA" at 10%, save,
+   * then add "Exam" at 90%, save), and every intermediate save along the
+   * way is legitimately off from 100% until the last piece lands. Blocking
+   * the save itself at every intermediate step made it impossible to build
+   * a set at all (caught 2026-07-15: editing a lone "CA" component at 10%
+   * was hard-rejected with no way to save it before a second component
+   * existed to bring the total up).
+   *
+   * This is exactly the "mid-edit intermediate state" problem migration_
+   * session_60a.sql's own header already named as the reason a plain CHECK
+   * constraint can't enforce this at the DB layer (it needs a deferred
+   * CONSTRAINT TRIGGER instead, still not built — flagged there as a
+   * follow-up). The fix here brings the client-side check in line with
+   * that same reasoning: WARN, don't block, on save. The real hard
+   * enforcement point is finalizeWeightedCourseResult() in
+   * courseResultsService.ts, which already refuses to finalize a score
+   * against an incomplete component set (missing-component check) — that
+   * function is extended below to also refuse finalizing against a set
+   * whose weights don't sum to 100%, so a misconfigured set can never
+   * silently produce a wrong score, even though it CAN be saved
+   * mid-configuration.
+   *
+   * Computed against what the *saved set* would become after this save —
+   * i.e. every other existing component's weight, plus this one's new
+   * value (replacing its own prior weight if editing, not double-counted).
+   */
+  function projectedWeightSum(newWeight: number): number {
+    const others = components.filter((c) => c.id !== editingComponent?.id)
+    return others.reduce((sum, c) => sum + c.weight_pct, 0) + newWeight
+  }
+
+  async function handleSaveComponent() {
+    if (!cName.trim()) { setCError('Component name is required.'); return }
+    const weight = Number(cWeightPct)
+    if (!cWeightPct || Number.isNaN(weight) || weight < 0 || weight > 100) {
+      setCError('Weight must be a number between 0 and 100.')
+      return
+    }
+    // No sum-to-100 block here — see projectedWeightSum's header. The
+    // non-blocking projected-total line in the render below (already
+    // present) keeps the admin informed while building the set; nothing
+    // here prevents saving an intermediate, not-yet-100% state.
+    setCError(null)
+    setCSaving(true)
+    const res = await upsertCourseResultComponent(schoolId, {
+      id: editingComponent?.id,
+      name: cName.trim(),
+      weight_pct: weight,
+      sort_order: editingComponent?.sort_order ?? components.length,
+    })
+    if (res.error) { setCError(res.error); setCSaving(false); return }
+    setShowComponentForm(false)
+    setCSaving(false)
+    await load()
+  }
+
+  async function handleDeleteComponent(componentId: string, name: string) {
+    if (!confirm(`Delete the "${name}" component? Any entered scores for it will block this delete until removed.`)) return
+    setDeletingComponentId(componentId)
+    const res = await deleteCourseResultComponent(componentId)
+    if (res.error) {
+      // A foreign-key violation here means real course_result_component_scores
+      // rows still reference this component (deleteCourseResultComponent's
+      // own header documents this as expected, correct behavior, not a bug
+      // to work around) — surfaced plainly rather than silently swallowed.
+      alert(res.error)
+      setDeletingComponentId(null)
+      return
+    }
+    setComponents((prev) => prev.filter((c) => c.id !== componentId))
+    setDeletingComponentId(null)
+  }
+
+  // ─── SESSION 60c: per-course override handlers ──────────────────────────
+  // Operates on the MERGED preview (mergedPreview, ResolvedCourseResultComponent[])
+  // so school-wide rows are visible here for context alongside this
+  // course's own overrides. CRITICAL: this screen must NEVER write to a
+  // real school-wide row (courseId: null) — doing so silently changes the
+  // weight for every course that inherits it, not just the one selected
+  // here. "Editing" ANY row from this screen — whether it started as
+  // `source: 'school'` or `source: 'course'` — always writes a
+  // course-specific row (courseId: selectedCourseId), pre-filled with the
+  // row's current effective weight. For a `source: 'school'` row this
+  // creates a new course-specific override with the same name, which the
+  // existing by-name merge rule then uses to shadow the school-wide value
+  // for this course only — the school-wide row itself is left untouched.
+  // A true global edit is only reachable from the school-wide section
+  // above, never from here.
+
+  function openOverrideForm(c?: ResolvedCourseResultComponent) {
+    setEditingOverride(c ?? null)
+    setOvName(c?.name ?? '')
+    setOvWeightPct(c?.weight_pct != null ? String(c.weight_pct) : '')
+    setOvError(null)
+    setShowOverrideForm(true)
+  }
+
+  /**
+   * Merged-set preview for the override form — same non-blocking,
+   * warn-don't-block posture as projectedWeightSum() above, and for the
+   * same reason: an override set is built incrementally too (e.g. add
+   * "Practical" at 20% today, come back and reweight "CA"/"Exam" tomorrow
+   * to make room for it). The REAL enforcement point remains
+   * finalizeWeightedCourseResult() server-side, which calls
+   * resolveCourseResultComponents() — the same merge function used here —
+   * so this preview and finalize-time truth can never disagree.
+   */
+  function projectedMergedWeightSum(newWeight: number): number {
+    // Editing (or adding) from this screen ALWAYS projects a
+    // course-specific override row, never a change to the school-wide
+    // set itself — see the handler block comment above. If the row being
+    // edited started as `source: 'school'`, its id belongs to the
+    // school-wide table, so it must NOT be matched against `overrides`
+    // (this course's own rows) when de-duping the draft; it simply adds a
+    // new course-specific row with the same name, which by-name-overrides
+    // the untouched school-wide value in the merge below.
+    const isEditingSchoolRow = editingOverride?.source === 'school'
+    const draftOverrides = overrides
+      .filter((o) => o.id !== (isEditingSchoolRow ? '__never_match__' : editingOverride?.id))
+      .concat([{
+        id: editingOverride?.id ?? '__draft__',
+        school_id: schoolId,
+        course_id: selectedCourseId,
+        name: ovName.trim(),
+        weight_pct: newWeight,
+        sort_order: editingOverride?.sort_order ?? overrides.length,
+      }])
+    const merged = mergeCourseResultComponents(components, draftOverrides)
+    return merged.reduce((sum, c) => sum + c.weight_pct, 0)
+  }
+
+  async function handleSaveOverride() {
+    if (!selectedCourseId) { setOvError('Select a course first.'); return }
+    if (!ovName.trim()) { setOvError('Component name is required.'); return }
+    const weight = Number(ovWeightPct)
+    if (!ovWeightPct || Number.isNaN(weight) || weight < 0 || weight > 100) {
+      setOvError('Weight must be a number between 0 and 100.')
+      return
+    }
+    const isEditingSchoolRow = editingOverride?.source === 'school'
+    setOvError(null)
+    setOvSaving(true)
+    const res = await upsertCourseResultComponent(schoolId, {
+      // A `source: 'school'` row's id belongs to the school-wide table —
+      // passing it as `id` here would UPDATE that real school-wide row.
+      // Omit it so this always INSERTs a new, course-specific row instead
+      // (by-name-overriding the school-wide value for this course only).
+      // Only a genuine `source: 'course'` row's id is safe to reuse for
+      // an update, since that id already belongs to this course.
+      id: isEditingSchoolRow ? undefined : editingOverride?.id,
+      name: ovName.trim(),
+      weight_pct: weight,
+      sort_order: editingOverride?.sort_order ?? mergedPreview.length,
+      // ALWAYS scoped to this course — this screen never writes the
+      // real school-wide row (courseId: null). A true global edit is
+      // only reachable from the school-wide section above.
+      courseId: selectedCourseId,
+    })
+    if (res.error) { setOvError(res.error); setOvSaving(false); return }
+    setShowOverrideForm(false)
+    setOvSaving(false)
+    // Only this course's own rows changed — no need to reload the
+    // school-wide `components` list, since it was never touched.
+    await loadOverridesForSelectedCourse()
+  }
+
+  async function handleDeleteOverride(c: ResolvedCourseResultComponent) {
+    // A `source: 'school'` row's id is the REAL school-wide component's
+    // id — this screen must never delete it (that would remove it for
+    // every course school-wide, from a per-course screen). There's also
+    // nothing course-specific to "remove" for an inherited row that
+    // isn't already overridden here, so this action is simply unavailable
+    // for school rows; the render below doesn't offer a delete button for
+    // them, but this guard exists so this function can never be called
+    // that way even indirectly.
+    if (c.source === 'school') return
+    if (!confirm(`Remove the "${c.name}" override for this course? It will revert to the school-wide value.`)) return
+    setDeletingOverrideId(c.id)
+    const res = await deleteCourseResultComponent(c.id)
+    if (res.error) {
+      alert(res.error)
+      setDeletingOverrideId(null)
+      return
+    }
+    await loadOverridesForSelectedCourse()
+    setDeletingOverrideId(null)
   }
 
   async function handleSavePolicy() {
@@ -3339,6 +3659,174 @@ function GradingTab({ schoolId }: { schoolId: string }) {
           {policySaving ? 'Saving…' : policy ? 'Update policy' : 'Save policy'}
         </button>
       </div>
+
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>CA/exam components</SectionLabel>
+        <button className="set-add-btn" onClick={() => openComponentForm()}>+ Add component</button>
+      </div>
+      <p className="set-hint-text">
+        School-wide weighted components (e.g. CA 40% / Exam 60%) used to score every course. Weights must sum to exactly 100%.
+        {components.length > 0 && (
+          <> Current total: <strong>{components.reduce((sum, c) => sum + c.weight_pct, 0).toFixed(2)}%</strong></>
+        )}
+      </p>
+
+      {components.length === 0 ? (
+        <p className="set-empty-hint">No components defined yet. Lecturers can't score courses until at least one set summing to 100% exists — e.g. CA 40%, Exam 60%.</p>
+      ) : (
+        components.map((c) => (
+          <div key={c.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{c.name}</p>
+              <p className="set-list-row-meta">{c.weight_pct}%</p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openComponentForm(c)}>Edit</button>
+              <button
+                className="set-delete-btn"
+                onClick={() => handleDeleteComponent(c.id, c.name)}
+                disabled={deletingComponentId === c.id}
+                aria-label={`Delete component ${c.name}`}
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          </div>
+        ))
+      )}
+
+      {showComponentForm && (
+        <div className="set-overlay" onClick={() => setShowComponentForm(false)}>
+          <div className="set-sheet" onClick={(e) => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingComponent ? 'Edit component' : 'Add component'}</h2>
+            <FieldRow label="Name">
+              <Input value={cName} onChange={setCName} placeholder="e.g. CA, Exam, Practical" />
+            </FieldRow>
+            <FieldRow label="Weight %">
+              <Input value={cWeightPct} onChange={(v) => setCWeightPct(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 40" />
+            </FieldRow>
+            <p className="set-hint-text">
+              With this value, all components would total{' '}
+              <strong>{cWeightPct && !Number.isNaN(Number(cWeightPct)) ? projectedWeightSum(Number(cWeightPct)).toFixed(2) : '—'}%</strong>
+              {' '}(must reach 100% before lecturers can finalize scores — you can still save while building the set up).
+            </p>
+            {cError && <p className="set-form-error">{cError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowComponentForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveComponent} disabled={cSaving}>{cSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SESSION 60c: per-course override of the school-wide set above. A
+          course with no overrides here simply inherits the school-wide set
+          untouched — this section is opt-in per course, not a second
+          required config step. */}
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>Per-course overrides</SectionLabel>
+      </div>
+      <p className="set-hint-text">
+        Override component weights for one course, or add a course-specific component (e.g. "Practical") on top of the school-wide set.
+        A course with no overrides here uses the school-wide set as-is.
+      </p>
+      <FieldRow label="Course">
+        <select className="set-select" value={selectedCourseId} onChange={(e) => setSelectedCourseId(e.target.value)}>
+          <option value="">Choose a course</option>
+          {courses.map((c) => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+        </select>
+      </FieldRow>
+
+      {selectedCourseId && (
+        <>
+          {overridesLoading ? (
+            <Skeleton />
+          ) : overridesError ? (
+            <ErrorState message={overridesError} onRetry={loadOverridesForSelectedCourse} />
+          ) : (
+            <>
+              <div className="set-section-header" style={{ marginTop: '1rem' }}>
+                <p className="set-hint-text" style={{ margin: 0 }}>
+                  Effective set for this course (school-wide + overrides): current total{' '}
+                  <strong>
+                    {mergedPreview.reduce((sum, c) => sum + c.weight_pct, 0).toFixed(2)}%
+                  </strong>
+                </p>
+                <button className="set-add-btn" onClick={() => openOverrideForm()}>+ Add course-specific component</button>
+              </div>
+
+              {mergedPreview.map((c) => (
+                <div key={c.id} className="set-list-row">
+                  <div className="set-list-row-info">
+                    <p className="set-list-row-name">
+                      {c.name}
+                      {c.source === 'course' && ' (course-specific)'}
+                      {c.source === 'school' && ' (school-wide)'}
+                    </p>
+                    <p className="set-list-row-meta">{c.weight_pct}%</p>
+                  </div>
+                  <div className="set-list-row-actions">
+                    <button
+                      className="set-edit-btn"
+                      onClick={() => openOverrideForm(c)}
+                      title={c.source === 'school' ? 'Create a course-specific override for this course only — the school-wide value is not changed' : undefined}
+                    >
+                      {c.source === 'school' ? 'Override for this course' : 'Edit'}
+                    </button>
+                    {c.source === 'course' && (
+                      <button
+                        className="set-delete-btn"
+                        onClick={() => handleDeleteOverride(c)}
+                        disabled={deletingOverrideId === c.id}
+                        aria-label={`Remove ${c.name}`}
+                      >
+                        <Icon name="x" size={16} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
+      {showOverrideForm && (
+        <div className="set-overlay" onClick={() => setShowOverrideForm(false)}>
+          <div className="set-sheet" onClick={(e) => e.stopPropagation()}>
+            <h2 className="set-sheet-title">
+              {editingOverride
+                ? (editingOverride.source === 'school' ? `Override "${editingOverride.name}" for this course` : 'Edit course-specific component')
+                : 'Add course-specific component'}
+            </h2>
+            {editingOverride?.source === 'school' ? (
+              <p className="set-hint-text">
+                This creates a course-specific "{editingOverride.name}" for this course only — the school-wide value stays {editingOverride.weight_pct}% for every other course.
+              </p>
+            ) : (
+              <p className="set-hint-text">
+                Name matching a school-wide component (e.g. "CA") replaces its weight for this course only. A new name (e.g. "Practical") adds a course-specific component.
+              </p>
+            )}
+            <FieldRow label="Name">
+              <Input value={ovName} onChange={setOvName} placeholder="e.g. CA, Exam, Practical" />
+            </FieldRow>
+            <FieldRow label="Weight %">
+              <Input value={ovWeightPct} onChange={(v) => setOvWeightPct(v.replace(/[^0-9.]/g, ''))} placeholder="e.g. 20" />
+            </FieldRow>
+            <p className="set-hint-text">
+              With this value, this course's effective set would total{' '}
+              <strong>{ovWeightPct && !Number.isNaN(Number(ovWeightPct)) ? projectedMergedWeightSum(Number(ovWeightPct)).toFixed(2) : '—'}%</strong>
+              {' '}(must reach 100% before lecturers can finalize scores for this course — you can still save while building the set up).
+            </p>
+            {ovError && <p className="set-form-error">{ovError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowOverrideForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveOverride} disabled={ovSaving}>{ovSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showBandForm && (
         <div className="set-overlay" onClick={() => setShowBandForm(false)}>

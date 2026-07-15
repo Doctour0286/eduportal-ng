@@ -17311,3 +17311,586 @@ body {
   background: var(--color-danger-subtle);
   color: var(--color-danger);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CourseResultsModule (higher-ed course results — Session 60/60a/60c)
+   ═══════════════════════════════════════════════════════════════════════════
+   None of these existed before — the component was shipped and typechecked
+   (tsc clean) but never checked against this stylesheet, so it has been
+   rendering fully unstyled. Modeled 1:1 on .res-* (ResultsModule.tsx, the
+   secondary-school sibling this component was split off from) rather than
+   invented fresh — same shell/header/term-tabs/table/score-input/badge/
+   empty-state/error-state shapes, same design tokens, just a different
+   prefix so each module's CSS stays independently editable without the
+   other silently inheriting a change. Where .res-* already solved a
+   near-identical problem (e.g. .res-th-weight for a weighted-component
+   column header, .res-score-input for a table-cell numeric input), that
+   solution is reused verbatim under the .crs- prefix, not re-invented. */
+
+.crs-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  background: var(--color-bg);
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.crs-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.crs-title {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+  flex: 1;
+}
+
+.crs-session-label {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  background: var(--color-bg-subtle);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+}
+
+/* ── Term tabs ────────────────────────────────────────────────────────────── */
+
+.crs-term-tabs {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: var(--space-2) var(--space-4) 0;
+}
+
+.crs-term-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.crs-term-tab {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.crs-term-tab--active {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+.crs-term-tab:not(.crs-term-tab--active):hover {
+  background: var(--color-bg-subtle);
+  color: var(--color-text);
+}
+
+/* ── Course offering picker ──────────────────────────────────────────────── */
+
+.crs-offering-select {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.crs-field-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.crs-select {
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E")
+    no-repeat right var(--space-3) center;
+  -webkit-appearance: none;
+  appearance: none;
+  font-size: var(--text-base);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.crs-select:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-color: var(--color-primary);
+}
+
+/* ── Warning banner (no CGPA policy configured) ──────────────────────────── */
+
+.crs-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-2) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+/* ── Grid wrap / body ─────────────────────────────────────────────────────── */
+
+.crs-grid-wrap {
+  flex: 1;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-3) 0;
+}
+
+.crs-loading,
+.crs-error,
+.crs-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  justify-content: center;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.crs-error {
+  color: var(--color-danger);
+}
+
+/* ── Table ────────────────────────────────────────────────────────────────── */
+
+.crs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+/* SESSION 60a/60c variant — one input column per CA/exam component plus a
+   weighted-total column, vs. the single plain-score column above. No
+   layout differences from the base table (same row/cell shapes), but kept
+   as an explicit rule rather than an unstyled modifier so a future change
+   scoped to "just the components table" has somewhere real to go. */
+.crs-table--components {
+  min-width: 640px;
+}
+
+.crs-th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface);
+  border-bottom: 2px solid var(--color-border);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-weight: 600;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.crs-th-weight {
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--color-text-subtle);
+}
+
+.crs-row {
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.1s;
+}
+
+.crs-row:hover {
+  background: var(--color-bg-subtle);
+}
+
+.crs-td {
+  padding: var(--space-2) var(--space-3);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.crs-td--total {
+  text-align: center;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+/* ── Status badge ─────────────────────────────────────────────────────────── */
+
+.crs-badge {
+  display: inline-block;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.crs-badge--carryover {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
+/* ── Score inputs ─────────────────────────────────────────────────────────── */
+
+.crs-score-input {
+  width: 72px;
+  height: 36px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+  -moz-appearance: textfield;
+}
+
+.crs-score-input::-webkit-inner-spin-button,
+.crs-score-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.crs-score-input:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-color: var(--color-primary);
+}
+
+.crs-score-input:disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.crs-score-input--component {
+  width: 64px;
+}
+
+.crs-row-error {
+  font-size: var(--text-xs);
+  color: var(--color-danger);
+  margin: var(--space-1) 0 0 0;
+  white-space: normal;
+  max-width: 140px;
+}
+
+/* ── Finalize button ──────────────────────────────────────────────────────── */
+
+.crs-finalize-btn {
+  min-height: 36px;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: var(--color-primary);
+  color: #fff;
+  transition: opacity 0.15s, filter 0.15s;
+  white-space: nowrap;
+}
+
+.crs-finalize-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.crs-finalize-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CourseRegistrationModule (higher-ed course registration — Session 57)
+   ═══════════════════════════════════════════════════════════════════════════
+   Same situation as .crs-* above: shipped and typechecked, never checked
+   against this stylesheet, rendering fully unstyled. Modeled on .set-*'s
+   field-row/list-row/button primitives (SettingsModule.tsx) since this
+   module's shapes — a field row, a tappable search-result list, a
+   checkable list row, a save button/bar — are closer to Settings' plain
+   stacked-card layout than ResultsModule's table, not on .res-*/.crs-*. */
+
+.reg-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  background: var(--color-bg, var(--color-surface));
+  padding: var(--space-4);
+  gap: var(--space-3);
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.reg-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reg-title {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.reg-subtitle {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.reg-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ── Field rows / inputs (same shape as .set-field-row/.set-input) ──────── */
+
+.reg-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reg-field-label {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.reg-field-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reg-input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  box-sizing: border-box;
+  min-height: 44px;
+  transition: border-color 0.15s;
+  -webkit-appearance: none;
+}
+
+.reg-input:focus {
+  outline: none;
+  border-color: var(--color-brand-600);
+}
+
+.reg-select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  color: var(--color-text-primary);
+  background: var(--color-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding-right: var(--space-8);
+}
+
+.reg-select:focus {
+  outline: none;
+  border-color: var(--color-brand-600);
+}
+
+/* ── Hint / error / empty text ───────────────────────────────────────────── */
+
+.reg-hint-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.reg-empty-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  padding: var(--space-3);
+  text-align: center;
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  margin: 0;
+}
+
+.reg-form-error {
+  font-size: var(--text-sm);
+  color: var(--color-danger-600, #dc2626);
+  margin: 0;
+}
+
+.reg-save-confirmation {
+  font-size: var(--text-sm);
+  color: var(--color-success-600, #16a34a);
+  margin: 0;
+}
+
+.reg-section-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: var(--space-2) 0 0 0;
+}
+
+/* ── Back button ──────────────────────────────────────────────────────────── */
+
+.reg-back-btn {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--color-brand-600);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.reg-back-btn:hover { text-decoration: underline; }
+
+/* ── Student banner (selected student, step 2 header) ────────────────────── */
+
+.reg-student-banner {
+  padding: var(--space-3);
+  background: var(--color-brand-50, #eff6ff);
+  border: 1px solid var(--color-brand-600);
+  border-radius: var(--radius-md);
+}
+
+/* ── List rows (search results, core/elective/carryover courses) ────────── */
+
+.reg-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 60px;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.reg-list-row--button {
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s;
+}
+
+.reg-list-row--button:hover {
+  border-color: var(--color-brand-600);
+}
+
+.reg-list-row--checkable {
+  cursor: pointer;
+}
+
+.reg-list-row--checkable input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  accent-color: var(--color-brand-600);
+}
+
+.reg-list-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.reg-list-row-name {
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.reg-list-row-meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 2px 0 0 0;
+}
+
+/* ── Credit-load summary bar ──────────────────────────────────────────────── */
+
+.reg-summary-bar {
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.reg-summary-ok,
+.reg-summary-warning,
+.reg-summary-error {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  margin: 0;
+}
+
+.reg-summary-ok { color: var(--color-text-secondary); }
+.reg-summary-warning { color: var(--color-warning-600, #d97706); }
+.reg-summary-error { color: var(--color-danger-600, #dc2626); }
+
+/* ── Save button ──────────────────────────────────────────────────────────── */
+
+.reg-save-btn {
+  padding: var(--space-2) var(--space-5);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-brand-600);
+  color: white;
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  transition: opacity 0.15s;
+}
+
+.reg-save-btn:disabled { opacity: 0.5; cursor: default; }

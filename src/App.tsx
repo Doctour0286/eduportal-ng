@@ -1079,7 +1079,10 @@ function TabContent({
   }
 
   if (tab === 'results') {
-    return <ResultsModule schoolId={schoolId} isAdmin={isAdmin} />
+    // schoolType passed through (Session 60) so ResultsModule can branch to
+    // the higher-ed course-results/GPA view — same pattern already used two
+    // branches above for CourseRegistrationModule/CourseAttendanceModule.
+    return <ResultsModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} />
   }
 
   if (tab === 'hr') {

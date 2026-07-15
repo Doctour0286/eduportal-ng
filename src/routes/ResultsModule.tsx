@@ -91,12 +91,28 @@ import {
   type GradeBand,
   type ScoreMap,
 } from '../services/resultsService'
+import CourseResultsModule from './CourseResultsModule'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface ResultsModuleProps {
   schoolId: string
   isAdmin: boolean
+  /** Session 60: threaded through from App.tsx (school.school_type), same as
+   *  CourseRegistrationModule/CourseAttendanceModule two tabs over. Used only
+   *  to pick which of the two entirely-separate render paths below runs —
+   *  never passed further down into the secondary-school path's own tree. */
+  schoolType: string | null
+}
+
+// Duplicated intentionally from SettingsModule.tsx's own private (unexported)
+// copy, same as CourseRegistrationModule.tsx already does — see that file's
+// own comment on this: "if a third module ever needs this same gate, worth
+// promoting to a shared lib/schoolType.ts rather than a third copy." This is
+// that third copy; promoting all three is a good follow-up, out of scope here.
+const HIGHER_INSTITUTION_SCHOOL_TYPES = ['university', 'polytechnic', 'college_of_education', 'other']
+function isHigherInstitutionSchoolType(schoolType: string | null | undefined): boolean {
+  return !!schoolType && HIGHER_INSTITUTION_SCHOOL_TYPES.includes(schoolType)
 }
 
 // ─── Load state machine ───────────────────────────────────────────────────────
@@ -105,7 +121,25 @@ type LoadState = 'booting' | 'loading' | 'ready' | 'empty' | 'error'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ResultsModule({ schoolId, isAdmin }: ResultsModuleProps) {
+export default function ResultsModule({ schoolId, isAdmin, schoolType }: ResultsModuleProps) {
+  // Session 60: higher-ed schools get a completely separate component, not a
+  // rendering-time fork lower down. This is deliberate — the secondary path's
+  // boot effect (below) unconditionally calls loadMyTeachingAssignments/
+  // loadScoreComponents/loadGradeScale, which are meaningless (and wasteful)
+  // queries for a higher-ed school. Branching here, before that effect ever
+  // runs, avoids firing them at all — same reasoning CourseRegistrationModule/
+  // CourseAttendanceModule already apply by being their own top-level modules
+  // rather than branches inside a shared one.
+  if (isHigherInstitutionSchoolType(schoolType)) {
+    return <CourseResultsModule schoolId={schoolId} isAdmin={isAdmin} />
+  }
+
+  return <ResultsModuleSecondary schoolId={schoolId} isAdmin={isAdmin} />
+}
+
+// ─── Secondary-school path (pre-existing, unmodified below this point) ────────
+
+function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdmin: boolean }) {
   // ── Permissions (Session 10, PRD Problem 3.1) ────────────────────────────
   const can         = useAuthStore((s) => s.can)
   const canForClass = useAuthStore((s) => s.canForClass)
