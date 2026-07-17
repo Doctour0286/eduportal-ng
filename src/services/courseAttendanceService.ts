@@ -568,6 +568,118 @@ export async function loadAttendanceEligibility(params: {
   }
 }
 
+// ─── Cross-course attendance summary (one student, all offerings) ─────────
+
+export interface StudentOverallAttendance {
+  totalSessions: number       // summed across every course the student is
+                               // currently (non-withdrawn) registered for
+  presentCount: number        // 'present' + 'late', same semantics as
+                               // loadAttendanceEligibility() above
+  percent: number | null      // null when totalSessions === 0 — no sessions
+                               // held yet across any course, not 0%
+  courseCount: number         // how many distinct offerings fed this number
+                               // — shown alongside the percent so a 100% on
+                               // one course doesn't read as "everything," if
+                               // e.g. the student has 3 registrations but
+                               // only 1 course has held any sessions yet
+}
+
+/**
+ * Rolls up a student's attendance across every course they're currently
+ * registered for (status <> 'withdrawn'), for the current session — the
+ * cross-course number a student-detail summary card needs, which nothing
+ * else in this file computes (loadAttendanceEligibility() above is
+ * deliberately per-offering, for the lecturer-facing eligibility badge).
+ *
+ * Built from the same three real tables loadAttendanceEligibility() reads
+ * (course_registrations → course_attendance_sessions →
+ * course_attendance_records), just fanned out across every live
+ * registration instead of one. No new table, no new policy — course_
+ * registrations already grants student self-read (§7.27.2), and this
+ * function is called from an admin/staff context here regardless.
+ *
+ * sessionId is required (not optional) because course_registrations has no
+ * meaningful "current" concept without it — matching every other query in
+ * this file that scopes through course_offerings' own session_id/term_id.
+ */
+export async function loadStudentOverallAttendance(params: {
+  studentId: string
+  sessionId: string
+}): Promise<Result<StudentOverallAttendance>> {
+  try {
+    const { data: registrations, error: regErr } = await supabase
+      .from('course_registrations')
+      .select('course_id')
+      .eq('student_id', params.studentId)
+      .eq('session_id', params.sessionId)
+      .neq('status', 'withdrawn')
+
+    if (regErr) return { ok: false, error: regErr.message }
+
+    const courseIds = Array.from(new Set((registrations ?? []).map((r: any) => r.course_id)))
+    if (courseIds.length === 0) {
+      return {
+        ok: true,
+        data: { totalSessions: 0, presentCount: 0, percent: null, courseCount: 0 },
+      }
+    }
+
+    const { data: offerings, error: offErr } = await supabase
+      .from('course_offerings')
+      .select('id')
+      .eq('session_id', params.sessionId)
+      .in('course_id', courseIds)
+
+    if (offErr) return { ok: false, error: offErr.message }
+
+    const offeringIds = (offerings ?? []).map((o: any) => o.id)
+    if (offeringIds.length === 0) {
+      return {
+        ok: true,
+        data: { totalSessions: 0, presentCount: 0, percent: null, courseCount: courseIds.length },
+      }
+    }
+
+    const { data: sessions, error: sessErr } = await supabase
+      .from('course_attendance_sessions')
+      .select('id')
+      .in('course_offering_id', offeringIds)
+
+    if (sessErr) return { ok: false, error: sessErr.message }
+
+    const sessionIds = (sessions ?? []).map((s: any) => s.id)
+    const totalSessions = sessionIds.length
+
+    if (totalSessions === 0) {
+      return {
+        ok: true,
+        data: { totalSessions: 0, presentCount: 0, percent: null, courseCount: courseIds.length },
+      }
+    }
+
+    const { data: records, error: recErr } = await supabase
+      .from('course_attendance_records')
+      .select('status')
+      .eq('student_id', params.studentId)
+      .in('course_attendance_session_id', sessionIds)
+
+    if (recErr) return { ok: false, error: recErr.message }
+
+    const presentCount = (records ?? []).filter(
+      (r: any) => r.status === 'present' || r.status === 'late',
+    ).length
+
+    const percent = Math.round((presentCount / totalSessions) * 1000) / 10
+
+    return {
+      ok: true,
+      data: { totalSessions, presentCount, percent, courseCount: courseIds.length },
+    }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load overall attendance' }
+  }
+}
+
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 // Mirror buildAttendanceMap()/getAttendanceSummary() exactly.
 

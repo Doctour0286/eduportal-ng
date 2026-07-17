@@ -999,6 +999,7 @@ function TabContent({
           schoolName={schoolName}
           actorType={actorType}
           authUserId={authUserId}
+          schoolType={schoolType}
         />
       )
     }
@@ -1026,6 +1027,7 @@ function TabContent({
           actorType={actorType}
           authUserId={authUserId}
           initialTab="schedule"
+          schoolType={schoolType}
         />
       )
     }
@@ -1046,6 +1048,7 @@ function TabContent({
           actorType={actorType}
           authUserId={authUserId}
           initialTab="attendance"
+          schoolType={schoolType}
         />
       )
     }
@@ -1058,7 +1061,11 @@ function TabContent({
     // threading pattern as TimetableModule's own schoolName prop two
     // branches up (added there for its print page header). schoolLogoUrl
     // added the same way, same session, for the card's logo slot.
-    return <StudentsModule schoolId={schoolId} schoolName={schoolName} schoolLogoUrl={schoolLogoUrl} isAdmin={isAdmin} intent={intent.intent} onNavigate={onNavigate} />
+    // schoolType added SESSION 60e — needed to gate the new admin
+    // Transcript tab to higher-ed schools only, matching this same
+    // isHigherEd check's own four other call sites below (GuardianPortal's
+    // 'home'/'timetable'/'attendance'/'finance' branches, SESSION 60b).
+    return <StudentsModule schoolId={schoolId} schoolName={schoolName} schoolLogoUrl={schoolLogoUrl} schoolType={schoolType} isAdmin={isAdmin} intent={intent.intent} onNavigate={onNavigate} />
   }
 
   if (tab === 'finance') {
@@ -1072,6 +1079,7 @@ function TabContent({
           actorType={actorType}
           authUserId={authUserId}
           initialTab="fees"
+          schoolType={schoolType}
         />
       )
     }
@@ -1117,7 +1125,7 @@ function TabContent({
   }
 
   if (tab === 'settings') {
-    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} schoolType={schoolType} />
+    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} schoolType={schoolType} actorRecordId={actorRecordId} />
   }
 
   if (tab === 'course_registration') {

@@ -14412,6 +14412,207 @@ body {
 .port-result-component-weight { color: var(--color-text-muted); }
 .port-result-component-value { font-weight: 600; color: var(--color-text); }
 
+/* ── Transcript tab (SESSION 60b, higher-ed GuardianPortal replacement for
+   Results) ──────────────────────────────────────────────────────────────
+   Matches the existing .port-* token conventions used by .port-result-*/
+   .port-term-progress* above — no new tokens introduced. Bidirectional
+   classname↔JSX diff confirmed 0 gaps in both directions before this
+   block was appended (24/24 classnames match). */
+
+.port-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.port-transcript-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.port-transcript-student {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.port-transcript-matric {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.port-transcript-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--color-brand-600);
+  color: var(--color-brand-on, #fff);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.port-transcript-download-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.port-transcript-cgpa-card {
+  background: var(--color-brand-50);
+  border: 1px solid var(--color-brand-600);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.port-transcript-cgpa-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-brand-600);
+}
+
+.port-transcript-cgpa-value {
+  font-size: var(--text-2xl, 1.75rem);
+  font-weight: 800;
+  color: var(--color-text);
+  margin-top: var(--space-1);
+}
+
+.port-transcript-cgpa-detail {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--space-1);
+}
+
+.port-transcript-semester-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+}
+
+.port-transcript-semester-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-neutral-200);
+  margin-bottom: var(--space-2);
+}
+
+.port-transcript-semester-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.port-transcript-semester-gpa {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-brand-600);
+  white-space: nowrap;
+}
+
+.port-transcript-course-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.port-transcript-course-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-neutral-100);
+}
+
+.port-transcript-course-row:last-child {
+  border-bottom: none;
+}
+
+.port-transcript-course-row--superseded {
+  opacity: 0.55;
+}
+
+.port-transcript-course-main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.port-transcript-course-code {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.port-transcript-course-title {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.port-transcript-course-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.port-transcript-course-grade-pill {
+  display: inline-block;
+  background: var(--color-brand-50);
+  color: var(--color-brand-600);
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+
+.port-transcript-course-tags {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.port-transcript-tag {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--color-neutral-100);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+
+.port-transcript-tag--superseded {
+  background: var(--color-neutral-200);
+  color: var(--color-text-muted);
+}
+
+/* SESSION 60e — admin-only draft badge, StudentTranscriptTab
+   (StudentsModule.tsx). Never rendered in GuardianPortal.tsx's own copy of
+   this row markup — see that component's comment for why. Uses the same
+   warning-toned pair CourseResultsModule.tsx's .crs-badge--carryover
+   already established for "needs attention" styling, for visual
+   consistency across the two admin surfaces that now both talk about
+   result state. */
+.port-transcript-tag--draft {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
 /* ── Attendance tab ───────────────────────────────────────────────────── */
 
 .port-attendance {
@@ -17395,9 +17596,9 @@ body {
 }
 
 .crs-term-tab--active {
-  background: var(--color-primary);
-  color: #fff;
-  border-color: var(--color-primary);
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 .crs-term-tab:not(.crs-term-tab--active):hover {
@@ -17439,9 +17640,9 @@ body {
 }
 
 .crs-select:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 /* ── Warning banner (no CGPA policy configured) ──────────────────────────── */
@@ -17587,9 +17788,9 @@ body {
 }
 
 .crs-score-input:focus {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-brand-600, var(--color-primary));
   outline-offset: 2px;
-  border-color: var(--color-primary);
+  border-color: var(--color-brand-600, var(--color-primary));
 }
 
 .crs-score-input:disabled {
@@ -17619,8 +17820,8 @@ body {
   font-weight: 600;
   cursor: pointer;
   border: none;
-  background: var(--color-primary);
-  color: #fff;
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
   transition: opacity 0.15s, filter 0.15s;
   white-space: nowrap;
 }
@@ -17630,6 +17831,95 @@ body {
 }
 
 .crs-finalize-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Publish gate (SESSION 60d) ───────────────────────────────────────────── */
+
+.crs-badge--published {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-success-subtle, #dcfce7);
+  color: var(--color-success, #16a34a);
+}
+
+.crs-badge--draft {
+  background: var(--color-bg-subtle);
+  color: var(--color-text-muted);
+}
+
+.crs-publish-btn {
+  display: block;
+  margin-top: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--color-brand-600, var(--color-primary));
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
+  transition: opacity 0.15s, filter 0.15s;
+  white-space: nowrap;
+}
+
+.crs-publish-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.crs-publish-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.crs-publish-btn--unpublish {
+  background: transparent;
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+/* SESSION 60f — bulk publish bar, sits above the score grid. */
+
+.crs-bulk-publish-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-brand-600, var(--color-primary));
+  border-radius: var(--radius-md);
+  background: var(--color-brand-50, var(--color-bg-subtle));
+}
+
+.crs-bulk-publish-count {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.crs-bulk-publish-btn {
+  min-height: 34px;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: var(--color-brand-600, var(--color-primary));
+  color: var(--color-brand-on, #fff);
+  transition: opacity 0.15s, filter 0.15s;
+  white-space: nowrap;
+}
+
+.crs-bulk-publish-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.crs-bulk-publish-btn:disabled {
   opacity: 0.5;
   cursor: default;
 }

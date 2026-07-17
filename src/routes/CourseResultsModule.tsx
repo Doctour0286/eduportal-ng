@@ -46,6 +46,7 @@ import {
   loadFinalizedAttemptsForStudent, saveGpaSnapshots,
   resolveCourseResultComponents, loadComponentScoresForRegistrations,
   saveComponentScore, finalizeWeightedCourseResult,
+  publishCourseResult, unpublishCourseResult,
   type ScorableRegistration, type CgpaPolicy,
   type ResolvedCourseResultComponent,
 } from '../services/courseResultsService'
@@ -69,6 +70,14 @@ type LoadState = 'booting' | 'loading' | 'ready' | 'empty' | 'error'
 
 export default function CourseResultsModule({ schoolId, isAdmin }: CourseResultsModuleProps) {
   const staffId = useAuthStore((s) => s.actorRecordId) ?? ''
+  // SESSION 60d — admin publish-gate. academics.results.publish already
+  // existed, unused, in the live permissions catalog (confirmed via a
+  // full grep of the catalog before use, per §0.2) — no new key needed.
+  // can() already bypasses to true for admin-role holders, same as every
+  // other permission read in this codebase; a lecturer without this key
+  // can still finalize scores (unchanged) but the Publish/Unpublish
+  // action below simply doesn't render for them.
+  const canPublish = useAuthStore((s) => s.can('academics.results.publish'))
 
   const [session, setSession] = useState<Session | null>(null)
   const [terms, setTerms] = useState<Term[]>([])
@@ -107,6 +116,12 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
   const [componentDrafts, setComponentDrafts] = useState<Map<string, string>>(new Map())
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set())
   const [rowErrors, setRowErrors] = useState<Map<string, string>>(new Map())
+  // SESSION 60f — bulk publish state, separate from per-row savingIds so
+  // the bulk button's own loading state doesn't fight with (or get
+  // confused by) any single row's independent Publish click landing at
+  // the same time.
+  const [bulkPublishing, setBulkPublishing] = useState(false)
+  const [bulkError, setBulkError] = useState<string | null>(null)
 
   const [bootState, setBootState] = useState<LoadState>('booting')
   const [bootError, setBootError] = useState('')
@@ -264,6 +279,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
         score,
         letterGrade: band.grade_label,
         gradePoint: band.grade_point,
+        isPassing: band.is_passing,
       })
       if (saveRes.error) {
         setRowErrors((prev) => new Map(prev).set(reg.registration_id, saveRes.error as string))
@@ -282,6 +298,116 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
       ))
     } finally {
       setSavingIds((prev) => { const s = new Set(prev); s.delete(reg.registration_id); return s })
+    }
+  }
+
+  // ─── SESSION 60d: admin publish / unpublish ────────────────────────────────
+  // Mirrors finalizeScore()'s own savingIds/rowErrors/optimistic-update
+  // shape exactly, so the row's loading/error affordances behave
+  // identically whether the in-flight action is Finalize or Publish.
+
+  // ─── SESSION 60f — fixes: (1) stale-closure double-click bug: togglePublish
+  // took its "is this currently published" read from the `reg` object
+  // captured in the row's render closure, which can be one render behind
+  // the actual state if a click fires before a prior re-render commits —
+  // first click computed isPublished from stale data and sent the wrong
+  // publish/unpublish call, requiring a second click to "correct" itself.
+  // Fixed by re-reading the CURRENT row out of the registrations state
+  // array at call time via its id, never trusting the captured argument's
+  // own published_at. (2) publish/unpublish now also triggers the same
+  // recomputeAndCacheGpa() finalizeScore already calls — previously only
+  // course_results itself was gated by RLS; student_gpa_snapshots (the
+  // CGPA/semester-GPA numbers GuardianPortal's TranscriptTab reads) had no
+  // gate at all and was being recomputed from ALL finalized results the
+  // moment a lecturer finalized, regardless of publish state. See
+  // courseResultsService.ts's loadFinalizedAttemptsForStudent() for the
+  // matching fix on the read side (now filters on published_at, not just
+  // finalized_at) — this recompute call is what actually re-derives and
+  // re-caches student_gpa_snapshots against that corrected read, which is
+  // the only way an unpublish can actually clear a stale CGPA number.
+  async function togglePublish(regId: string) {
+    const current = registrations.find((r) => r.registration_id === regId)
+    if (!current) return
+    setRowErrors((prev) => { const m = new Map(prev); m.delete(regId); return m })
+    setSavingIds((prev) => new Set(prev).add(regId))
+    try {
+      const isPublished = !!current.published_at
+      const res = isPublished
+        ? await unpublishCourseResult({ registrationId: regId })
+        : await publishCourseResult({ registrationId: regId, publishedBy: staffId })
+
+      if (res.error) {
+        setRowErrors((prev) => new Map(prev).set(regId, res.error as string))
+        return
+      }
+
+      setRegistrations((prev) => prev.map((r) =>
+        r.registration_id === regId
+          ? { ...r, published_at: isPublished ? null : new Date().toISOString() }
+          : r
+      ))
+
+      // Re-derive the cached CGPA/GPA snapshot against the NEW publish
+      // state — without this, publishing/unpublishing changes what a
+      // guardian's course list shows but leaves their CGPA card computed
+      // from whatever was true before this action (bug #1 from the
+      // owner's 2026-07-16 report). cgpaPolicy/session may legitimately
+      // be unset on a school that hasn't configured grading yet — silently
+      // skip the recompute rather than error, same guard finalizeScore()
+      // already uses.
+      if (cgpaPolicy) {
+        await recomputeAndCacheGpa(current.student_id, cgpaPolicy, session?.id ?? '')
+      }
+    } finally {
+      setSavingIds((prev) => { const s = new Set(prev); s.delete(regId); return s })
+    }
+  }
+
+  // ─── SESSION 60f: bulk publish — publish every finalized-but-unpublished
+  // row in the current grid at once (owner's explicit request, 2026-07-16:
+  // a lecturer scoring 40 students shouldn't publish one row at a time).
+  // Deliberately only touches rows that are BOTH finalized and not yet
+  // published — never force-finalizes a row on someone's behalf (a row
+  // with no score yet is silently skipped, same as the per-row button's
+  // own disabled-until-finalized guard) and never re-publishes an already-
+  // published row (a no-op publishCourseResult() call on those would just
+  // bump published_at/published_by for no reason). One
+  // recomputeAndCacheGpa() call per affected student at the end, not one
+  // per row — a lecturer bulk-publishing 40 rows across 15 students
+  // shouldn't trigger 40 redundant recomputes of the same few students'
+  // CGPA.
+  async function publishAllFinalized() {
+    const targets = registrations.filter((r) => r.finalized_at && !r.published_at)
+    if (targets.length === 0) return
+    setBulkPublishing(true)
+    setBulkError(null)
+    try {
+      const results = await Promise.all(
+        targets.map((r) => publishCourseResult({ registrationId: r.registration_id, publishedBy: staffId })),
+      )
+      const failed = results.filter((r) => r.error).length
+      if (failed > 0) {
+        setBulkError(`${failed} of ${targets.length} results couldn't be published — try again.`)
+      }
+      const succeededIds = new Set(
+        targets.filter((_, i) => !results[i].error).map((r) => r.registration_id),
+      )
+      setRegistrations((prev) => prev.map((r) =>
+        succeededIds.has(r.registration_id) ? { ...r, published_at: new Date().toISOString() } : r
+      ))
+
+      if (cgpaPolicy) {
+        const affectedStudentIds = new Set(
+          targets.filter((r) => succeededIds.has(r.registration_id)).map((r) => r.student_id),
+        )
+        await Promise.all(
+          Array.from(affectedStudentIds).map((sid) =>
+            recomputeAndCacheGpa(sid, cgpaPolicy, session?.id ?? '')
+          ),
+        )
+      }
+    } finally {
+      setBulkPublishing(false)
     }
   }
 
@@ -366,6 +492,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
         registrationId: reg.registration_id,
         letterGrade: band.grade_label,
         gradePoint: band.grade_point,
+        isPassing: band.is_passing,
       })
       if (finalizeRes.error || !finalizeRes.data) {
         setRowErrors((prev) => new Map(prev).set(reg.registration_id, finalizeRes.error ?? 'Failed to finalize.'))
@@ -459,6 +586,27 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
 
       {selectedOffering && (
         <div className="crs-grid-wrap">
+          {/* SESSION 60f — bulk publish. Only rendered once the grid is
+              actually loaded (avoids a flash of the bar before
+              registrations/canPublish are known) and only when at least
+              one row is finalized-but-unpublished — hidden entirely once
+              everything in this offering is already published, rather
+              than showing a permanently-disabled button. */}
+          {gridState === 'ready' && canPublish && registrations.some((r) => r.finalized_at && !r.published_at) && (
+            <div className="crs-bulk-publish-bar">
+              <span className="crs-bulk-publish-count">
+                {registrations.filter((r) => r.finalized_at && !r.published_at).length} result(s) ready to publish
+              </span>
+              <button
+                className="crs-bulk-publish-btn"
+                disabled={bulkPublishing}
+                onClick={publishAllFinalized}
+              >
+                {bulkPublishing ? <Icon name="refresh-cw" size={14} /> : 'Publish all'}
+              </button>
+            </div>
+          )}
+          {bulkError && <p className="crs-error">{bulkError}</p>}
           {gridState === 'loading' && <p className="crs-loading">Loading students…</p>}
           {gridState === 'error' && <p className="crs-error"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /> {gridError}</p>}
           {gridState === 'empty' && <p className="crs-empty"><Icon name="users" /> No registered students for this course yet.</p>}
@@ -476,6 +624,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                   <th className="crs-th">Grade</th>
                   <th className="crs-th">GP</th>
                   <th className="crs-th"></th>
+                  {canPublish && <th className="crs-th">Published</th>}
                 </tr>
               </thead>
               <tbody>
@@ -483,6 +632,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                   const isSaving = savingIds.has(r.registration_id)
                   const rowErr = rowErrors.get(r.registration_id)
                   const isFinalized = !!r.finalized_at
+                  const isPublished = !!r.published_at
                   return (
                     <tr key={r.registration_id} className="crs-row">
                       <td className="crs-td">{r.student_name}</td>
@@ -515,6 +665,34 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                           {isSaving ? <Icon name="refresh-cw" size={14} /> : isFinalized ? 'Update' : 'Finalize'}
                         </button>
                       </td>
+                      {/* SESSION 60d — publish gate. Only rendered for
+                          holders of academics.results.publish (admin
+                          bypasses via can()'s own existing rule).
+                          Disabled, not hidden, until a result is finalized
+                          — publishing a never-scored row makes no sense,
+                          same reasoning as publishCourseResult()'s own
+                          server-side guard, surfaced here so the button
+                          itself communicates why it can't be tapped yet
+                          rather than silently erroring on click. */}
+                      {canPublish && (
+                        <td className="crs-td">
+                          {isPublished ? (
+                            <span className="crs-badge crs-badge--published">
+                              <Icon name="circle-check" size={12} /> Published
+                            </span>
+                          ) : (
+                            <span className="crs-badge crs-badge--draft">Draft</span>
+                          )}
+                          <button
+                            className={`crs-publish-btn${isPublished ? ' crs-publish-btn--unpublish' : ''}`}
+                            disabled={isSaving || !isFinalized}
+                            onClick={() => togglePublish(r.registration_id)}
+                            title={!isFinalized ? 'Finalize a score before publishing' : undefined}
+                          >
+                            {isSaving ? <Icon name="refresh-cw" size={14} /> : isPublished ? 'Unpublish' : 'Publish'}
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   )
                 })}
@@ -541,6 +719,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                   <th className="crs-th">Grade</th>
                   <th className="crs-th">GP</th>
                   <th className="crs-th"></th>
+                  {canPublish && <th className="crs-th">Published</th>}
                 </tr>
               </thead>
               <tbody>
@@ -548,6 +727,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                   const isSaving = savingIds.has(r.registration_id)
                   const rowErr = rowErrors.get(r.registration_id)
                   const isFinalized = !!r.finalized_at
+                  const isPublished = !!r.published_at
                   const preview = weightedPreviewFor(r)
                   return (
                     <tr key={r.registration_id} className="crs-row">
@@ -589,6 +769,29 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
                           {isSaving ? <Icon name="refresh-cw" size={14} /> : isFinalized ? 'Update' : 'Finalize'}
                         </button>
                       </td>
+                      {/* SESSION 60d — identical publish gate/cell as the
+                          plain-score table above; see that copy's own
+                          comment for the full reasoning, not repeated
+                          here. */}
+                      {canPublish && (
+                        <td className="crs-td">
+                          {isPublished ? (
+                            <span className="crs-badge crs-badge--published">
+                              <Icon name="circle-check" size={12} /> Published
+                            </span>
+                          ) : (
+                            <span className="crs-badge crs-badge--draft">Draft</span>
+                          )}
+                          <button
+                            className={`crs-publish-btn${isPublished ? ' crs-publish-btn--unpublish' : ''}`}
+                            disabled={isSaving || !isFinalized}
+                            onClick={() => togglePublish(r.registration_id)}
+                            title={!isFinalized ? 'Finalize a score before publishing' : undefined}
+                          >
+                            {isSaving ? <Icon name="refresh-cw" size={14} /> : isPublished ? 'Unpublish' : 'Publish'}
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   )
                 })}
@@ -615,7 +818,7 @@ export default function CourseResultsModule({ schoolId, isAdmin }: CourseResults
 async function loadHigherEdGradeScale(schoolId: string): Promise<{ data: GradeBand[]; error: string | null }> {
   const { data, error } = await supabase
     .from('grade_scales')
-    .select('min_score, max_score, grade_label, grade_point')
+    .select('min_score, max_score, grade_label, grade_point, is_passing')
     .eq('school_id', schoolId)
     .order('min_score', { ascending: false })
   if (error) return { data: [], error: error.message }
@@ -625,6 +828,13 @@ async function loadHigherEdGradeScale(schoolId: string): Promise<{ data: GradeBa
       max_score: Number(b.max_score),
       grade_label: b.grade_label,
       grade_point: Number(b.grade_point),
+      // Explicit, school-configured — see gpaService.ts's GradeBand doc
+      // for why this isn't derived from grade_point. Falls back to the
+      // same grade_point > 0 heuristic ONLY if a row somehow has a null
+      // here (shouldn't happen post-migration backfill, but this mapper
+      // must produce a real boolean, not undefined, for gpaService.ts's
+      // types to hold).
+      is_passing: b.is_passing === null || b.is_passing === undefined ? Number(b.grade_point) > 0 : Boolean(b.is_passing),
     })),
     error: null,
   }
@@ -648,20 +858,75 @@ async function recomputeAndCacheGpa(
   currentSessionId: string,
 ): Promise<void> {
   const attemptsRes = await loadFinalizedAttemptsForStudent(studentId)
-  if (attemptsRes.error || attemptsRes.data.length === 0) return
+  if (attemptsRes.error) return
+
+  // SESSION 60f fix — this used to also bail out on
+  // attemptsRes.data.length === 0, which silently skipped
+  // saveGpaSnapshots() entirely. That was fine back when this function was
+  // ONLY ever called right after a finalize (a freshly-finalized result
+  // means length is never 0 at that call site) — but now that
+  // togglePublish()/publishAllFinalized() call this too, unpublishing a
+  // student's LAST published result legitimately drives the count to
+  // zero, and that case must still call saveGpaSnapshots() so its own
+  // delete-then-insert clears the now-stale cached row — not skip the
+  // write and leave a guardian's TranscriptTab showing a CGPA that no
+  // longer has any published result backing it (bug #1 from the owner's
+  // 2026-07-16 report).
+  //
+  // Handled as an explicit early branch, NOT by letting an empty array
+  // flow through resolveAttemptsForCalculation/computeSemesterGpas/
+  // computeCgpaWeightedAllAttempts below — gpaService.ts isn't available
+  // in this session to confirm those are null-safe over zero attempts, so
+  // asserting that without checking would be a guess dressed up as a
+  // fact. Short-circuiting here also avoids a separate, real risk: the
+  // .in('course_registration_id', [...]) call just below would receive an
+  // empty array, and an empty .in() list is a known Postgrest/Supabase
+  // edge case (behavior has varied by version between "returns zero rows"
+  // and "matches everything") — skipping straight to the clearing save
+  // avoids relying on that either way.
+  if (attemptsRes.data.length === 0) {
+    await saveGpaSnapshots({
+      studentId,
+      semesterGpas: [],
+      cgpa: { totalUnitsAttempted: 0, totalQualityPoints: 0, cgpa: null },
+      currentSessionId,
+    })
+    return
+  }
 
   // Uses the grade_point already persisted on course_results at the time
   // each attempt was finalized, rather than re-deriving from score against
   // the *current* grade scale — correct even if the scale is edited later,
   // since a finalized result's grade shouldn't silently drift.
+  // is_passing is read alongside grade_point, not re-derived — same
+  // "finalized result shouldn't silently drift" rule this file already
+  // applies to grade_point itself. Re-deriving from the *current*
+  // grade_scales.is_passing would mean editing a band's designation later
+  // silently rewrites every past semester's retake resolution; reading
+  // the value persisted at finalize time (course_results.is_passing,
+  // written by saveCourseResult()) avoids that.
   const { data: resultRows, error: resErr } = await supabase
     .from('course_results')
-    .select('course_registration_id, grade_point')
+    .select('course_registration_id, grade_point, is_passing')
     .in('course_registration_id', attemptsRes.data.map((a) => a.registration_id))
   if (resErr) return
 
   const gradePointByRegId = new Map<string, number>(
     (resultRows ?? []).map((r: any) => [r.course_registration_id, Number(r.grade_point)]),
+  )
+  // NOTE on null: rows finalized before this migration have
+  // course_results.is_passing = null (deliberately not backfilled — see
+  // migration's schema note, no honest historical value exists). Boolean(null)
+  // would silently evaluate to false, wrongly treating every pre-migration
+  // passing attempt as failing throughout retake resolution. Falls back to
+  // the grade_point > 0 heuristic ONLY for that transitional null case —
+  // the same imperfect-but-better-than-wrong guess used at the grade-scale
+  // read site above, not a general substitute for the real column.
+  const isPassingByRegId = new Map<string, boolean>(
+    (resultRows ?? []).map((r: any) => [
+      r.course_registration_id,
+      r.is_passing === null || r.is_passing === undefined ? Number(r.grade_point) > 0 : Boolean(r.is_passing),
+    ]),
   )
 
   const scored: ScoredAttempt[] = attemptsRes.data.map((a) => ({
@@ -676,13 +941,13 @@ async function recomputeAndCacheGpa(
     gradeLabel: '', // not needed downstream; grade_point is what the math uses
     gradePoint: gradePointByRegId.get(a.registration_id) ?? 0,
     qualityPoints: (gradePointByRegId.get(a.registration_id) ?? 0) * a.credit_units,
+    isPassing: isPassingByRegId.get(a.registration_id) ?? false,
   }))
 
-  // isPassing: gradePoint > 0 is the only school-agnostic definition
-  // available without a separate "passing_grade_point" setting, which
-  // §7.27.4 doesn't define. Matches gpaService.ts's own worked-example
-  // convention (F = 0.0 = failing, everything else passing).
-  const isPassing = (a: ScoredAttempt) => a.gradePoint > 0
+  // isPassing now reads the persisted value from each attempt, set at
+  // finalize time from the school's grade_scales.is_passing designation —
+  // not re-derived here. See gpaService.ts's GradeBand.is_passing doc.
+  const isPassing = (a: ScoredAttempt) => a.isPassing
 
   // Session ordering: real chronological order (start_date), not creation
   // order — needed for "most recent attempt" in resolveAttemptsForCalculation.

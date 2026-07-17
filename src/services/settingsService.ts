@@ -26,6 +26,12 @@
  *                                 expected for an "Other"-category school, Decision 5)
  *   upsertCgpaPolicy()          — create/update the one-row-per-school policy
  *
+ * Academic standing exports (Session 61, PRD Tier 8 / Problem 8.7, §7.27.5):
+ *   loadAcademicStandingRules()   — this school's standing thresholds (null if
+ *                                   unconfigured — expected for an "Other"-
+ *                                   category school, Decision 5)
+ *   upsertAcademicStandingRules() — create/update the one-row-per-school rules
+ *
  * Course offering exports (unscheduled interim step before Session 60,
  * PRD Tier 8 / Problem 8.7 — closes the gap Session 58's close-out surfaced,
  * "no course_offerings creation UI exists anywhere"):
@@ -1375,6 +1381,83 @@ export async function upsertPlacement(placement: {
   return { error: error?.message ?? null }
 }
 
+// SESSION 64 (PRD Problem 8.7a) — the missing "student → their own current
+// placement" read. Every existing placement function above goes the other
+// direction (level → its currently-placed students, for InstitutionTab's own
+// admin view); nothing previously answered "what is THIS student's current
+// programme/level" for use outside that tab. This is the read
+// StudentsModule.tsx's Brief/Status tabs and studentsService.ts's higher-ed
+// query branch both need, so it lives here rather than being duplicated —
+// same "one implementation, not two" discipline gpaService.ts already
+// established. Joins through to `programmes`/`programme_levels` for real
+// display names (a bare programme_level_id is useless in a UI), and includes
+// `programme_duration_sessions`/`level_sequence_order` even though this
+// session's own scope doesn't need them yet — SESSION 69's promotion flow
+// will, and re-deriving the same join a second time there would repeat
+// exactly the "same read written twice" mistake this file's own header
+// discipline warns against.
+export interface StudentCurrentPlacement {
+  placement_id: string
+  programme_level_id: string
+  level_label: string
+  level_sequence_order: number
+  programme_id: string
+  programme_name: string
+  programme_duration_sessions: number
+  session_id: string
+}
+
+export async function loadStudentCurrentPlacement(
+  studentId: string,
+): Promise<{ data: StudentCurrentPlacement | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('student_programme_placements')
+    .select(`
+      id,
+      programme_level_id,
+      session_id,
+      programme_levels!inner(
+        level_label,
+        sequence_order,
+        programmes!inner(id, name, duration_sessions)
+      )
+    `)
+    .eq('student_id', studentId)
+    .eq('is_current', true)
+    .maybeSingle()
+
+  if (error) return { data: null, error: error.message }
+  if (!data) return { data: null, error: null }  // no current placement — a normal, real state (not yet admitted, or between placements), not an error
+
+  // Joined relations cast through unknown → array before plucking [0], per
+  // this file's own established convention (see header comment) — a nested
+  // !inner join still arrives as an array-or-object depending on the
+  // Supabase client version, same caveat loadPlacementsForProgramme() above
+  // already documents for its own single-level join.
+  const level = (Array.isArray((data as any).programme_levels) ? (data as any).programme_levels[0] : (data as any).programme_levels) as
+    | { level_label: string; sequence_order: number; programmes: any }
+    | undefined
+  if (!level) return { data: null, error: 'Placement row found but its programme level could not be resolved.' }
+  const programme = (Array.isArray(level.programmes) ? level.programmes[0] : level.programmes) as
+    | { id: string; name: string; duration_sessions: number }
+    | undefined
+  if (!programme) return { data: null, error: 'Placement row found but its programme could not be resolved.' }
+
+  return {
+    data: {
+      placement_id: (data as any).id,
+      programme_level_id: (data as any).programme_level_id,
+      level_label: level.level_label,
+      level_sequence_order: level.sequence_order,
+      programme_id: programme.id,
+      programme_name: programme.name,
+      programme_duration_sessions: programme.duration_sessions,
+      session_id: (data as any).session_id,
+    },
+    error: null,
+  }
+}
+
 // ─── Course catalogue & curriculum (§7.27.2, PRD SESSION 56) ──────────────
 // courses is school-wide institutional metadata, scoped by school_id +
 // department_id, the same shape as Faculty/Department/Programme above — a
@@ -1760,12 +1843,25 @@ export interface GradeScaleBand {
   sort_order: number
   scale_max: number | null   // null on pre-existing secondary-school rows
   grade_point: number | null // null on pre-existing secondary-school rows
+  /**
+   * Explicit, school-configured pass/fail designation (migration
+   * session_62pre_carryover_flip.sql). Deliberately NOT inferred from
+   * grade_point > 0 anywhere downstream — see gpaService.ts's GradeBand.is_passing
+   * doc for the worked example (a D at grade_point 1.0 that should still
+   * fail a program's higher minimum) that this column exists to fix.
+   * null only for pre-existing secondary-school rows this column doesn't
+   * apply to (grade_point/scale_max are null on those same rows) — a
+   * higher-ed row should always have a real true/false here after the
+   * migration's backfill, but the type stays nullable so a genuine gap
+   * surfaces instead of silently coercing to false.
+   */
+  is_passing: boolean | null
 }
 
 export async function loadHigherEdGradeScale(schoolId: string): Promise<{ data: GradeScaleBand[]; error: string | null }> {
   const { data, error } = await supabase
     .from('grade_scales')
-    .select('id, min_score, max_score, grade_label, remark, sort_order, scale_max, grade_point')
+    .select('id, min_score, max_score, grade_label, remark, sort_order, scale_max, grade_point, is_passing')
     .eq('school_id', schoolId)
     .order('sort_order', { ascending: true })
 
@@ -1780,6 +1876,7 @@ export async function loadHigherEdGradeScale(schoolId: string): Promise<{ data: 
       sort_order: g.sort_order,
       scale_max: g.scale_max === null ? null : Number(g.scale_max),
       grade_point: g.grade_point === null ? null : Number(g.grade_point),
+      is_passing: g.is_passing === null ? null : Boolean(g.is_passing),
     })),
     error: null,
   }
@@ -1796,6 +1893,7 @@ export async function upsertHigherEdGradeBand(
     scale_max: number
     remark?: string | null
     sort_order: number
+    is_passing: boolean
   },
 ): Promise<{ error: string | null }> {
   const payload = {
@@ -1806,6 +1904,7 @@ export async function upsertHigherEdGradeBand(
     scale_max: band.scale_max,
     remark: band.remark ?? null,
     sort_order: band.sort_order,
+    is_passing: band.is_passing,
   }
   if (band.id) {
     const { error } = await supabase
@@ -1881,7 +1980,415 @@ export async function upsertCgpaPolicy(
   return { error: error?.message ?? null }
 }
 
-// ─── Course offerings (PRD Tier 8 / Problem 8.7, unscheduled interim step ──
+// academic_standing_rules is the SESSION 61 counterpart to cgpa_policy —
+// same shape (one row per school, unique on school_id), same Decision 5
+// discipline: no threshold here is ever smart-defaulted, and
+// loadAcademicStandingRules() returning { data: null } is a normal
+// "not configured yet" state for an "Other"-category school, not an error.
+// See master-plan §7.27.5 — every field school-configured, none hardcoded,
+// per Problem 8.7's own "10 variations" research finding on this exact
+// policy family.
+
+export interface AcademicStandingRules {
+  id: string
+  probation_cgpa_threshold: number | null
+  withdrawal_cgpa_threshold: number | null
+  max_carryover_courses_before_review: number | null
+  max_registration_multiplier: number | null
+}
+
+export async function loadAcademicStandingRules(schoolId: string): Promise<{ data: AcademicStandingRules | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('academic_standing_rules')
+    .select('id, probation_cgpa_threshold, withdrawal_cgpa_threshold, max_carryover_courses_before_review, max_registration_multiplier')
+    .eq('school_id', schoolId)
+    .maybeSingle()
+
+  if (error) return { data: null, error: error.message }
+  return { data: data as AcademicStandingRules | null, error: null }
+}
+
+export async function upsertAcademicStandingRules(
+  schoolId: string,
+  rules: {
+    probation_cgpa_threshold: number | null
+    withdrawal_cgpa_threshold: number | null
+    max_carryover_courses_before_review: number | null
+    max_registration_multiplier: number | null
+  },
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('academic_standing_rules')
+    .upsert(
+      {
+        school_id: schoolId,
+        probation_cgpa_threshold: rules.probation_cgpa_threshold,
+        withdrawal_cgpa_threshold: rules.withdrawal_cgpa_threshold,
+        max_carryover_courses_before_review: rules.max_carryover_courses_before_review,
+        max_registration_multiplier: rules.max_registration_multiplier,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'school_id' },
+    )
+  return { error: error?.message ?? null }
+}
+
+// ─── SESSION 62 — Session-end evaluation flow + admin review queue ─────────
+// (PRD Tier 8 / Problem 8.7, §7.27.5). Reads academic_standing_rules
+// (above) and student_gpa_snapshots/course_registrations/
+// student_programme_placements/programmes, and writes review-pending rows
+// into academic_standing_events. Never flips a student's standing
+// directly, never writes anything but a pending event — the actual
+// standing change is a human decision recorded via reviewStandingEvent()
+// below, per this table's own explicit "never silent, always
+// human-reviewed" design (§7.27.5).
+//
+// Formula, grounded directly in real schema + real NUC-cited research
+// (not assumed) — see PRD SESSION 62's card / PRD Log for the full
+// research trail:
+//   - probation: latest running CGPA (student_gpa_snapshots, term_id is
+//     null row) < probation_cgpa_threshold.
+//   - spillover: distinct count(session_id) across ALL of a student's
+//     student_programme_placements rows (their full placement history,
+//     not just the current row — a student placed in sessions A..F has
+//     genuinely been enrolled across every one of them) exceeds
+//     programmes.duration_sessions × max_registration_multiplier. This
+//     mirrors the real, named NUC "maximum residency" rule (1.5x normal
+//     programme duration) — school-configured via max_registration_multiplier,
+//     never hardcoded to 1.5.
+//   - max_carryover_courses_before_review does NOT generate its own
+//     standing event or its own `standing` value — research found no
+//     institution treating "too many carryovers" as a clean, independent
+//     trigger decoupled from CGPA; every source describes it as
+//     contributing pressure toward a CGPA-driven probation, or as an
+//     administrative monitoring signal, not a standalone category. It is
+//     folded into whichever event (probation or spillover) already fires
+//     for that student, added as review context in that event's `note`
+//     — never a trigger on its own, and generates nothing if a student
+//     is over this threshold while CGPA and residency are both fine
+//     (a real, deliberate, documented gap — see PRD SESSION 62's card).
+
+export interface StandingEvaluationResult {
+  studentsEvaluated: number
+  eventsCreated: number
+  /** Students who already had an unreviewed pending event for this
+   *  session-standing pair — skipped, not duplicated. See the
+   *  idempotency note on runStandingEvaluation() below. */
+  skippedAlreadyPending: number
+}
+
+export interface StandingEvent {
+  id: string
+  student_id: string
+  student_name: string
+  matric_number: string | null
+  session_id: string
+  session_name: string
+  standing: 'good_standing' | 'probation' | 'spillover' | 'withdrawal_recommended'
+  cgpa_at_evaluation: number | null
+  triggered_by: string | null
+  note: string | null
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string
+}
+
+/**
+ * Runs the session-end evaluation for every active student in the
+ * school's current session, comparing their latest CGPA and residency
+ * duration against academic_standing_rules, and inserting a
+ * review-pending academic_standing_events row for anyone who trips a
+ * threshold. Never touches a student's standing directly — every row
+ * this writes has reviewed_by/reviewed_at left null, per §7.27.5's
+ * design; a human confirms via reviewStandingEvent() below.
+ *
+ * Idempotent per (student, session, standing): if a student already has
+ * an UNREVIEWED event for the same session and standing, this does not
+ * insert a duplicate — re-running the sweep after a partial review pass
+ * doesn't flood the queue with repeats for cases already pending. A
+ * student who was already reviewed and is evaluated again in a LATER
+ * sweep (e.g. a subsequent session) can get a fresh event even for the
+ * same standing value, since that's a new evaluation, not a duplicate
+ * of an already-closed one.
+ *
+ * A student who trips neither threshold gets no event at all — 'good_standing'
+ * is a real value in the check constraint but this function deliberately
+ * never writes it: a non-event (nothing pending) already means "nothing
+ * to review," and manufacturing a 'good_standing' row for every
+ * unflagged student every sweep would make the events table an
+ * every-student-every-sweep audit log rather than a review queue,
+ * working against its own purpose.
+ */
+export async function runStandingEvaluation(schoolId: string): Promise<{ data: StandingEvaluationResult | null; error: string | null }> {
+  const rulesRes = await loadAcademicStandingRules(schoolId)
+  if (rulesRes.error) return { data: null, error: rulesRes.error }
+  const rules = rulesRes.data
+  if (!rules || (rules.probation_cgpa_threshold === null && rules.max_registration_multiplier === null)) {
+    return { data: null, error: 'No academic standing thresholds are configured for this school yet. Set at least one threshold in Academic Standing settings before running an evaluation.' }
+  }
+
+  const sessionRes = await supabase
+    .from('sessions')
+    .select('id, name')
+    .eq('school_id', schoolId)
+    .eq('is_current', true)
+    .maybeSingle()
+  if (sessionRes.error) return { data: null, error: sessionRes.error.message }
+  if (!sessionRes.data) return { data: null, error: 'No current session is set for this school — set one in Sessions settings first.' }
+  const currentSessionId = sessionRes.data.id as string
+
+  // Every active student currently placed into a programme (join through
+  // student_programme_placements' is_current row, same resolution path
+  // courseRegistrationService.ts's loadCurriculum() already uses — not a
+  // re-derivation, the confirmed-correct join per SESSION 57's own
+  // fan-out lesson).
+  const placementsRes = await supabase
+    .from('student_programme_placements')
+    .select('student_id, programme_level_id, students!inner(id, full_name, matric_number, status, school_id)')
+    .eq('is_current', true)
+    .eq('students.school_id', schoolId)
+    .eq('students.status', 'active')
+  if (placementsRes.error) return { data: null, error: placementsRes.error.message }
+
+  const currentPlacements = (placementsRes.data ?? []) as any[]
+  if (currentPlacements.length === 0) {
+    return { data: { studentsEvaluated: 0, eventsCreated: 0, skippedAlreadyPending: 0 }, error: null }
+  }
+
+  // Resolve each current placement's programme (for duration_sessions) —
+  // one batched query, not N+1: programme_levels -> programmes.
+  const levelIds = Array.from(new Set(currentPlacements.map((p) => p.programme_level_id)))
+  const levelsRes = await supabase
+    .from('programme_levels')
+    .select('id, programme_id, programmes(id, duration_sessions)')
+    .in('id', levelIds)
+  if (levelsRes.error) return { data: null, error: levelsRes.error.message }
+  const durationByLevelId = new Map<string, number | null>()
+  for (const l of (levelsRes.data ?? []) as any[]) {
+    const programme = Array.isArray(l.programmes) ? l.programmes[0] : l.programmes
+    durationByLevelId.set(l.id, programme?.duration_sessions ?? null)
+  }
+
+  // Full placement history (every row, not just is_current) for every
+  // student being evaluated, to count distinct sessions actually
+  // enrolled across — the real residency-duration signal, not just
+  // "how many sessions since their current placement."
+  const studentIds = currentPlacements.map((p) => p.student_id as string)
+  const historyRes = await supabase
+    .from('student_programme_placements')
+    .select('student_id, session_id')
+    .in('student_id', studentIds)
+  if (historyRes.error) return { data: null, error: historyRes.error.message }
+  const sessionsByStudent = new Map<string, Set<string>>()
+  for (const row of (historyRes.data ?? []) as any[]) {
+    const set = sessionsByStudent.get(row.student_id) ?? new Set<string>()
+    set.add(row.session_id)
+    sessionsByStudent.set(row.student_id, set)
+  }
+
+  // Latest running CGPA per student — the null-term_id row per student
+  // in student_gpa_snapshots, exactly saveGpaSnapshots()'s own written
+  // convention (courseResultsService.ts) — one row per student since
+  // that function deletes-then-inserts on every recompute, so there is
+  // never more than one to disambiguate.
+  const cgpaRes = await supabase
+    .from('student_gpa_snapshots')
+    .select('student_id, cgpa, term_id')
+    .in('student_id', studentIds)
+    .is('term_id', null)
+  if (cgpaRes.error) return { data: null, error: cgpaRes.error.message }
+  const cgpaByStudent = new Map<string, number | null>()
+  for (const row of (cgpaRes.data ?? []) as any[]) {
+    cgpaByStudent.set(row.student_id, row.cgpa === null ? null : Number(row.cgpa))
+  }
+
+  // Outstanding carryover count per student — course_registrations.status
+  // = 'carryover', the real, self-maintaining signal per SESSION 62pre
+  // (auto-flagged on finalize, no longer SQL-Editor-seeded). Used only as
+  // context text on whichever event fires, per this function's header
+  // comment — never its own trigger.
+  const carryoverRes = await supabase
+    .from('course_registrations')
+    .select('student_id, status')
+    .in('student_id', studentIds)
+    .eq('status', 'carryover')
+  if (carryoverRes.error) return { data: null, error: carryoverRes.error.message }
+  const carryoverCountByStudent = new Map<string, number>()
+  for (const row of (carryoverRes.data ?? []) as any[]) {
+    carryoverCountByStudent.set(row.student_id, (carryoverCountByStudent.get(row.student_id) ?? 0) + 1)
+  }
+
+  // Already-pending (unreviewed) events for this session, to avoid
+  // duplicate inserts on a re-run — see this function's own idempotency
+  // doc above.
+  const pendingRes = await supabase
+    .from('academic_standing_events')
+    .select('student_id, standing')
+    .eq('session_id', currentSessionId)
+    .is('reviewed_at', null)
+  if (pendingRes.error) return { data: null, error: pendingRes.error.message }
+  const pendingKey = (studentId: string, standing: string) => `${studentId}::${standing}`
+  const alreadyPending = new Set((pendingRes.data ?? []).map((r: any) => pendingKey(r.student_id, r.standing)))
+
+  const rowsToInsert: any[] = []
+  let skipped = 0
+
+  for (const placement of currentPlacements) {
+    const studentId = placement.student_id as string
+    const carryoverCount = carryoverCountByStudent.get(studentId) ?? 0
+    const carryoverNote = rules.max_carryover_courses_before_review !== null && carryoverCount > rules.max_carryover_courses_before_review
+      ? ` Also carrying ${carryoverCount} outstanding carryover course(s), above the configured review threshold of ${rules.max_carryover_courses_before_review}.`
+      : ''
+
+    // Probation check
+    if (rules.probation_cgpa_threshold !== null) {
+      const cgpa = cgpaByStudent.get(studentId) ?? null
+      if (cgpa !== null && cgpa < rules.probation_cgpa_threshold) {
+        const key = pendingKey(studentId, 'probation')
+        if (alreadyPending.has(key)) {
+          skipped++
+        } else {
+          rowsToInsert.push({
+            student_id: studentId,
+            session_id: currentSessionId,
+            standing: 'probation',
+            cgpa_at_evaluation: cgpa,
+            triggered_by: 'probation_cgpa_threshold',
+            note: `CGPA ${cgpa.toFixed(2)} is below the configured probation threshold of ${rules.probation_cgpa_threshold}.${carryoverNote}`,
+          })
+          alreadyPending.add(key) // guard against a second trip in this same run
+        }
+      }
+    }
+
+    // Spillover check
+    if (rules.max_registration_multiplier !== null) {
+      const durationSessions = durationByLevelId.get(placement.programme_level_id) ?? null
+      const sessionsEnrolled = sessionsByStudent.get(studentId)?.size ?? 0
+      if (durationSessions !== null && durationSessions > 0) {
+        const threshold = durationSessions * rules.max_registration_multiplier
+        if (sessionsEnrolled > threshold) {
+          const key = pendingKey(studentId, 'spillover')
+          if (alreadyPending.has(key)) {
+            skipped++
+          } else {
+            const cgpa = cgpaByStudent.get(studentId) ?? null
+            rowsToInsert.push({
+              student_id: studentId,
+              session_id: currentSessionId,
+              standing: 'spillover',
+              cgpa_at_evaluation: cgpa,
+              triggered_by: 'max_registration_multiplier',
+              note: `Enrolled across ${sessionsEnrolled} sessions, exceeding this programme's ${durationSessions}-session duration × ${rules.max_registration_multiplier} residency multiplier (threshold: ${threshold.toFixed(1)} sessions).${carryoverNote}`,
+            })
+            alreadyPending.add(key)
+          }
+        }
+      }
+    }
+  }
+
+  if (rowsToInsert.length > 0) {
+    const insRes = await supabase.from('academic_standing_events').insert(rowsToInsert)
+    if (insRes.error) return { data: null, error: insRes.error.message }
+  }
+
+  return {
+    data: {
+      studentsEvaluated: currentPlacements.length,
+      eventsCreated: rowsToInsert.length,
+      skippedAlreadyPending: skipped,
+    },
+    error: null,
+  }
+}
+
+/** All unreviewed (reviewed_at is null) academic_standing_events for the
+ *  school, newest first — the admin review queue's own read. Joins
+ *  through students for name/matric_number/school scoping, since
+ *  academic_standing_events carries no school_id column of its own
+ *  (§7.27.5's own RLS note — join-through-students is the real scope,
+ *  matched here explicitly rather than assumed). */
+export async function loadPendingStandingEvents(schoolId: string): Promise<{ data: StandingEvent[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('academic_standing_events')
+    .select('id, student_id, session_id, standing, cgpa_at_evaluation, triggered_by, note, reviewed_by, reviewed_at, created_at, students!inner(full_name, matric_number, school_id), sessions(name)')
+    .eq('students.school_id', schoolId)
+    .is('reviewed_at', null)
+    .order('created_at', { ascending: false })
+
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((row: any) => {
+      const student = Array.isArray(row.students) ? row.students[0] : row.students
+      const session = Array.isArray(row.sessions) ? row.sessions[0] : row.sessions
+      return {
+        id: row.id,
+        student_id: row.student_id,
+        student_name: student?.full_name ?? '',
+        matric_number: student?.matric_number ?? null,
+        session_id: row.session_id,
+        session_name: session?.name ?? 'Session',
+        standing: row.standing,
+        cgpa_at_evaluation: row.cgpa_at_evaluation === null ? null : Number(row.cgpa_at_evaluation),
+        triggered_by: row.triggered_by,
+        note: row.note,
+        reviewed_by: row.reviewed_by,
+        reviewed_at: row.reviewed_at,
+        created_at: row.created_at,
+      }
+    }),
+    error: null,
+  }
+}
+
+/**
+ * Confirms (or overrides, via an appended note) one pending standing
+ * event — the one and only place reviewed_by/reviewed_at ever get set,
+ * per §7.27.5's "never silent, always human-reviewed" design.
+ * reviewerStaffId must be the real confirming admin's staff id
+ * (actorRecordId from authStore, threaded down from App.tsx — see
+ * StandingTab's own call site) — never fabricated or left null, since
+ * this is the audit trail's whole point.
+ *
+ * overrideStanding, if provided, lets the admin record a different
+ * final standing than what the evaluation proposed (e.g. downgrading a
+ * proposed 'spillover' to 'good_standing' after confirming a Senate
+ * extension was granted) — the ORIGINAL event row is updated in place
+ * (standing overwritten, not a second row inserted), since this is one
+ * event's final disposition, not a new event; the evaluation's original
+ * proposal is preserved in the note text (appended, not overwritten) so
+ * the audit trail still shows what was proposed vs. what was decided.
+ */
+export async function reviewStandingEvent(
+  eventId: string,
+  reviewerStaffId: string,
+  options?: { overrideStanding?: StandingEvent['standing']; additionalNote?: string },
+): Promise<{ error: string | null }> {
+  const updates: any = {
+    reviewed_by: reviewerStaffId,
+    reviewed_at: new Date().toISOString(),
+  }
+  if (options?.overrideStanding || options?.additionalNote) {
+    const existingRes = await supabase.from('academic_standing_events').select('standing, note').eq('id', eventId).maybeSingle()
+    if (existingRes.error) return { error: existingRes.error.message }
+    const original = existingRes.data as { standing: string; note: string | null } | null
+    let newNote = original?.note ?? ''
+    if (options.overrideStanding && options.overrideStanding !== original?.standing) {
+      newNote += ` [Reviewed: standing changed from '${original?.standing}' to '${options.overrideStanding}'.]`
+      updates.standing = options.overrideStanding
+    }
+    if (options.additionalNote) {
+      newNote += ` [Admin note: ${options.additionalNote}]`
+    }
+    updates.note = newNote
+  }
+
+  const { error } = await supabase.from('academic_standing_events').update(updates).eq('id', eventId)
+  return { error: error?.message ?? null }
+}
+
+
 // before SESSION 60, closing the gap SESSION 58's close-out surfaced: "no
 // course_offerings creation UI exists anywhere ... every test in this
 // session used a direct SQL insert.") ─────────────────────────────────────

@@ -72,6 +72,7 @@ import {
   uploadStudentPhoto,
   getStudentPhotoSignedUrl,
   getStudentStatusCounts,
+  getHigherEdStudentStatusCounts,
   type StudentStatusCounts,
 } from '../services/studentsService'
 import {
@@ -85,12 +86,28 @@ import {
 // pattern as printTimetable.ts (see that file's own header comment for why
 // document.write() on a blank window.open('') is unsafe on Android Chrome).
 import { printStudentIdCards, type IdCardStudent } from '../services/printStudentIdCards'
+// SESSION 60e — admin transcript view (owner request, closing the gap
+// GuardianPortal.tsx's own TranscriptTab left: admin had no equivalent).
+// Reuses SESSION 60b/60d's already-built read/PDF services as-is — no new
+// service code, this file only adds a rendering layer around them.
+import { loadStudentTranscript, type StudentTranscript } from '../services/courseResultsService'
+import { downloadTranscriptPdf } from '../services/transcriptPdf'
+import { loadStudentCurrentPlacement, loadProgrammes, loadProgrammeLevels, type StudentCurrentPlacement, type Programme, type ProgrammeLevel } from '../services/settingsService'
+import { loadCurrentSession } from '../services/attendanceService'
+import { loadStudentOverallAttendance, type StudentOverallAttendance } from '../services/courseAttendanceService'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface StudentsModuleProps {
   schoolId: string
   isAdmin: boolean
+  /** SESSION 60e — needed to gate the Transcript tab to higher-ed schools
+   *  only, same isHigherEd check App.tsx's other higher-ed-aware call
+   *  sites (GuardianPortal.tsx, CourseResultsModule.tsx's own dispatcher)
+   *  already duplicate locally rather than share a hook. App.tsx passes
+   *  schoolType={schoolType} into this module's call site, mirroring the
+   *  four GuardianPortal call sites from SESSION 60b exactly. */
+  schoolType?: string | null
   /** PRD Tier 6 / Problem 6.10 — needed for the ID card print header, same
    *  reasoning and same threading pattern as TimetableModule.tsx's own
    *  schoolName prop (added there for its print page header). App.tsx
@@ -189,11 +206,17 @@ const EMPTY_GUARDIAN_FORM: GuardianFormState = {
 // would see and tap into for no reason). editSheetOpen (below) controls its
 // visibility instead of DetailTab; the type keeps 'info' only as an internal
 // label for which body renderDetailBody() should show, not a tab-bar entry.
-type DetailTab = 'brief' | 'info' | 'guardians' | 'status'
+type DetailTab = 'brief' | 'info' | 'guardians' | 'status' | 'transcript'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, intent, onNavigate }: StudentsModuleProps) {
+export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, schoolType, intent, onNavigate }: StudentsModuleProps) {
+  // SESSION 60e — same check App.tsx's TabContent already duplicates
+  // locally for its four higher-ed-aware call sites; copied verbatim
+  // rather than imported, matching that existing (if imperfect) local-
+  // duplication convention instead of introducing a shared hook this
+  // session.
+  const isHigherEd = !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
 
   // ── Auth: permission gates (PRD Tier 3 / Session 10, 2026-07-01) ────────────
   // Read directly via useAuthStore, same pattern as AttendanceModule.tsx's
@@ -255,6 +278,17 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
   const [parentGroups,    setParentGroups]    = useState<ParentClassGroup[]>([])
   const [selectedParentId, setSelectedParentId] = useState<string | null>(null)
   const [searchQuery,  setSearchQuery]  = useState('')
+  // SESSION 64 (owner-reported gap) — higher-ed equivalent of the
+  // class-picker state above. filterProgrammeId narrows tier 1 (which
+  // programme), filterLevelId narrows tier 2 (which level within it) —
+  // same two-tier shape as parentGroups/filterClass, but a higher-ed
+  // student has no class_node_id at all, so this is a genuinely separate
+  // filter axis, not a re-use of the class-picker's own state.
+  const [programmes,        setProgrammes]        = useState<Programme[]>([])
+  const [filterProgrammeId, setFilterProgrammeId] = useState<string>('')
+  const [programmeLevels,   setProgrammeLevels]   = useState<ProgrammeLevel[]>([])
+  const [filterLevelId,     setFilterLevelId]     = useState<string>('')
+  const [levelsLoading,     setLevelsLoading]     = useState(false)
   // Collapse-on-select (matches AttendanceModule's own follow-up) — once a
   // class or group is picked, fold the picker down to one compact summary
   // row instead of showing both pill tiers permanently. Defaults to
@@ -343,6 +377,32 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
   const [briefState,        setBriefState]        = useState<LoadState>('booting')
   const [_briefError,        setBriefError]        = useState('')
   const [moreDetailsOpen,   setMoreDetailsOpen]   = useState(false)
+  // SESSION 64 (PRD Problem 8.7a) — a higher-ed student's current
+  // programme/level, sourced from settingsService.ts's loadStudentCurrentPlacement().
+  // undefined = not yet loaded, null = loaded but no current placement (not
+  // yet admitted, or between placements) — same three-state convention as
+  // attendanceSummary above. Only ever populated when isHigherEd; left
+  // permanently undefined for secondary schools, matching this file's
+  // existing isHigherEd-gated-fetch pattern (fetchAssignableRoles, etc).
+  const [currentPlacement, setCurrentPlacement] = useState<StudentCurrentPlacement | null | undefined>(undefined)
+  const [placementState,   setPlacementState]   = useState<LoadState>('booting')
+
+  // SESSION 64 (owner-reported gap, researched) — the Brief tab's
+  // "Performance" stat was a hardcoded "Not yet available" stub for every
+  // student. For a higher-ed student, real CGPA already exists and is
+  // already computed live elsewhere in this exact file (see
+  // StudentTranscriptTab below, built SESSION 60b) via
+  // loadStudentTranscript(studentId, true) — reusing that proven call here
+  // rather than inventing a new read. Only ever populated when isHigherEd,
+  // same convention as currentPlacement above.
+  const [cgpaValue, setCgpaValue] = useState<number | null | undefined>(undefined)
+  const [cgpaState, setCgpaState] = useState<LoadState>('booting')
+
+  // SESSION 64 follow-up — real cross-course attendance rollup, now that
+  // courseAttendanceService.ts is available. Only ever populated when
+  // isHigherEd, same convention as currentPlacement/cgpaValue above.
+  const [overallAttendance, setOverallAttendance] = useState<StudentOverallAttendance | null | undefined>(undefined)
+  const [overallAttendanceState, setOverallAttendanceState] = useState<LoadState>('booting')
 
   // ── Guardians (detail panel) ──────────────────────────────────────────────
   const [guardians,        setGuardians]        = useState<GuardianLink[]>([])
@@ -559,12 +619,34 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
   const [transferSaving,   setTransferSaving]   = useState(false)
   const [transferError,    setTransferError]    = useState('')
 
-  // ─── Boot: load classes ───────────────────────────────────────────────────
+  // ─── Boot: load classes (secondary) or programmes (higher-ed) ─────────────
 
   useEffect(() => {
     let cancelled = false
     async function boot() {
       setBootState('loading')
+
+      // SESSION 64 (owner-reported gap) — a higher-ed school has no
+      // class_nodes at all; loadLeafClasses()/loadParentClassGroups()
+      // were previously called unconditionally here regardless of school
+      // type, which is exactly why "All classes"/"No class assigned"/
+      // "Search in All classes" kept showing for a higher-ed school (an
+      // empty class list still renders that UI shell, it just happens to
+      // have zero pills under it). Branch at the root instead of patching
+      // each downstream string.
+      if (isHigherEd) {
+        const res = await loadProgrammes(schoolId)
+        if (cancelled) return
+        if (res.error) {
+          setBootError(res.error)
+          setBootState('error')
+          return
+        }
+        setProgrammes(res.data)
+        setBootState('ready')
+        return
+      }
+
       const res = await loadLeafClasses()
       if (cancelled) return
       if (!res.ok) {
@@ -585,7 +667,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
     }
     boot()
     return () => { cancelled = true }
-  }, [])
+  }, [isHigherEd, schoolId])
 
   // ─── Derived effective selection ────────────────────────────────────────
   // Session 32 — single place that resolves filterClass vs selectedGroup
@@ -616,6 +698,47 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
       ? (classPathMap.get(filterClass) ?? 'this class')
       : 'All classes'
 
+  // SESSION 64 (owner-reported gap) — higher-ed equivalent of the block
+  // above. filterLevelId set = one specific level; filterProgrammeId set
+  // but no level yet = every level under that programme; neither set =
+  // every currently-admitted student, school-wide.
+  const effectiveProgrammeLevelIds: string[] = filterLevelId
+    ? [filterLevelId]
+    : filterProgrammeId
+      ? programmeLevels.map(l => l.id)
+      : []
+  const effectiveHigherEdSelectionKey: string = filterLevelId
+    ? `level:${filterLevelId}`
+    : filterProgrammeId
+      ? `programme:${filterProgrammeId}`
+      : 'all-programmes'
+  const selectedProgramme = programmes.find(p => p.id === filterProgrammeId) ?? null
+  const selectedLevel = programmeLevels.find(l => l.id === filterLevelId) ?? null
+  const effectiveHigherEdLabel: string = selectedLevel
+    ? `${selectedProgramme?.name ?? 'Programme'} — ${selectedLevel.level_label}`
+    : selectedProgramme
+      ? `${selectedProgramme.name} (all levels)`
+      : 'All programmes'
+
+  // SESSION 64 (owner-reported gap) — loads tier 2 (levels) whenever tier 1
+  // (programme) changes. Mirrors the boot effect's cancelled-flag pattern.
+  useEffect(() => {
+    if (!isHigherEd || !filterProgrammeId) {
+      setProgrammeLevels([])
+      return
+    }
+    let cancelled = false
+    async function run() {
+      setLevelsLoading(true)
+      const res = await loadProgrammeLevels(filterProgrammeId)
+      if (cancelled) return
+      setLevelsLoading(false)
+      if (!res.error) setProgrammeLevels(res.data)
+    }
+    run()
+    return () => { cancelled = true }
+  }, [isHigherEd, filterProgrammeId])
+
   // ─── Load students whenever class filter changes ───────────────────────────
 
   const loadList = useCallback(async () => {
@@ -623,6 +746,8 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
     const res = await loadStudents({
       classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
       statusFilter,
+      isHigherEd,
+      programmeLevelIds: effectiveProgrammeLevelIds,
     })
     if (!res.ok) {
       setListError(res.error)
@@ -652,7 +777,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
     enriched
       .filter(s => s.photo_url)
       .forEach(s => { resolvePhoto(s.photo_url) })
-  }, [effectiveSelectionKey, statusFilter, classPathMap])
+  }, [effectiveSelectionKey, effectiveHigherEdSelectionKey, statusFilter, classPathMap])
 
   useEffect(() => {
     if (bootState === 'ready') loadList()
@@ -664,11 +789,19 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
   // scoped to just one of them. Only class filter should reset these counts.
 
   const loadStatusCounts = useCallback(async () => {
-    const res = await getStudentStatusCounts({
-      classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
-    })
+    // SESSION 64 — class_node_id-based counts don't apply to a higher-ed
+    // student at all (no class membership exists for that school type), so
+    // this branches to the dedicated placement-derived function rather than
+    // trying to force isHigherEd through the class-scoped one. See both
+    // functions' own doc comments in studentsService.ts for the full
+    // reasoning.
+    const res = isHigherEd
+      ? await getHigherEdStudentStatusCounts(schoolId)
+      : await getStudentStatusCounts({
+          classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
+        })
     if (res.ok) setStatusCounts(res.data)
-  }, [effectiveSelectionKey])
+  }, [effectiveSelectionKey, isHigherEd, schoolId])
 
   useEffect(() => {
     if (bootState === 'ready') loadStatusCounts()
@@ -728,6 +861,12 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
     setAttendanceSummary(undefined)
     setBriefState('booting')
     setBriefError('')
+    setCurrentPlacement(undefined)
+    setPlacementState('booting')
+    setCgpaValue(undefined)
+    setCgpaState('booting')
+    setOverallAttendance(undefined)
+    setOverallAttendanceState('booting')
     setMoreDetailsOpen(false)
     setStudentIdentity(undefined)
     setStudentProvisioning(false)
@@ -804,6 +943,55 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
   // ─── Brief: fetch ──────────────────────────────────────────────────────────
 
   async function fetchBrief(studentId: string) {
+    if (isHigherEd) {
+      // Daily attendance_records has no meaning for a higher-ed student —
+      // per-course attendance lives in course_attendance_records instead
+      // (SESSION 58). briefState is left 'ready' immediately (this stat
+      // has its own independent overallAttendanceState below) so the tab
+      // isn't stuck on a skeleton waiting on a value it doesn't use.
+      setBriefState('ready')
+
+      setPlacementState('loading')
+      const placementRes = await loadStudentCurrentPlacement(studentId)
+      if (placementRes.error) {
+        setPlacementState('error')
+      } else {
+        setCurrentPlacement(placementRes.data)
+        setPlacementState('ready')
+      }
+
+      setCgpaState('loading')
+      try {
+        const { data, error } = await loadStudentTranscript(studentId, true)
+        if (error || !data) {
+          setCgpaState('error')
+        } else {
+          setCgpaValue(data.cgpa)
+          setCgpaState('ready')
+        }
+      } catch {
+        setCgpaState('error')
+      }
+
+      setOverallAttendanceState('loading')
+      const sessionRes = await loadCurrentSession()
+      if (!sessionRes.ok || !sessionRes.sessionId) {
+        setOverallAttendanceState('error')
+      } else {
+        const attRes = await loadStudentOverallAttendance({
+          studentId,
+          sessionId: sessionRes.sessionId,
+        })
+        if (!attRes.ok) {
+          setOverallAttendanceState('error')
+        } else {
+          setOverallAttendance(attRes.data)
+          setOverallAttendanceState('ready')
+        }
+      }
+      return
+    }
+
     setBriefState('loading')
     const res = await loadAttendanceSummary(studentId)
     if (!res.ok) {
@@ -1212,6 +1400,39 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
     setPickerExpanded(false)
   }
 
+  // SESSION 64 (owner-reported gap) — higher-ed equivalent of the three
+  // handlers above. selectAllProgrammes clears both tiers (all students
+  // across every programme); selectProgramme narrows tier 1 only (loads
+  // that programme's levels, tier 2); selectLevel narrows tier 2 to one
+  // specific level. Same reset-search/collapse-picker contract as the
+  // secondary handlers, for the same reason (a filter change invalidates
+  // whatever was being searched for; a real choice collapses the picker).
+  function selectAllProgrammes() {
+    setFilterProgrammeId('')
+    setProgrammeLevels([])
+    setFilterLevelId('')
+    setSearchQuery('')
+    setHasChosen(true)
+    setPickerExpanded(false)
+  }
+  function selectProgramme(p: Programme) {
+    setFilterProgrammeId(p.id)
+    setFilterLevelId('')
+    setSearchQuery('')
+    setHasChosen(true)
+    // Deliberately does NOT collapse the picker — selecting a programme is
+    // tier 1 of a two-tier choice; the level pill row (tier 2) still needs
+    // to be visible for the admin to actually finish narrowing. Matches
+    // the secondary picker's own selectedParentId (tier-1-only) pattern,
+    // which likewise doesn't collapse on its own.
+  }
+  function selectLevel(l: ProgrammeLevel) {
+    setFilterLevelId(l.id)
+    setSearchQuery('')
+    setHasChosen(true)
+    setPickerExpanded(false)
+  }
+
   // ─── ID card print (PRD Tier 6 / Problem 6.10) ────────────────────────────
   //
   // PRD §4.10 explicitly scopes this "admin-only" — reusing canManageStudents
@@ -1268,6 +1489,10 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
       ? classes.filter(c => c.parent_id === selectedParentId)
       : classes
     const activeParent = parentGroups.find(g => g.id === selectedParentId) ?? null
+    // SESSION 64 (owner-reported gap) — every downstream read in this
+    // function branches on isHigherEd from here, rather than each site
+    // re-deriving its own condition.
+    const resolvedLabel = isHigherEd ? effectiveHigherEdLabel : effectiveLabel
 
     return (
       <div className="stu-header">
@@ -1292,11 +1517,70 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
                 className="stu-selector-summary"
                 onClick={() => setPickerExpanded(true)}
               >
-                <span className="stu-selector-summary-label">{effectiveLabel}</span>
+                <span className="stu-selector-summary-label">{resolvedLabel}</span>
                 <span className="stu-selector-summary-change">
                   Change <Icon name="chevron-down" size={14} />
                 </span>
               </button>
+            ) : isHigherEd ? (
+              <>
+                {/* SESSION 64 (owner-reported gap) — programme/level
+                    picker, replacing the class picker entirely for
+                    higher-ed schools. Same two-tier pill shape as the
+                    secondary picker below (tier 1 = programme, tier 2 =
+                    level), sourced from programmes/programmeLevels
+                    instead of classes/parentGroups — a higher-ed student
+                    has no class_node_id to filter by at all. */}
+                {programmes.length > 0 && (
+                  <div className="stu-pill-row" role="tablist" aria-label="Filter by programme">
+                    <button
+                      type="button"
+                      className={`stu-pill${filterProgrammeId === '' ? ' stu-pill--active' : ''}`}
+                      onClick={selectAllProgrammes}
+                    >
+                      All
+                    </button>
+                    {programmes.map(p => (
+                      <button
+                        type="button"
+                        key={p.id}
+                        className={`stu-pill${filterProgrammeId === p.id ? ' stu-pill--active' : ''}`}
+                        onClick={() => selectProgramme(p)}
+                      >
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {filterProgrammeId && (
+                  <div className="stu-class-pills" role="group" aria-label="Filter by level">
+                    <button
+                      type="button"
+                      className={`stu-class-pill${filterLevelId === '' ? ' stu-class-pill--active' : ''}`}
+                      onClick={() => setFilterLevelId('')}
+                      aria-pressed={filterLevelId === ''}
+                    >
+                      All levels
+                    </button>
+                    {levelsLoading ? (
+                      <span className="stu-brief-stat-skel skeleton" />
+                    ) : (
+                      programmeLevels.map(l => (
+                        <button
+                          type="button"
+                          key={l.id}
+                          className={`stu-class-pill${filterLevelId === l.id ? ' stu-class-pill--active' : ''}`}
+                          onClick={() => selectLevel(l)}
+                          aria-pressed={filterLevelId === l.id}
+                        >
+                          {l.level_label}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 {/* SESSION 12 step 4 (extended Session 32) — dropdown
@@ -1366,7 +1650,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
             <input
               type="search"
               className="stu-search"
-              placeholder={`Search in ${effectiveLabel}…`}
+              placeholder={`Search in ${resolvedLabel}…`}
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
@@ -1413,7 +1697,9 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
         <div className="stu-empty-state">
           <span className="stu-empty-icon"><Icon name="users" /></span>
           <p className="stu-empty-msg">
-            {(filterClass || selectedGroup) ? 'No students enrolled in this class yet.' : 'No students added yet.'}
+            {isHigherEd
+              ? ((filterProgrammeId || filterLevelId) ? 'No students placed in this programme/level yet.' : 'No students added yet.')
+              : ((filterClass || selectedGroup) ? 'No students enrolled in this class yet.' : 'No students added yet.')}
           </p>
           {canManageStudents && (
             <button className="stu-empty-action" onClick={openAddForm}>
@@ -1459,7 +1745,9 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
               <div className="stu-row-body">
                 <span className="stu-row-name">{student.full_name}</span>
                 <span className="stu-row-meta">
-                  {student.class_path_label ?? 'No class assigned'}
+                  {isHigherEd
+                    ? (student.matric_number ?? 'No matric number yet')
+                    : (student.class_path_label ?? 'No class assigned')}
                   {student.gender ? ` · ${student.gender}` : ''}
                   {student.student_code ? ` · ${student.student_code}` : ''}
                 </span>
@@ -1684,7 +1972,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
               content (renderInfoTab) is now reached via the "Edit" button
               inside the Brief tab instead, gated on students.records.edit. */}
           <div className="stu-detail-tabs" role="tablist">
-            {(['brief', 'guardians', 'status'] as DetailTab[]).map(tab => (
+            {(['brief', 'guardians', 'status', ...(isHigherEd ? (['transcript'] as DetailTab[]) : [])] as DetailTab[]).map(tab => (
               <button
                 key={tab}
                 className={`stu-detail-tab${detailTab === tab ? ' stu-detail-tab--active' : ''}`}
@@ -1692,7 +1980,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
                 aria-selected={detailTab === tab}
                 onClick={() => switchDetailTab(tab)}
               >
-                {tab === 'brief' ? 'Brief' : tab === 'guardians' ? 'Guardians' : 'Status'}
+                {tab === 'brief' ? 'Brief' : tab === 'guardians' ? 'Guardians' : tab === 'status' ? 'Status' : 'Transcript'}
               </button>
             ))}
           </div>
@@ -1705,6 +1993,9 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
             {detailTab === 'info' && renderInfoTab()}
             {detailTab === 'guardians' && renderGuardiansTab()}
             {detailTab === 'status' && renderStatusTab()}
+            {detailTab === 'transcript' && isHigherEd && (
+              <StudentTranscriptTab schoolName={schoolName} studentId={detailStudent.id} />
+            )}
           </div>
         </div>
 
@@ -1787,7 +2078,25 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
           <div className="stu-brief-stat-row">
             <div className="stu-brief-stat">
               <span className="stu-brief-stat-label">Attendance</span>
-              {briefState === 'loading' || briefState === 'booting' ? (
+              {isHigherEd ? (
+                overallAttendanceState === 'loading' || overallAttendanceState === 'booting' ? (
+                  <span className="stu-brief-stat-skel skeleton" />
+                ) : overallAttendanceState === 'error' ? (
+                  <span className="stu-brief-stat-value stu-brief-stat-value--muted">—</span>
+                ) : overallAttendance && overallAttendance.percent !== null ? (
+                  // 75% is a visual warn cue only, matching the secondary
+                  // side's own convention — this is a cross-course rollup,
+                  // not any one offering's configured eligibility
+                  // threshold (each course_offering can set its own via
+                  // attendance_eligibility_threshold_pct; see Course
+                  // Attendance for the per-course, threshold-aware figure).
+                  <span className={`stu-brief-stat-value${overallAttendance.percent < 75 ? ' stu-brief-stat-value--warn' : ''}`}>
+                    {overallAttendance.percent}%
+                  </span>
+                ) : (
+                  <span className="stu-brief-stat-value stu-brief-stat-value--muted">No sessions yet</span>
+                )
+              ) : briefState === 'loading' || briefState === 'booting' ? (
                 <span className="stu-brief-stat-skel skeleton" />
               ) : briefState === 'error' ? (
                 <span className="stu-brief-stat-value stu-brief-stat-value--muted">—</span>
@@ -1798,7 +2107,13 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
               ) : (
                 <span className="stu-brief-stat-value stu-brief-stat-value--muted">No records yet</span>
               )}
-              {attendanceSummary && (attendanceSummary.present + attendanceSummary.absent + attendanceSummary.late + attendanceSummary.excused) > 0 && (
+              {isHigherEd && overallAttendance && overallAttendance.totalSessions > 0 && (
+                <span className="stu-brief-stat-sub">
+                  {overallAttendance.presentCount} of {overallAttendance.totalSessions} sessions attended
+                  {overallAttendance.courseCount > 0 ? ` · across ${overallAttendance.courseCount} course${overallAttendance.courseCount === 1 ? '' : 's'}` : ''}
+                </span>
+              )}
+              {!isHigherEd && attendanceSummary && (attendanceSummary.present + attendanceSummary.absent + attendanceSummary.late + attendanceSummary.excused) > 0 && (
                 <span className="stu-brief-stat-sub">
                   {attendanceSummary.present} present · {attendanceSummary.absent} absent · {attendanceSummary.late} late
                   {attendanceSummary.excused > 0 ? ` · ${attendanceSummary.excused} excused` : ''}
@@ -1808,24 +2123,77 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
 
             <div className="stu-brief-stat">
               <span className="stu-brief-stat-label">Performance</span>
-              <span className="stu-brief-stat-value stu-brief-stat-value--muted">Not yet available</span>
-              <span className="stu-brief-stat-sub">See the Results module for subject scores</span>
+              {isHigherEd ? (
+                cgpaState === 'loading' || cgpaState === 'booting' ? (
+                  <span className="stu-brief-stat-skel skeleton" />
+                ) : cgpaState === 'error' ? (
+                  <span className="stu-brief-stat-value stu-brief-stat-value--muted">Couldn't load</span>
+                ) : cgpaValue !== null && cgpaValue !== undefined ? (
+                  <>
+                    <span className="stu-brief-stat-value">{cgpaValue.toFixed(2)} CGPA</span>
+                    <span className="stu-brief-stat-sub">See the transcript tab for full breakdown</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="stu-brief-stat-value stu-brief-stat-value--muted">No scores yet</span>
+                    <span className="stu-brief-stat-sub">See the transcript tab once results are published</span>
+                  </>
+                )
+              ) : (
+                <>
+                  <span className="stu-brief-stat-value stu-brief-stat-value--muted">Not yet available</span>
+                  <span className="stu-brief-stat-sub">See the Results module for subject scores</span>
+                </>
+              )}
             </div>
           </div>
 
-          {briefState === 'error' && (
+          {!isHigherEd && briefState === 'error' && (
+            <p className="stu-status-note stu-status-note--error">
+              Couldn't load attendance data. <button className="stu-inline-retry" onClick={() => fetchBrief(s.id)}>Retry</button>
+            </p>
+          )}
+          {isHigherEd && cgpaState === 'error' && (
+            <p className="stu-status-note stu-status-note--error">
+              Couldn't load performance data. <button className="stu-inline-retry" onClick={() => fetchBrief(s.id)}>Retry</button>
+            </p>
+          )}
+          {isHigherEd && overallAttendanceState === 'error' && (
             <p className="stu-status-note stu-status-note--error">
               Couldn't load attendance data. <button className="stu-inline-retry" onClick={() => fetchBrief(s.id)}>Retry</button>
             </p>
           )}
 
-          <div className="stu-brief-fact-row">
-            <span className="stu-brief-fact-label">Class</span>
-            <span className="stu-brief-fact-value">{s.class_path_label ?? 'Not assigned'}</span>
-          </div>
+          {isHigherEd ? (
+            <div className="stu-brief-fact-row">
+              <span className="stu-brief-fact-label">Programme / Level</span>
+              {placementState === 'loading' || placementState === 'booting' ? (
+                <span className="stu-brief-stat-skel skeleton" />
+              ) : placementState === 'error' ? (
+                <span className="stu-brief-fact-value">Couldn't load</span>
+              ) : currentPlacement ? (
+                <span className="stu-brief-fact-value">
+                  {currentPlacement.programme_name} — {currentPlacement.level_label}
+                </span>
+              ) : (
+                <span className="stu-brief-fact-value">Not yet admitted</span>
+              )}
+            </div>
+          ) : (
+            <div className="stu-brief-fact-row">
+              <span className="stu-brief-fact-label">Class</span>
+              <span className="stu-brief-fact-value">{s.class_path_label ?? 'Not assigned'}</span>
+            </div>
+          )}
           <div className="stu-brief-fact-row">
             <span className="stu-brief-fact-label">Status</span>
-            <span className={`stu-status-badge stu-status-badge--${s.status}`}>{statusLabel(s.status)}</span>
+            {isHigherEd ? (
+              <span className={`stu-status-badge stu-status-badge--${currentPlacement ? 'active' : 'inactive'}`}>
+                {currentPlacement ? 'Active' : 'Not yet admitted'}
+              </span>
+            ) : (
+              <span className={`stu-status-badge stu-status-badge--${s.status}`}>{statusLabel(s.status)}</span>
+            )}
           </div>
 
           {/* Session 14 — blood_group/medical_notes are now wired (they
@@ -2158,16 +2526,6 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, in
                 autoComplete="off"
                 spellCheck={false}
               />
-              {canEditStudentRecords && !isTransferred && (
-                <button
-                  type="button"
-                  className="stu-code-gen-btn"
-                  onClick={() => setField('student_code', generateStudentCode())}
-                  title="Auto-generate an ID number"
-                >
-                  Generate ID
-                </button>
-              )}
             </div>
             <p className="stu-field-hint">
               Used for registers and ID cards only — has nothing to do with the student's portal login code (set up separately, in the Brief tab).
@@ -2661,23 +3019,37 @@ function renderGuardiansTab() {
         {/* Current status */}
         <div className="stu-status-section">
           <p className="stu-status-section-label">Current status</p>
-          <span className={`stu-status-badge stu-status-badge--${s} stu-status-badge--lg`}>
-            {statusLabel(s)}
-          </span>
-          {s === 'transferred_out' && (
-            <p className="stu-status-note">
-              This student has been transferred out. Their record is read-only and retained permanently.
-            </p>
-          )}
-          {s === 'transferred_in_pending' && (
-            <p className="stu-status-note">
-              This student's transfer from another school is pending acceptance.
-            </p>
-          )}
-          {s === 'alumni' && (
-            <p className="stu-status-note">
-              Alumni status is permanent. Contact support if this was set in error.
-            </p>
+          {isHigherEd && !isTransferred ? (
+            <>
+              <span className={`stu-status-badge stu-status-badge--${currentPlacement ? 'active' : 'inactive'} stu-status-badge--lg`}>
+                {currentPlacement ? 'Active' : 'Not yet admitted'}
+              </span>
+              <p className="stu-status-note">
+                Derived from this student's current programme placement — not manually set.
+                {currentPlacement ? ' To change it, update their placement instead.' : ' Admit this student into a programme/level to make them active.'}
+              </p>
+            </>
+          ) : (
+            <>
+              <span className={`stu-status-badge stu-status-badge--${s} stu-status-badge--lg`}>
+                {statusLabel(s)}
+              </span>
+              {s === 'transferred_out' && (
+                <p className="stu-status-note">
+                  This student has been transferred out. Their record is read-only and retained permanently.
+                </p>
+              )}
+              {s === 'transferred_in_pending' && (
+                <p className="stu-status-note">
+                  This student's transfer from another school is pending acceptance.
+                </p>
+              )}
+              {s === 'alumni' && (
+                <p className="stu-status-note">
+                  Alumni status is permanent. Contact support if this was set in error.
+                </p>
+              )}
+            </>
           )}
         </div>
 
@@ -2686,7 +3058,7 @@ function renderGuardiansTab() {
         )}
 
         {/* Confirmation dialog */}
-        {statusConfirm && (
+        {!isHigherEd && statusConfirm && (
           <div className="stu-confirm-banner">
             <p className="stu-confirm-text">
               {statusConfirm === 'alumni'
@@ -2712,8 +3084,11 @@ function renderGuardiansTab() {
           </div>
         )}
 
-        {/* Status action buttons — only when admin and not yet terminal */}
-        {canManageStudents && !isTransferred && !statusConfirm && (
+        {/* Status action buttons — only when admin and not yet terminal.
+            SESSION 64 §12: not shown for higher-ed — active/alumni are
+            derived, not manually toggled; inactive has no defined trigger
+            yet for higher-ed (open gap, not guessed at here). */}
+        {!isHigherEd && canManageStudents && !isTransferred && !statusConfirm && (
           <div className="stu-status-actions">
             {s !== 'active' && (
               <button
@@ -2745,8 +3120,11 @@ function renderGuardiansTab() {
           </div>
         )}
 
-        {/* Transfer section — only for active students, admin only */}
-        {canManageStudents && s === 'active' && (
+        {/* Transfer section — only for active students, admin only.
+            SESSION 64 §12: s (raw students.status) is not kept in sync
+            for higher-ed students, so it can't gate this correctly on its
+            own — derive "active" from placement instead for that case. */}
+        {canManageStudents && (isHigherEd ? !!currentPlacement : s === 'active') && (
           <div className="stu-transfer-section">
             <p className="stu-status-section-label">Inter-school transfer</p>
 
@@ -3176,14 +3554,6 @@ function renderGuardiansTab() {
                   autoComplete="off"
                   spellCheck={false}
                 />
-                <button
-                  type="button"
-                  className="stu-code-gen-btn"
-                  onClick={() => setField('student_code', generateStudentCode())}
-                  title="Auto-generate an ID number"
-                >
-                  Generate ID
-                </button>
               </div>
               <p className="stu-field-hint">Used for registers and ID cards. Must be unique per school.</p>
             </div>
@@ -3340,6 +3710,188 @@ function renderGuardiansTab() {
   )
 }
 
+// ─── Transcript tab (SESSION 60e — admin equivalent of GuardianPortal.tsx's
+//      TranscriptTab, only reachable when isHigherEd) ─────────────────────
+//
+// Deliberately a standalone top-level component, not a renderXTab() closure
+// like Brief/Guardians/Status above — matches GuardianPortal.tsx's own
+// TranscriptTab shape (self-contained load effect keyed on studentId, own
+// loading/error state) rather than this file's closure convention, since
+// it's intentionally the same component shape/behavior as the guardian
+// version, just fed a different studentId source (an admin-selected
+// student here vs. the logged-in guardian's own child there) — no new
+// service logic, this is a rendering-layer twin.
+//
+// Reads via loadStudentTranscript() as STAFF (this module is admin/staff-
+// only), which per migration_session_60d_publish_gate.sql's RLS is a
+// *different, unrestricted* policy than the guardian/student one
+// GuardianPortal.tsx's own call hits — so this naturally receives BOTH
+// published and draft (unpublished) rows, unlike the guardian view. Per
+// owner's 2026-07-16 decision ("admin sees everything, drafts clearly
+// marked"), every course row is shown, with an explicit "Draft — not yet
+// published" badge on any row where is_published is false, so an admin
+// browsing a transcript can never mistake an unreviewed score for a final
+// one.
+function StudentTranscriptTab({
+  schoolName,
+  studentId,
+}: {
+  schoolName: string
+  studentId: string
+}) {
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [transcript, setTranscript] = useState<StudentTranscript | null>(null)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      setLoadState('loading')
+      try {
+        // includeUnpublished=true — this is the admin view; owner's
+        // 2026-07-16 requirement is that admin sees everything on the
+        // transcript, published or not (with the Draft badge below
+        // marking unpublished rows). Omitting this arg (the default,
+        // false) is what GuardianPortal.tsx's own call relies on instead.
+        const { data, error } = await loadStudentTranscript(studentId, true)
+        if (cancelled) return
+        if (error || !data) {
+          setLoadState('error')
+          return
+        }
+        setTranscript(data)
+        setLoadState('ready')
+      } catch {
+        if (!cancelled) setLoadState('error')
+      }
+    }
+    run()
+    return () => { cancelled = true }
+  }, [studentId])
+
+  const handleDownload = () => {
+    if (!transcript) return
+    setDownloadError(null)
+    setDownloading(true)
+    try {
+      // Admin's PDF download intentionally uses the same
+      // downloadTranscriptPdf() as the guardian's — it renders every
+      // course row it's handed with no is_published branching of its own
+      // (transcriptPdf.ts has no concept of publish state at all). Since
+      // this admin view's transcript object CAN include drafts, an admin
+      // downloading here could produce a PDF containing unpublished
+      // scores — acceptable for an admin's own working copy/internal
+      // review use, but worth knowing: this is not the same document a
+      // guardian would get (guardians never receive draft rows to begin
+      // with, so their downloaded PDF is always all-published already).
+      downloadTranscriptPdf({ schoolName, transcript })
+    } catch {
+      setDownloadError("Couldn't generate the PDF — try again.")
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  if (loadState === 'loading') {
+    return (
+      <>
+        <div className="port-skel-card" />
+        <div className="port-skel-card" />
+      </>
+    )
+  }
+
+  if (loadState === 'error') {
+    return <p className="port-form-error">Couldn't load the transcript — check your connection and try again.</p>
+  }
+
+  if (!transcript) return null
+
+  return (
+    <div className="port-transcript">
+      <div className="port-transcript-header">
+        <div>
+          <p className="port-transcript-student">{transcript.student_name}</p>
+          <p className="port-transcript-matric">Matric No: {transcript.matric_number ?? '—'}</p>
+        </div>
+        <button
+          className="port-transcript-download-btn"
+          onClick={handleDownload}
+          disabled={downloading}
+        >
+          <Icon name="graduation-cap" size={16} />
+          {downloading ? 'Preparing…' : 'Download PDF'}
+        </button>
+      </div>
+      {downloadError && <p className="port-form-error">{downloadError}</p>}
+
+      <div className="port-transcript-cgpa-card">
+        <p className="port-transcript-cgpa-label">Cumulative GPA (CGPA)</p>
+        <p className="port-transcript-cgpa-value">
+          {transcript.cgpa === null ? '—' : transcript.cgpa.toFixed(2)}
+        </p>
+        {transcript.cgpa !== null && (
+          <p className="port-transcript-cgpa-detail">
+            Units attempted: {transcript.cgpa_total_units_attempted ?? '—'} · Quality points:{' '}
+            {transcript.cgpa_total_quality_points?.toFixed(2) ?? '—'}
+          </p>
+        )}
+      </div>
+
+      {transcript.semesters.length === 0 && (
+        <p className="port-empty-inline">No finalized courses yet.</p>
+      )}
+
+      {transcript.semesters.map((semester) => (
+        <div key={`${semester.session_id}|${semester.term_id ?? ''}`} className="port-transcript-semester-card">
+          <div className="port-transcript-semester-header">
+            <p className="port-transcript-semester-title">
+              {semester.term_name ? `${semester.session_name} — ${semester.term_name}` : semester.session_name}
+            </p>
+            <p className="port-transcript-semester-gpa">
+              {semester.gpa === null ? 'GPA: —' : `GPA: ${semester.gpa.toFixed(2)}`}
+            </p>
+          </div>
+          <div className="port-transcript-course-list">
+            {semester.courses.map((c) => (
+              <div
+                key={c.registration_id}
+                className={`port-transcript-course-row ${c.is_superseded ? 'port-transcript-course-row--superseded' : ''}`}
+              >
+                <div className="port-transcript-course-main">
+                  <span className="port-transcript-course-code">{c.course_code}</span>
+                  <span className="port-transcript-course-title">{c.course_title}</span>
+                </div>
+                <div className="port-transcript-course-meta">
+                  <span>{c.credit_units} units</span>
+                  {c.letter_grade && <span className="port-transcript-course-grade-pill">{c.letter_grade}</span>}
+                  {c.grade_point !== null && <span>{c.grade_point.toFixed(2)} GP</span>}
+                </div>
+                {/* SESSION 60e — admin-only draft badge. Not present in
+                    GuardianPortal.tsx's own copy of this row markup at
+                    all, since a guardian/student's course_results read is
+                    RLS-restricted to published_at is not null already —
+                    this badge would be permanently, silently dead code
+                    there. Here it's live: this view's read is the
+                    unrestricted staff policy, so drafts genuinely
+                    surface. */}
+                {(c.is_carryover || c.is_superseded || !c.is_published) && (
+                  <div className="port-transcript-course-tags">
+                    {c.is_carryover && <span className="port-transcript-tag">Carryover</span>}
+                    {c.is_superseded && <span className="port-transcript-tag port-transcript-tag--superseded">Superseded</span>}
+                    {!c.is_published && <span className="port-transcript-tag port-transcript-tag--draft">Draft — not yet published</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
@@ -3350,18 +3902,4 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
-}
-
-/**
- * Generate a random 6-char alphanumeric student code.
- * Format: STU-XXXXXX (no ambiguous chars: 0/O/I/1)
- * Admins can override with any string — this is just the auto-fill default.
- */
-function generateStudentCode(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  let suffix = ''
-  const arr = new Uint8Array(6)
-  crypto.getRandomValues(arr)
-  for (const b of arr) suffix += chars[b % chars.length]
-  return 'STU-' + suffix
 }

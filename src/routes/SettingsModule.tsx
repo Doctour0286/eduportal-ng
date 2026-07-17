@@ -61,6 +61,8 @@ import {
   loadCurriculum,           addCurriculumEntry, removeCurriculumEntry,
   loadHigherEdGradeScale,   upsertHigherEdGradeBand, deleteHigherEdGradeBand,
   loadCgpaPolicy,           upsertCgpaPolicy,
+  loadAcademicStandingRules, upsertAcademicStandingRules,
+  runStandingEvaluation, loadPendingStandingEvents, reviewStandingEvent,
   loadCourseOfferings,      upsertCourseOffering, deleteCourseOffering,
   type SchoolSettings,
   type SchoolPublicConfig,
@@ -92,6 +94,9 @@ import {
   type CurriculumEntry,
   type GradeScaleBand,
   type CgpaPolicy,
+  type AcademicStandingRules,
+  type StandingEvaluationResult,
+  type StandingEvent,
   type CourseOffering,
 } from '../services/settingsService'
 import {
@@ -162,7 +167,7 @@ const SCHOOL_TYPE_DISPLAY_LABELS: Record<string, string> = {
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
-type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
+type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
 // Institution tab is hidden entirely when school_type is not a
 // higher-institution type — per SESSION 55 §0 instruction 5 — so TABS is
@@ -199,6 +204,15 @@ function buildTabs(schoolType: string | null | undefined): { id: SettingsTab; la
     // meaning at all. A secondary school's own grading (CA/exam bands) is
     // configured elsewhere (Results module), not through this tab.
     tabs.push({ id: 'grading', label: 'Grading', icon: <Icon name="clipboard-list" size={18} /> })
+    // Academic standing (PRD Tier 8 / Problem 8.7, SESSION 61, §7.27.5).
+    // Higher-ed-only for the same reason Grading is: academic_standing_rules
+    // is keyed off CGPA, which only exists for higher-ed schools (cgpa_policy
+    // has no secondary-school meaning). Distinct concern from Grading itself
+    // — this configures the review-trigger thresholds, not how a score
+    // becomes a grade — so it gets its own tab rather than folding into
+    // Grading's already-large form, consistent with Offerings earning its
+    // own tab rather than being crammed into Curriculum.
+    tabs.push({ id: 'standing', label: 'Standing', icon: <Icon name="alert-triangle" size={18} /> })
   } else {
     tabs.push({ id: 'classes', label: 'Classes', icon: <Icon name="tag" size={18} /> })
   }
@@ -216,7 +230,7 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolType }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode; schoolType?: string | null }) {
+export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolType, actorRecordId }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode; schoolType?: string | null; actorRecordId?: string | null }) {
   // themeMode is only consumed by SchoolTab (the brand-color picker), but
   // is accepted here and passed down since this is the module's entry
   // point — matches the pattern App.tsx already uses for other props
@@ -277,6 +291,7 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
         {safeActiveTab === 'curriculum'  && <CurriculumTab  schoolId={schoolId} />}
         {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
         {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
+        {safeActiveTab === 'standing'     && <StandingTab     schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
         {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}
         {safeActiveTab === 'roles'         && <RolesTab        schoolId={schoolId} />}
         {safeActiveTab === 'student-roles' && <StudentRolesTab schoolId={schoolId} />}
@@ -3224,6 +3239,10 @@ function GradingTab({ schoolId }: { schoolId: string }) {
   const [bGradePoint, setBGradePoint] = useState('')
   const [bScaleMax, setBScaleMax] = useState('5')
   const [bRemark, setBRemark] = useState('')
+  // Defaults true for a brand-new band (the common case — most bands pass).
+  // For an existing band being edited, openBandForm() below overwrites this
+  // from the real stored value, never from this default.
+  const [bIsPassing, setBIsPassing] = useState(true)
   const [bSaving, setBSaving] = useState(false)
   const [bError, setBError] = useState<string | null>(null)
   const [deletingBandId, setDeletingBandId] = useState<string | null>(null)
@@ -3295,6 +3314,12 @@ function GradingTab({ schoolId }: { schoolId: string }) {
     setBGradePoint(b?.grade_point != null ? String(b.grade_point) : '')
     setBScaleMax(b?.scale_max != null ? String(b.scale_max) : (bands[0]?.scale_max != null ? String(bands[0].scale_max) : '5'))
     setBRemark(b?.remark ?? '')
+    // b.is_passing is only genuinely null for a legacy row the migration's
+    // backfill never touched (pre-existing secondary-school shape) — not
+    // expected here since this form is higher-ed only, but falling back to
+    // the same grade_point > 0 guess the migration itself used keeps this
+    // form never silently blank/unset rather than assuming true or false.
+    setBIsPassing(b?.is_passing ?? (b?.grade_point != null ? b.grade_point > 0 : true))
     setBError(null)
     setShowBandForm(true)
   }
@@ -3331,6 +3356,7 @@ function GradingTab({ schoolId }: { schoolId: string }) {
       scale_max: scaleMax,
       remark: bRemark || null,
       sort_order: editingBand?.sort_order ?? bands.length,
+      is_passing: bIsPassing,
     })
     if (res.error) { setBError(res.error); setBSaving(false); return }
     setShowBandForm(false)
@@ -3599,6 +3625,7 @@ function GradingTab({ schoolId }: { schoolId: string }) {
                 {b.grade_point != null ? ` · ${b.grade_point} pts` : ''}
                 {b.scale_max != null ? ` (of ${b.scale_max})` : ''}
                 {b.remark ? ` · ${b.remark}` : ''}
+                {b.is_passing === null ? '' : b.is_passing ? ' · Passing' : ' · Fails (carryover)'}
               </p>
             </div>
             <div className="set-list-row-actions">
@@ -3850,6 +3877,18 @@ function GradingTab({ schoolId }: { schoolId: string }) {
             <FieldRow label="Remark (optional)">
               <Input value={bRemark} onChange={setBRemark} placeholder="e.g. Excellent, Fail" />
             </FieldRow>
+            <FieldRow label="Counts as passing">
+              <Toggle
+                checked={bIsPassing}
+                onChange={setBIsPassing}
+                label="This band counts as a passing grade"
+              />
+            </FieldRow>
+            <p className="set-hint-text">
+              Determines carryover, not the grade point value — a low but positive
+              grade point (e.g. a D) can still be marked failing if your program
+              requires it. Unrelated to whether this band earns GPA credit.
+            </p>
             {bError && <p className="set-form-error">{bError}</p>}
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowBandForm(false)}>Cancel</button>
@@ -3857,6 +3896,276 @@ function GradingTab({ schoolId }: { schoolId: string }) {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab: Academic standing ────────────────────────────────────────────────────
+//
+// PRD Tier 8 / Problem 8.7, SESSION 61, §7.27.5. One row per school
+// (academic_standing_rules, unique on school_id) — same shape and same
+// Decision 5 discipline as CgpaPolicy in GradingTab above: no threshold is
+// ever smart-defaulted, and loadAcademicStandingRules() returning
+// { data: null } is a normal "not configured yet" state, not an error.
+// This tab only configures the rule THRESHOLDS; the evaluation flow that
+// reads them and generates review-pending academic_standing_events rows is
+// SESSION 62, deliberately out of scope here (§10 Session Task Breakdown,
+// SESSION 61's own "Exactly what to do" list stops at the settings UI).
+
+function StandingTab({ schoolId, actorRecordId }: { schoolId: string; actorRecordId: string | null }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [rules, setRules] = useState<AcademicStandingRules | null>(null)
+
+  // Held as its own editable draft, separate from the loaded `rules`, so
+  // "no rules configured yet" still renders a normal (empty) form rather
+  // than a hint-only state — same reasoning GradingTab's CGPA-policy form
+  // and InstitutionTab (school with no programmes yet) both already use.
+  const [probationCgpaThreshold, setProbationCgpaThreshold] = useState('')
+  const [withdrawalCgpaThreshold, setWithdrawalCgpaThreshold] = useState('')
+  const [maxCarryoverCourses, setMaxCarryoverCourses] = useState('')
+  const [maxRegistrationMultiplier, setMaxRegistrationMultiplier] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  // SESSION 62 — evaluation run + review queue state, kept independent of
+  // the thresholds form's own state above (separate concerns: configuring
+  // rules vs. acting on them).
+  const [evaluating, setEvaluating] = useState(false)
+  const [evalError, setEvalError] = useState<string | null>(null)
+  const [evalResult, setEvalResult] = useState<StandingEvaluationResult | null>(null)
+  const [queueLoading, setQueueLoading] = useState(true)
+  const [queueError, setQueueError] = useState<string | null>(null)
+  const [pendingEvents, setPendingEvents] = useState<StandingEvent[]>([])
+  const [reviewingId, setReviewingId] = useState<string | null>(null)
+  const [reviewNoteDraft, setReviewNoteDraft] = useState<Record<string, string>>({})
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const res = await loadAcademicStandingRules(schoolId)
+    if (res.error) { setError(res.error); setLoading(false); return }
+    setRules(res.data)
+    setProbationCgpaThreshold(res.data?.probation_cgpa_threshold != null ? String(res.data.probation_cgpa_threshold) : '')
+    setWithdrawalCgpaThreshold(res.data?.withdrawal_cgpa_threshold != null ? String(res.data.withdrawal_cgpa_threshold) : '')
+    setMaxCarryoverCourses(res.data?.max_carryover_courses_before_review != null ? String(res.data.max_carryover_courses_before_review) : '')
+    setMaxRegistrationMultiplier(res.data?.max_registration_multiplier != null ? String(res.data.max_registration_multiplier) : '')
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  // Numeric parse helper mirrors GradingTab's handleSavePolicy: empty input
+  // is a legitimate "not set" state (null), not zero and not an error —
+  // every threshold here is optional per §7.27.5's own nullable columns.
+  function parseOptionalNonNegative(raw: string, label: string): { value: number | null; error: string | null } {
+    if (!raw) return { value: null, error: null }
+    const n = Number(raw)
+    if (Number.isNaN(n) || n < 0) return { value: null, error: `${label} must be a non-negative number.` }
+    return { value: n, error: null }
+  }
+
+  async function handleSave() {
+    setSaved(false)
+    const probation = parseOptionalNonNegative(probationCgpaThreshold, 'Probation CGPA threshold')
+    if (probation.error) { setSaveError(probation.error); return }
+    const withdrawal = parseOptionalNonNegative(withdrawalCgpaThreshold, 'Withdrawal CGPA threshold')
+    if (withdrawal.error) { setSaveError(withdrawal.error); return }
+    const maxCarryover = parseOptionalNonNegative(maxCarryoverCourses, 'Max carryover courses before review')
+    if (maxCarryover.error) { setSaveError(maxCarryover.error); return }
+    const maxMultiplier = parseOptionalNonNegative(maxRegistrationMultiplier, 'Max registration multiplier')
+    if (maxMultiplier.error) { setSaveError(maxMultiplier.error); return }
+    if (probation.value !== null && withdrawal.value !== null && withdrawal.value > probation.value) {
+      setSaveError('Withdrawal CGPA threshold should not exceed the probation threshold.')
+      return
+    }
+    setSaveError(null)
+    setSaving(true)
+    const res = await upsertAcademicStandingRules(schoolId, {
+      probation_cgpa_threshold: probation.value,
+      withdrawal_cgpa_threshold: withdrawal.value,
+      max_carryover_courses_before_review: maxCarryover.value,
+      max_registration_multiplier: maxMultiplier.value,
+    })
+    if (res.error) { setSaveError(res.error); setSaving(false); return }
+    setSaving(false)
+    setSaved(true)
+    await load()
+  }
+
+  // SESSION 62 — pending review queue, loaded independently of the
+  // thresholds form so switching this tab always shows both without
+  // needing a save first.
+  const loadQueue = useCallback(async () => {
+    setQueueLoading(true)
+    setQueueError(null)
+    const res = await loadPendingStandingEvents(schoolId)
+    if (res.error) { setQueueError(res.error); setQueueLoading(false); return }
+    setPendingEvents(res.data)
+    setQueueLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { loadQueue() }, [loadQueue])
+
+  async function handleRunEvaluation() {
+    setEvalError(null)
+    setEvalResult(null)
+    setEvaluating(true)
+    const res = await runStandingEvaluation(schoolId)
+    setEvaluating(false)
+    if (res.error) { setEvalError(res.error); return }
+    setEvalResult(res.data)
+    await loadQueue()
+  }
+
+  async function handleConfirmEvent(eventId: string, overrideStanding?: StandingEvent['standing']) {
+    if (!actorRecordId) {
+      setQueueError('Could not resolve your staff id — try reloading the page before confirming a review.')
+      return
+    }
+    setReviewingId(eventId)
+    const additionalNote = reviewNoteDraft[eventId]?.trim() || undefined
+    const res = await reviewStandingEvent(eventId, actorRecordId, { overrideStanding, additionalNote })
+    setReviewingId(null)
+    if (res.error) { setQueueError(res.error); return }
+    setReviewNoteDraft((prev) => { const next = { ...prev }; delete next[eventId]; return next })
+    await loadQueue()
+  }
+
+  const STANDING_LABEL: Record<StandingEvent['standing'], string> = {
+    good_standing: 'Good standing',
+    probation: 'Probation',
+    spillover: 'Spillover',
+    withdrawal_recommended: 'Withdrawal recommended',
+  }
+
+  if (loading) return <Skeleton />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <div className="set-section-header">
+        <SectionLabel>Academic standing thresholds</SectionLabel>
+      </div>
+      <p className="set-hint-text">
+        Applies once, school-wide. These thresholds define when a student's CGPA or carryover load
+        is flagged for review — every case is always reviewed and confirmed by an admin/registrar
+        before any standing change is recorded; nothing here is applied automatically.
+      </p>
+
+      <FieldRow label="Probation CGPA threshold (optional)">
+        <Input
+          value={probationCgpaThreshold}
+          onChange={v => { setProbationCgpaThreshold(v.replace(/[^0-9.]/g, '')); setSaved(false) }}
+          placeholder="e.g. 2.0"
+        />
+      </FieldRow>
+      <FieldRow label="Withdrawal CGPA threshold (optional)">
+        <Input
+          value={withdrawalCgpaThreshold}
+          onChange={v => { setWithdrawalCgpaThreshold(v.replace(/[^0-9.]/g, '')); setSaved(false) }}
+          placeholder="e.g. 1.0"
+        />
+      </FieldRow>
+      <FieldRow label="Max carryover courses before review (optional)">
+        <Input
+          value={maxCarryoverCourses}
+          onChange={v => { setMaxCarryoverCourses(v.replace(/[^0-9]/g, '')); setSaved(false) }}
+          placeholder="e.g. 3"
+        />
+      </FieldRow>
+      <FieldRow label="Max registration multiplier (optional)">
+        <Input
+          value={maxRegistrationMultiplier}
+          onChange={v => { setMaxRegistrationMultiplier(v.replace(/[^0-9.]/g, '')); setSaved(false) }}
+          placeholder="e.g. 1.5"
+        />
+      </FieldRow>
+
+      {saveError && <p className="set-form-error">{saveError}</p>}
+      {saved && !saveError && <p className="set-hint-text">Saved.</p>}
+      <div className="set-sheet-footer" style={{ paddingLeft: 0 }}>
+        <button className="set-save-btn" onClick={handleSave} disabled={saving}>
+          {saving ? 'Saving…' : rules ? 'Update thresholds' : 'Save thresholds'}
+        </button>
+      </div>
+
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>Session-end evaluation</SectionLabel>
+      </div>
+      <p className="set-hint-text">
+        Compares every active student's latest CGPA and residency duration against the thresholds
+        above and creates a review-pending entry below for anyone who trips one — nothing is
+        changed on a student's record automatically. Run this at the end of a session, or any time
+        you want a fresh check.
+      </p>
+      <div className="set-sheet-footer" style={{ paddingLeft: 0 }}>
+        <button className="set-save-btn" onClick={handleRunEvaluation} disabled={evaluating}>
+          {evaluating ? 'Evaluating…' : 'Run session-end evaluation'}
+        </button>
+      </div>
+      {evalError && <p className="set-form-error">{evalError}</p>}
+      {evalResult && !evalError && (
+        <p className="set-hint-text">
+          Evaluated {evalResult.studentsEvaluated} active student{evalResult.studentsEvaluated === 1 ? '' : 's'}.
+          {' '}{evalResult.eventsCreated} new review-pending event{evalResult.eventsCreated === 1 ? '' : 's'} created
+          {evalResult.skippedAlreadyPending > 0 ? `, ${evalResult.skippedAlreadyPending} already pending from an earlier run` : ''}.
+        </p>
+      )}
+
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>Pending review{pendingEvents.length > 0 ? ` (${pendingEvents.length})` : ''}</SectionLabel>
+      </div>
+      {queueLoading ? (
+        <Skeleton />
+      ) : queueError ? (
+        <ErrorState message={queueError} onRetry={loadQueue} />
+      ) : pendingEvents.length === 0 ? (
+        <p className="set-hint-text">Nothing pending review right now.</p>
+      ) : (
+        <ul className="set-list">
+          {pendingEvents.map((ev) => (
+            <li key={ev.id} className="set-list-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+              <div>
+                <p className="set-list-row-title">
+                  {ev.student_name}
+                  {ev.matric_number ? ` · ${ev.matric_number}` : ''}
+                  {' — '}
+                  <span style={{ fontWeight: 600 }}>{STANDING_LABEL[ev.standing]}</span>
+                </p>
+                <p className="set-list-row-meta">
+                  {ev.session_name}
+                  {ev.cgpa_at_evaluation !== null ? ` · CGPA ${ev.cgpa_at_evaluation.toFixed(2)}` : ''}
+                </p>
+                {ev.note && <p className="set-hint-text" style={{ marginTop: '0.25rem' }}>{ev.note}</p>}
+              </div>
+              <Input
+                value={reviewNoteDraft[ev.id] ?? ''}
+                onChange={(v) => setReviewNoteDraft((prev) => ({ ...prev, [ev.id]: v }))}
+                placeholder="Add a note (optional) before confirming…"
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  className="set-save-btn"
+                  onClick={() => handleConfirmEvent(ev.id)}
+                  disabled={reviewingId === ev.id}
+                >
+                  {reviewingId === ev.id ? 'Confirming…' : `Confirm ${STANDING_LABEL[ev.standing]}`}
+                </button>
+                <button
+                  className="set-save-btn"
+                  onClick={() => handleConfirmEvent(ev.id, 'good_standing')}
+                  disabled={reviewingId === ev.id}
+                  style={{ background: 'transparent', border: '1px solid var(--color-border)' }}
+                >
+                  Override → Good standing
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )

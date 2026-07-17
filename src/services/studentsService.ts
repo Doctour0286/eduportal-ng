@@ -77,6 +77,13 @@ export interface Student {
   class_path_label: string | null  // derived from ClassNode.path_label
   admission_date: string | null    // ISO date string
   student_code: string | null      // admin-assigned or auto-generated identifier
+  // SESSION 64 (owner-reported gap) — matric_number exists on students
+  // since SESSION 55 but was never added to this type or to
+  // loadStudents()'s/loadStudent()'s select lists. Higher-ed-only in
+  // practice (nullable, unique per school when set) but harmless to
+  // include unconditionally, matching student_code's own always-present
+  // shape rather than adding a second isHigherEd-gated select variant.
+  matric_number: string | null
   status: 'active' | 'inactive' | 'alumni' | 'transferred_out' | 'transferred_in_pending'
   // Session 14 (owner request, "more detail space" in the Edit subtab).
   // blood_group/address/medical_notes/emergency_contact_* already existed
@@ -298,6 +305,21 @@ export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]
 /**
  * Loads active students for the school, optionally filtered by class_node_id.
  * Always sorted alphabetically by full_name.
+ *
+ * SESSION 64 (PRD Problem 8.7a) — for a higher-ed school, `students.status`
+ * is no longer trusted as ground truth for 'active' (see master-plan §12,
+ * "computed live, nothing stored" decision). When `isHigherEd` is true and
+ * `statusFilter` resolves to 'active' (the default), this function instead
+ * selects every student who has a current `student_programme_placements` row
+ * — a two-step fetch (ids first, then the real student rows), not a single
+ * joined query, because Supabase's client can't cleanly express "exists a
+ * matching row in another table" as a filter without an actual FK-based
+ * embed, and `students` has no FK to `student_programme_placements` (the
+ * relationship runs the other way). 'inactive'/'alumni' filtering for
+ * higher-ed is a real, deliberately open gap — not yet defined per §12 — and
+ * falls through to the same raw-column read secondary schools use, which is
+ * likely wrong for higher-ed until that gap is resolved; not silently
+ * patched over here.
  */
 export async function loadStudents(params: {
   // Session 32 — widened from `string | null` to also accept `string[]`,
@@ -316,8 +338,41 @@ export async function loadStudents(params: {
   // combined-total counts for the stat strip come from the separate
   // getStudentStatusCounts() below, not from this function.
   statusFilter?: Student['status']
+  // SESSION 64 — see function header. Omitted/false preserves every
+  // existing secondary-school caller's behavior exactly as before this
+  // param existed.
+  isHigherEd?: boolean
+  // SESSION 64 follow-up (owner-reported gap) — higher-ed equivalent of
+  // classNodeId. Only meaningful when isHigherEd is true; ignored
+  // otherwise. Same array-or-null shape as classNodeId (a "whole
+  // programme" filter needs every level under it, a single level needs
+  // just one); null/empty means no level filter, matching classNodeId's
+  // own "no filter" convention exactly.
+  programmeLevelIds?: string[] | null
 }): Promise<Result<Student[]>> {
   try {
+    const resolvedStatus = params.statusFilter ?? 'active'
+    let placementStudentIds: string[] | null = null
+
+    if (params.isHigherEd && resolvedStatus === 'active') {
+      let placementQuery = supabase
+        .from('student_programme_placements')
+        .select('student_id')
+        .eq('is_current', true)
+      if (params.programmeLevelIds && params.programmeLevelIds.length > 0) {
+        placementQuery = placementQuery.in('programme_level_id', params.programmeLevelIds)
+      }
+      const { data: placementRows, error: placementError } = await placementQuery
+      if (placementError) return { ok: false, error: placementError.message }
+      placementStudentIds = Array.from(new Set((placementRows ?? []).map((r: any) => r.student_id as string)))
+      // An empty result here is a real, valid state (no students admitted
+      // yet, or none in the selected level) — return early rather than
+      // letting an empty .in() below fall through to Postgrest's own
+      // "no filter applied" behavior, which would incorrectly return
+      // every student regardless of placement/level.
+      if (placementStudentIds.length === 0) return { ok: true, data: [] }
+    }
+
     let query = supabase
       .from('students')
       .select(`
@@ -329,6 +384,7 @@ export async function loadStudents(params: {
         admission_date,
         status,
         student_code,
+        matric_number,
         blood_group,
         address,
         medical_notes,
@@ -342,7 +398,11 @@ export async function loadStudents(params: {
       `)
       .order('full_name')
 
-    query = query.eq('status', params.statusFilter ?? 'active')
+    if (placementStudentIds) {
+      query = query.in('id', placementStudentIds)
+    } else {
+      query = query.eq('status', resolvedStatus)
+    }
 
     if (Array.isArray(params.classNodeId)) {
       if (params.classNodeId.length > 0) {
@@ -365,6 +425,7 @@ export async function loadStudents(params: {
       class_path_label: null,
       admission_date: r.admission_date ?? null,
       student_code: r.student_code ?? null,
+      matric_number: r.matric_number ?? null,
       status: r.status,
       blood_group: r.blood_group ?? null,
       address: r.address ?? null,
@@ -405,6 +466,13 @@ export interface StudentStatusCounts {
  * Selects only the `status` column (no other fields) and tallies
  * client-side — Supabase's JS client has no native GROUP BY, and a
  * single-column fetch keeps the payload small even for large rosters.
+ *
+ * SECONDARY-SCHOOL ONLY as of SESSION 64 — a higher-ed student has no
+ * class_node_id at all, so this function's entire filter axis (class
+ * scoping) doesn't apply to it. Call getHigherEdStudentStatusCounts() below
+ * for a higher-ed school instead of trying to force isHigherEd through this
+ * one, which would conflate two genuinely different filter concepts rather
+ * than cleanly separating them.
  */
 export async function getStudentStatusCounts(params: {
   // Session 32 — widened, same reasoning as loadStudents() above.
@@ -444,6 +512,72 @@ export async function getStudentStatusCounts(params: {
 }
 
 /**
+ * SESSION 64 (PRD Problem 8.7a) — higher-ed equivalent of
+ * getStudentStatusCounts() above, deliberately separate rather than a branch
+ * inside it (see that function's own header note). `active` is the count of
+ * students with a current student_programme_placements row — the same
+ * derivation loadStudents()'s isHigherEd branch uses, so the stat strip and
+ * the visible list can never disagree about what "active" means. `inactive`
+ * and `alumni` are correctly left at 0, not guessed at: per master-plan §12,
+ * neither has a defined trigger for higher-ed yet (alumni awaits SESSION
+ * 69's promotion/graduation logic; inactive is an explicitly open gap) — a
+ * silently wrong non-zero number would be worse than an honestly-zero one
+ * for a status this function has no real way to compute yet.
+ * `transferred_out`/`transferred_in_pending` are read from the raw column,
+ * since inter-school transfer (initiateTransfer()) is school-type-agnostic
+ * and unaffected by any of this — those two statuses mean the same thing
+ * for both school types.
+ *
+ * Bug found and fixed while resuming this session: the placement-count
+ * query below originally had no `school_id` filter at all, while the
+ * transfer-count query in the same function correctly scoped on it —
+ * an inconsistency within one function, not a deliberate RLS-reliant
+ * choice (unlike loadStudents()/getStudentStatusCounts() above, which
+ * consistently omit explicit school_id everywhere and rely on RLS
+ * throughout). `student_programme_placements` is `[STD]`-scoped RLS
+ * (§7.27.1a), so this was not an actual cross-tenant data leak — but
+ * an unscoped read sitting next to a scoped one in the same function
+ * is exactly the kind of drift this codebase has flagged before, so
+ * fixed rather than left as a latent inconsistency.
+ */
+export async function getHigherEdStudentStatusCounts(
+  schoolId: string,
+): Promise<Result<StudentStatusCounts>> {
+  try {
+    const { data: placementRows, error: placementError } = await supabase
+      .from('student_programme_placements')
+      .select('student_id')
+      .eq('school_id', schoolId)
+      .eq('is_current', true)
+    if (placementError) return { ok: false, error: placementError.message }
+    const activeCount = new Set((placementRows ?? []).map((r: any) => r.student_id as string)).size
+
+    const { data: transferRows, error: transferError } = await supabase
+      .from('students')
+      .select('status')
+      .eq('school_id', schoolId)
+      .in('status', ['transferred_out', 'transferred_in_pending'])
+    if (transferError) return { ok: false, error: transferError.message }
+    const transferredOut = (transferRows ?? []).filter((r: any) => r.status === 'transferred_out').length
+    const transferredInPending = (transferRows ?? []).filter((r: any) => r.status === 'transferred_in_pending').length
+
+    return {
+      ok: true,
+      data: {
+        active: activeCount,
+        inactive: 0,
+        alumni: 0,
+        transferred_out: transferredOut,
+        transferred_in_pending: transferredInPending,
+        total: activeCount + transferredOut + transferredInPending,
+      },
+    }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load higher-ed student status counts' }
+  }
+}
+
+/**
  * Loads a single student by ID.
  * Used when opening the detail panel or edit form for an existing student.
  */
@@ -451,7 +585,7 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
   try {
     const { data, error } = await supabase
       .from('students')
-      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, photo_url, created_at')
+      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, matric_number, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, photo_url, created_at')
       .eq('id', studentId)
       .maybeSingle()
 
@@ -469,6 +603,7 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
         class_path_label: null,
         admission_date: data.admission_date ?? null,
         student_code: data.student_code ?? null,
+        matric_number: data.matric_number ?? null,
         status: data.status,
         blood_group: data.blood_group ?? null,
         address: data.address ?? null,

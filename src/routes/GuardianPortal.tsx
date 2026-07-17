@@ -44,6 +44,11 @@ import {
   type PortalAnnouncement,
 } from '../services/portalService'
 import {
+  loadStudentTranscript,
+  type StudentTranscript,
+} from '../services/courseResultsService'
+import { downloadTranscriptPdf } from '../services/transcriptPdf'
+import {
   loadTimetableData,
   loadCurrentSession as loadTimetableCurrentSession,
   getCurrentPeriod,
@@ -54,7 +59,16 @@ import {
 } from '../services/timetableService'
 import { TermProgressCard } from '../components/TermProgressCard'
 
-type PortalTab = 'summary' | 'results' | 'attendance' | 'fees' | 'schedule' | 'announcements'
+// SESSION 60b: 'results' is the secondary-school subject/CA/exam view
+// (loadStudentResults -> scores/subject_results). 'transcript' is its
+// higher-ed replacement (loadStudentTranscript -> course_results/
+// student_gpa_snapshots) — the two are mutually exclusive per school, per
+// the owner's explicit direction this session ("replace... entirely for
+// higher-ed schools", not add alongside). PORTAL_TABS below is built
+// per-render from schoolType rather than being a fixed array, since which
+// of the two tabs exists depends on which academic engine this school
+// runs — see buildPortalTabs() below.
+type PortalTab = 'summary' | 'results' | 'transcript' | 'attendance' | 'fees' | 'schedule' | 'announcements'
 
 interface GuardianPortalProps {
   schoolId: string
@@ -70,11 +84,29 @@ interface GuardianPortalProps {
    * a route per se, so "which tab" has to travel in as a prop.
    */
   initialTab?: PortalTab
+  /**
+   * SESSION 60b, new: same school_type value App.tsx already threads into
+   * ResultsModule/SettingsModule/CourseRegistrationModule/
+   * CourseAttendanceModule (see isHigherEd below, matching those files'
+   * own duplicated ['university','polytechnic','college_of_education',
+   * 'other'] check — that list isn't exported anywhere shared per those
+   * files' own comments, so this is the same deliberate duplication, not
+   * a missed import). Optional/nullable because this prop did not exist
+   * before this session — every App.tsx call site must be updated to pass
+   * it, and until all four are, this component still needs to degrade
+   * gracefully to the secondary-school 'results' tab rather than crash.
+   */
+  schoolType?: string | null
 }
 
 type BootState = 'loading' | 'ready' | 'no-children' | 'error'
 
-export default function GuardianPortal({ schoolId, authUserId, initialTab }: GuardianPortalProps) {
+export default function GuardianPortal({ schoolId, schoolName, authUserId, initialTab, schoolType }: GuardianPortalProps) {
+  // Same isHigherEd check App.tsx's MoreSheetContent/CourseRegistrationModule/
+  // CourseAttendanceModule already duplicate locally (see this file's own
+  // header note on schoolType above for why it's not a shared import).
+  const isHigherEd = !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
+
   const [bootState, setBootState] = useState<BootState>('loading')
   const [isStudentSelf, setIsStudentSelf] = useState(false)
   const [selfName, setSelfName] = useState('')
@@ -189,6 +221,7 @@ export default function GuardianPortal({ schoolId, authUserId, initialTab }: Gua
       {selectedChild && (
         <ChildDetail
           schoolId={schoolId}
+          schoolName={schoolName}
           child={selectedChild}
           session={session}
           terms={terms}
@@ -196,18 +229,28 @@ export default function GuardianPortal({ schoolId, authUserId, initialTab }: Gua
           termProgress={termProgress}
           tab={tab}
           onTabChange={setTab}
+          isHigherEd={isHigherEd}
         />
       )}
     </div>
   )
 }
 
-// ─── Per-child detail (summary + 4 tabs) ───────────────────────────────────
+// ─── Per-child detail (summary + tabs) ─────────────────────────────────────
 
-const PORTAL_TABS: PortalTab[] = ['summary', 'results', 'attendance', 'schedule', 'fees', 'announcements']
+// SESSION 60b: 'results' and 'transcript' are mutually exclusive — a
+// school runs one academic engine or the other (§3.16's single-branch-
+// point rule), so building the tab list per-render off isHigherEd is the
+// correct shape here, not a fixed array with a tab hidden/disabled. Order
+// otherwise unchanged from the pre-existing array.
+function buildPortalTabs(isHigherEd: boolean): PortalTab[] {
+  return ['summary', isHigherEd ? 'transcript' : 'results', 'attendance', 'schedule', 'fees', 'announcements']
+}
+
 const PORTAL_TAB_LABELS: Record<PortalTab, string> = {
   summary: 'Summary',
   results: 'Results',
+  transcript: 'Transcript',
   attendance: 'Attendance',
   schedule: 'Schedule',
   fees: 'Fees',
@@ -222,6 +265,7 @@ const SWIPE_COMMIT_PX = 50
 
 function ChildDetail({
   schoolId,
+  schoolName,
   child,
   session,
   terms,
@@ -229,8 +273,10 @@ function ChildDetail({
   termProgress,
   tab,
   onTabChange,
+  isHigherEd,
 }: {
   schoolId: string
+  schoolName: string
   child: PortalChild
   session: PortalSession | null
   terms: PortalTerm[]
@@ -238,7 +284,9 @@ function ChildDetail({
   termProgress: TermProgress | null
   tab: PortalTab
   onTabChange: (t: PortalTab) => void
+  isHigherEd: boolean
 }) {
+  const PORTAL_TABS = buildPortalTabs(isHigherEd)
   const activeIndex = PORTAL_TABS.indexOf(tab)
 
   // Tracks which tabs have ever been opened. A tab's panel only mounts (and
@@ -388,9 +436,11 @@ function ChildDetail({
           {PORTAL_TABS.map((t) => (
             <div className="port-tab-content" key={t} aria-hidden={tab !== t} inert={tab !== t}>
               {!visited.has(t) ? null : t === 'summary' ? (
-                <SummaryTab schoolId={schoolId} child={child} session={session} termProgress={termProgress} onSeeAll={onTabChange} />
+                <SummaryTab schoolId={schoolId} child={child} session={session} termProgress={termProgress} onSeeAll={onTabChange} isHigherEd={isHigherEd} />
               ) : t === 'results' ? (
                 <ResultsTab schoolId={schoolId} child={child} session={session} terms={terms} usesTerms={usesTerms} />
+              ) : t === 'transcript' ? (
+                <TranscriptTab schoolName={schoolName} child={child} />
               ) : t === 'attendance' ? (
                 <AttendanceTab schoolId={schoolId} child={child} session={session} />
               ) : t === 'schedule' ? (
@@ -416,12 +466,14 @@ function SummaryTab({
   session,
   termProgress,
   onSeeAll,
+  isHigherEd,
 }: {
   schoolId: string
   child: PortalChild
   session: PortalSession | null
   termProgress: TermProgress | null
   onSeeAll: (t: PortalTab) => void
+  isHigherEd: boolean
 }) {
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [attendance, setAttendance] = useState<AttendanceSummary | null>(null)
@@ -519,10 +571,17 @@ function SummaryTab({
         <span className="port-summary-card-arrow">›</span>
       </button>
 
-      <button className="port-summary-card port-summary-card--muted" onClick={() => onSeeAll('results')}>
-        <p className="port-summary-card-label">Results</p>
-        <p className="port-summary-card-context">View {child.full_name.split(' ')[0]}'s latest scores and grades →</p>
-      </button>
+      {isHigherEd ? (
+        <button className="port-summary-card port-summary-card--muted" onClick={() => onSeeAll('transcript')}>
+          <p className="port-summary-card-label">Transcript</p>
+          <p className="port-summary-card-context">View {child.full_name.split(' ')[0]}'s courses, grades, and CGPA →</p>
+        </button>
+      ) : (
+        <button className="port-summary-card port-summary-card--muted" onClick={() => onSeeAll('results')}>
+          <p className="port-summary-card-label">Results</p>
+          <p className="port-summary-card-context">View {child.full_name.split(' ')[0]}'s latest scores and grades →</p>
+        </button>
+      )}
     </div>
   )
 }
@@ -643,6 +702,160 @@ function ResultsTab({
             )}
           </div>
         ))}
+    </div>
+  )
+}
+
+// ─── Transcript tab (SESSION 60b — higher-ed replacement for Results) ─────
+//
+// Screen + PDF, course/grade/GP/CGPA only, per that session's own scope.
+// Deliberately excluded here (see SESSION 60b's card): CA/exam component
+// breakdown (depends on whether a school has configured SESSION 60a's
+// per-component weighting — showing final grade/GP only is a legitimate
+// transcript format on its own, not a placeholder) and any academic-
+// standing/status line (SESSION 61/62's own scope — CGPA is an objective
+// computed fact, standing is a policy judgment requiring human review,
+// kept as two separate concerns per standard registrar practice).
+//
+// No new computation performed anywhere in this component —
+// loadStudentTranscript() only re-displays student_gpa_snapshots/
+// course_results rows SESSION 60's finalize flow already computed and
+// cached, per §4.1's caching discipline.
+
+function TranscriptTab({
+  schoolName,
+  child,
+}: {
+  schoolName: string
+  child: PortalChild
+}) {
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [transcript, setTranscript] = useState<StudentTranscript | null>(null)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      setLoadState('loading')
+      try {
+        const { data, error } = await loadStudentTranscript(child.id)
+        if (cancelled) return
+        if (error || !data) {
+          setLoadState('error')
+          return
+        }
+        setTranscript(data)
+        setLoadState('ready')
+      } catch {
+        if (!cancelled) setLoadState('error')
+      }
+    }
+    run()
+    return () => { cancelled = true }
+  }, [child.id])
+
+  const handleDownload = () => {
+    if (!transcript) return
+    setDownloadError(null)
+    setDownloading(true)
+    try {
+      downloadTranscriptPdf({ schoolName, transcript })
+    } catch {
+      setDownloadError("Couldn't generate the PDF — try again.")
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  if (loadState === 'loading') {
+    return (
+      <>
+        <div className="port-skel-card" />
+        <div className="port-skel-card" />
+      </>
+    )
+  }
+
+  if (loadState === 'error') {
+    return <p className="port-form-error">Couldn't load the transcript — check your connection and try again.</p>
+  }
+
+  if (!transcript) return null
+
+  return (
+    <div className="port-transcript">
+      <div className="port-transcript-header">
+        <div>
+          <p className="port-transcript-student">{transcript.student_name}</p>
+          <p className="port-transcript-matric">Matric No: {transcript.matric_number ?? '—'}</p>
+        </div>
+        <button
+          className="port-transcript-download-btn"
+          onClick={handleDownload}
+          disabled={downloading}
+        >
+          <Icon name="graduation-cap" size={16} />
+          {downloading ? 'Preparing…' : 'Download PDF'}
+        </button>
+      </div>
+      {downloadError && <p className="port-form-error">{downloadError}</p>}
+
+      <div className="port-transcript-cgpa-card">
+        <p className="port-transcript-cgpa-label">Cumulative GPA (CGPA)</p>
+        <p className="port-transcript-cgpa-value">
+          {transcript.cgpa === null ? '—' : transcript.cgpa.toFixed(2)}
+        </p>
+        {transcript.cgpa !== null && (
+          <p className="port-transcript-cgpa-detail">
+            Units attempted: {transcript.cgpa_total_units_attempted ?? '—'} · Quality points:{' '}
+            {transcript.cgpa_total_quality_points?.toFixed(2) ?? '—'}
+          </p>
+        )}
+      </div>
+
+      {transcript.semesters.length === 0 && (
+        <p className="port-empty-inline">
+          No finalized courses yet. They'll appear here once your lecturer finalizes a score.
+        </p>
+      )}
+
+      {transcript.semesters.map((semester) => (
+        <div key={`${semester.session_id}|${semester.term_id ?? ''}`} className="port-transcript-semester-card">
+          <div className="port-transcript-semester-header">
+            <p className="port-transcript-semester-title">
+              {semester.term_name ? `${semester.session_name} — ${semester.term_name}` : semester.session_name}
+            </p>
+            <p className="port-transcript-semester-gpa">
+              {semester.gpa === null ? 'GPA: —' : `GPA: ${semester.gpa.toFixed(2)}`}
+            </p>
+          </div>
+          <div className="port-transcript-course-list">
+            {semester.courses.map((c) => (
+              <div
+                key={c.registration_id}
+                className={`port-transcript-course-row ${c.is_superseded ? 'port-transcript-course-row--superseded' : ''}`}
+              >
+                <div className="port-transcript-course-main">
+                  <span className="port-transcript-course-code">{c.course_code}</span>
+                  <span className="port-transcript-course-title">{c.course_title}</span>
+                </div>
+                <div className="port-transcript-course-meta">
+                  <span>{c.credit_units} units</span>
+                  {c.letter_grade && <span className="port-transcript-course-grade-pill">{c.letter_grade}</span>}
+                  {c.grade_point !== null && <span>{c.grade_point.toFixed(2)} GP</span>}
+                </div>
+                {(c.is_carryover || c.is_superseded) && (
+                  <div className="port-transcript-course-tags">
+                    {c.is_carryover && <span className="port-transcript-tag">Carryover</span>}
+                    {c.is_superseded && <span className="port-transcript-tag port-transcript-tag--superseded">Superseded</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

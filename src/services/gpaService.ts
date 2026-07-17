@@ -22,6 +22,20 @@ export interface GradeBand {
   max_score: number
   grade_label: string
   grade_point: number
+  /**
+   * Explicit, school-configured designation of whether this band counts as
+   * a passing grade. Deliberately NOT inferred from grade_point > 0 (or
+   * "lowest configured grade_point") — real institutions calibrate the
+   * pass/fail line independently of the numeric GPA weight (e.g. a D at
+   * grade_point 1.0 can be a technically-passing grade at the course level
+   * while still failing a program's own higher minimum; a school's fail
+   * band need not be the literal lowest-sorted row). See gpaService.ts's
+   * carryover-flip follow-up decision log for the worked example that
+   * caught this (0-49 band set to grade_point 0 worked; a school wanting
+   * anything below grade_point 1.0 to fail would have silently been wrong
+   * under the old inference).
+   */
+  is_passing: boolean
 }
 
 export type RollupMethod = 'weighted_all_attempts' | 'average_of_semester_gpas'
@@ -57,6 +71,8 @@ export interface ScoredAttempt extends CourseAttempt {
   gradeLabel: string
   gradePoint: number
   qualityPoints: number
+  /** Copied from the matched GradeBand.is_passing — see that field's doc. */
+  isPassing: boolean
 }
 
 export interface SemesterGpaResult {
@@ -112,6 +128,7 @@ export function scoreAttempt(attempt: CourseAttempt, bands: GradeBand[]): Scored
     gradeLabel: band.grade_label,
     gradePoint: band.grade_point,
     qualityPoints: band.grade_point * attempt.creditUnits,
+    isPassing: band.is_passing,
   }
 }
 
