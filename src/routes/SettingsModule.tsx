@@ -57,6 +57,8 @@ import {
   loadProgrammeLevels,      upsertProgrammeLevel,
   searchStudents,           loadCurrentSession,
   loadPlacementsForProgramme, upsertPlacement,
+  loadMatricNumberFormat,   saveMatricNumberFormat,
+  admitStudent,
   loadCourses,              upsertCourse,
   loadCurriculum,           addCurriculumEntry, removeCurriculumEntry,
   loadHigherEdGradeScale,   upsertHigherEdGradeBand, deleteHigherEdGradeBand,
@@ -90,6 +92,9 @@ import {
   type ProgrammeLevel,
   type StudentSearchResult,
   type StudentProgrammePlacement,
+  type MatricNumberComponent,
+  type MatricNumberFormat,
+  type AdmitStudentResult,
   type Course,
   type CurriculumEntry,
   type GradeScaleBand,
@@ -133,6 +138,12 @@ import {
   loadCourseSpecificComponents, resolveCourseResultComponents, mergeCourseResultComponents,
   type ResolvedCourseResultComponent,
 } from '../services/courseResultsService'
+// SESSION 65 (PRD Problem 8.7a, items 1/7) — a genuine, new cross-service
+// import for the same reason as courseResultsService's own above: the
+// admission flow's "create" branch needs studentsService.ts's real
+// createStudent() (school-scoped insert, friendlyError()-mapped) rather than
+// a second, duplicated insert written directly against `students` here.
+import { createStudent, type StudentUpsertParams } from '../services/studentsService'
 
 // Same fixed union as onboardingService.ts's InstitutionCategory — kept in
 // sync manually since this file doesn't import from onboardingService.ts
@@ -377,6 +388,18 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => clearTimeout(t)
   }, [value, delayMs])
   return debounced
+}
+
+// SESSION 65 — local date-string helper for the new-student admission form's
+// default admission_date, matching studentsService.ts's own todayDateString()
+// (local YYYY-MM-DD, no window/navigator dependency, React Native safe)
+// rather than importing a function this file didn't otherwise need.
+function todayDateStringSettings(): string {
+  const d = new Date()
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
 }
 
 function Skeleton({ lines = 4 }: { lines?: number }) {
@@ -2099,6 +2122,11 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
   const [showProgForm, setShowProgForm] = useState(false)
   const [editingProg, setEditingProg] = useState<Programme | null>(null)
   const [pName, setPName] = useState('')
+  // SESSION 65 — programmes.code, the schema gap closed by
+  // migration_session_65.sql; optional, used only as an available matric-
+  // number-format component, same "optional, informational" treatment
+  // faculties.code/departments.code already get in their own forms below.
+  const [pCode, setPCode] = useState('')
   const [pAwardType, setPAwardType] = useState('degree')
   const [pDeptId, setPDeptId] = useState<string | null>(null)
   const [pDuration, setPDuration] = useState(4)
@@ -2130,51 +2158,94 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
   const [lSaving, setLSaving] = useState(false)
   const [lError, setLError] = useState<string | null>(null)
 
-  // Placement form (§7.27.1a, student_programme_placements) — admits a
-  // student into a specific programme level for the school's current
-  // session. Deliberately its own small form rather than folded into the
-  // level form above: a level is created once by an admin setting up the
-  // structure, while a placement happens per-student, repeatedly, and needs
-  // its own search-driven picker (see useDebouncedValue above) rather than
-  // a static dropdown — mirrors the reasoning already used to keep this
-  // whole tab separate from ClassesTab.
+  // Admission form (§7.27.1a student_programme_placements + §12 SESSION 65
+  // matric-number generation) — SESSION 65 replaces the old "+Place student"
+  // action (search-only, hand-typed matric number, a second disconnected
+  // step from creating the student) with one real, atomic flow: search OR
+  // create the student → confirm programme/level/session → Admit, which
+  // calls admitStudent() (settingsService.ts → admit_student() RPC,
+  // migration_session_65.sql) to generate the matric number and write the
+  // placement in a single server-side transaction. Kept as its own form
+  // rather than folded into the level form above, same reasoning the old
+  // placement form already established: a level is created once by an
+  // admin setting up the structure, while an admission happens per-student,
+  // repeatedly, and needs its own search-driven picker.
   const [placementsByLevel, setPlacementsByLevel] = useState<Record<string, StudentProgrammePlacement[]>>({})
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [currentSessionName, setCurrentSessionName] = useState<string | null>(null)
+  const [currentSessionStartYear, setCurrentSessionStartYear] = useState<number | null>(null)
 
   const [showPlacementForm, setShowPlacementForm] = useState(false)
   const [placementLevelId, setPlacementLevelId] = useState<string | null>(null)
   const [placementLevelLabel, setPlacementLevelLabel] = useState('')
+  // 'search' = pick an existing student (default); 'create' = admit a
+  // brand-new student in the same flow, closing the "two disconnected
+  // manual steps" gap the card names directly.
+  const [admitMode, setAdmitMode] = useState<'search' | 'create'>('search')
   const [studentQuery, setStudentQuery] = useState('')
   const debouncedStudentQuery = useDebouncedValue(studentQuery, 300)
   const [studentResults, setStudentResults] = useState<StudentSearchResult[]>([])
   const [studentSearching, setStudentSearching] = useState(false)
   const [selectedStudent, setSelectedStudent] = useState<StudentSearchResult | null>(null)
+  // New-student mini form — deliberately minimal (name + optional gender/DOB
+  // only). Every other field on Student (address, guardians, photo, etc.)
+  // stays reachable afterward through StudentsModule's own full Edit form —
+  // this screen's job is admission, not the complete student record.
+  const [newStudentName, setNewStudentName] = useState('')
+  const [newStudentGender, setNewStudentGender] = useState('')
+  const [newStudentDob, setNewStudentDob] = useState('')
   const [plSaving, setPlSaving] = useState(false)
   const [plError, setPlError] = useState<string | null>(null)
+  const [admitResult, setAdmitResult] = useState<AdmitStudentResult | null>(null)
+
+  // ── Matric number format (§12, SESSION 65) ────────────────────────────
+  const [matricFormatId, setMatricFormatId] = useState<string | null>(null)
+  const [matricComponents, setMatricComponents] = useState<MatricNumberComponent[]>([])
+  const [matricSaving, setMatricSaving] = useState(false)
+  const [matricError, setMatricError] = useState<string | null>(null)
+  const [matricSaved, setMatricSaved] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [fRes, dRes, pRes, sessRes, cRes] = await Promise.all([
+    const [fRes, dRes, pRes, sessRes, cRes, mfRes] = await Promise.all([
       loadFaculties(schoolId),
       loadDepartments(schoolId),
       loadProgrammes(schoolId),
       loadCurrentSession(schoolId),
       loadCourses(schoolId),
+      loadMatricNumberFormat(schoolId),
     ])
     if (fRes.error) { setError(fRes.error); setLoading(false); return }
     if (dRes.error) { setError(dRes.error); setLoading(false); return }
     if (pRes.error) { setError(pRes.error); setLoading(false); return }
     if (cRes.error) { setError(cRes.error); setLoading(false); return }
-    // Current session is informational context for the placement form, not
+    // mfRes.error is deliberately not a hard blocker the way f/d/p/c are —
+    // "no format configured yet" is a normal state (loadMatricNumberFormat
+    // returns {data: null, error: null} for it, same convention
+    // loadCgpaPolicy() already established), and admitStudent() itself
+    // surfaces a clear error at admit-time if a school somehow reaches that
+    // screen with no format saved.
+    if (!mfRes.error && mfRes.data) {
+      setMatricFormatId(mfRes.data.id)
+      setMatricComponents(mfRes.data.components)
+    }
+    // Current session is informational context for the admission form, not
     // a hard blocker for the rest of the tab — a school between sessions
     // (sessRes.data null) should still be able to manage its hierarchy; it
-    // just can't admit a student into a placement until one exists, which
-    // the placement form itself gates on below.
+    // just can't admit a student until one exists, which the admission form
+    // itself gates on below.
     if (!sessRes.error && sessRes.data) {
       setCurrentSessionId(sessRes.data.id)
       setCurrentSessionName(sessRes.data.name)
+      // Admission year for the matric-number sequence's reset scope (§12
+      // decision, 2026-07-17) — derived from the current session's real
+      // start_date rather than exposed as a separate editable field, since
+      // the session is already the thing being chosen implicitly by
+      // "there is one current session" and inventing a second, independent
+      // year input would let the two disagree for no real reason.
+      const startYear = new Date(sessRes.data.start_date).getFullYear()
+      setCurrentSessionStartYear(Number.isFinite(startYear) ? startYear : null)
     }
     setFaculties(fRes.data)
     setDepartments(dRes.data)
@@ -2260,6 +2331,7 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
   function openProgForm(p?: Programme, deptId?: string) {
     setEditingProg(p ?? null)
     setPName(p?.name ?? '')
+    setPCode(p?.code ?? '')
     setPAwardType(p?.award_type ?? 'degree')
     setPDeptId(p?.department_id ?? deptId ?? null)
     setPDuration(p?.duration_sessions ?? 4)
@@ -2276,6 +2348,7 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
     const res = await upsertProgramme(schoolId, {
       id: editingProg?.id,
       name: pName,
+      code: pCode || null,
       award_type: pAwardType,
       department_id: pDeptId,
       duration_sessions: pDuration,
@@ -2348,38 +2421,140 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
   function openPlacementForm(levelId: string, levelLabel: string) {
     setPlacementLevelId(levelId)
     setPlacementLevelLabel(levelLabel)
+    setAdmitMode('search')
     setStudentQuery('')
     setStudentResults([])
     setSelectedStudent(null)
+    setNewStudentName('')
+    setNewStudentGender('')
+    setNewStudentDob('')
     setPlError(null)
+    setAdmitResult(null)
     setShowPlacementForm(true)
   }
 
-  async function handleSavePlacement() {
-    if (!selectedStudent) { setPlError('Search for and select a student first.'); return }
+  // SESSION 65 (PRD Problem 8.7a, items 1 and 7) — the one real, atomic
+  // admission flow. Branches only on whether the student already exists
+  // (search) or needs creating (create) — everything after that point
+  // (matric-number generation + placement write) is the same single
+  // admitStudent() call either way, so a newly-created student is admitted
+  // exactly as atomically as an existing one, not through a second,
+  // looser path.
+  async function handleAdmit() {
     if (!placementLevelId) { setPlError('No level selected.'); return }
-    if (!currentSessionId) {
+    if (!currentSessionId || currentSessionStartYear == null) {
       // Real, current constraint — not something to silently work around.
       // student_programme_placements.session_id is not-null (migration
-      // 55b), and there is deliberately no "no session" fallback: a
-      // placement without a session is meaningless for the history this
-      // table exists to track. If a school genuinely has no current
-      // session, that's a Sessions-tab problem to fix first, not something
-      // this form should paper over with an invented session.
-      setPlError('This school has no current session set. Set one in the Sessions tab before placing students.')
+      // 55b), and there is deliberately no "no session" fallback: an
+      // admission without a session is meaningless for the history this
+      // table exists to track, and the matric sequence's own reset scope
+      // (§12) needs a real admission year to key off. If a school
+      // genuinely has no current session, that's a Sessions-tab problem to
+      // fix first, not something this form should paper over.
+      setPlError('This school has no current session set. Set one in the Sessions tab before admitting students.')
       return
     }
+
+    let studentId: string
+    if (admitMode === 'search') {
+      if (!selectedStudent) { setPlError('Search for and select a student, or switch to "New student".'); return }
+      studentId = selectedStudent.id
+    } else {
+      if (!newStudentName.trim()) { setPlError('Enter the student\u2019s full name.'); return }
+      setPlSaving(true)
+      const createRes = await createStudent({
+        schoolId,
+        full_name: newStudentName,
+        date_of_birth: newStudentDob || null,
+        gender: newStudentGender || null,
+        class_node_id: null,        // higher-ed admission — class_node_id is secondary-only (§7.5)
+        admission_date: todayDateStringSettings(),
+        student_code: null,
+        blood_group: null, address: null, medical_notes: null,
+        emergency_contact_name: null, emergency_contact_phone: null,
+        hobbies: null, email: null, phone: null,
+      } as StudentUpsertParams)
+      if (!createRes.ok) { setPlError(createRes.error); setPlSaving(false); return }
+      studentId = createRes.data.id
+    }
+
     setPlSaving(true)
-    const res = await upsertPlacement({
-      school_id: schoolId,
-      student_id: selectedStudent.id,
-      programme_level_id: placementLevelId,
-      session_id: currentSessionId,
+    setPlError(null)
+    const res = await admitStudent({
+      schoolId,
+      studentId,
+      programmeLevelId: placementLevelId,
+      sessionId: currentSessionId,
+      admissionYear: currentSessionStartYear,
     })
-    if (res.error) { setPlError(res.error); setPlSaving(false); return }
-    setShowPlacementForm(false)
+    if (res.error || !res.data) { setPlError(res.error ?? 'Admission failed.'); setPlSaving(false); return }
+    setAdmitResult(res.data)
     await load()
     setPlSaving(false)
+  }
+
+  function closeAdmitForm() {
+    setShowPlacementForm(false)
+    setAdmitResult(null)
+  }
+
+  // ── Matric number format builder (§12, SESSION 65) ─────────────────────
+  // Fully admin-configurable, not fixed: an ordered list of components, each
+  // with its own preceding separator (see settingsService.ts's own header
+  // note on this type). Order in the array IS the display order — no
+  // separate sequence_order field, since reordering the array itself is
+  // simpler and there's nothing else that needs to reference a component by
+  // a stable position.
+  function addMatricComponent(type: MatricNumberComponent['type']) {
+    setMatricSaved(false)
+    const next: MatricNumberComponent = { type, separator: matricComponents.length > 0 ? '/' : null }
+    if (type === 'sequence') next.digits = 3
+    if (type === 'session_year') next.year_format = '2digit'
+    if (type === 'constant') next.value = ''
+    setMatricComponents([...matricComponents, next])
+  }
+
+  function updateMatricComponent(index: number, patch: Partial<MatricNumberComponent>) {
+    setMatricSaved(false)
+    setMatricComponents(matricComponents.map((c, i) => (i === index ? { ...c, ...patch } : c)))
+  }
+
+  function removeMatricComponent(index: number) {
+    setMatricSaved(false)
+    setMatricComponents(matricComponents.filter((_, i) => i !== index))
+  }
+
+  function moveMatricComponent(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= matricComponents.length) return
+    setMatricSaved(false)
+    const next = [...matricComponents]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    setMatricComponents(next)
+  }
+
+  async function handleSaveMatricFormat() {
+    if (matricComponents.length === 0) {
+      setMatricError('Add at least one component before saving.')
+      return
+    }
+    if (!matricComponents.some(c => c.type === 'sequence')) {
+      // Not a DB constraint — a real, deliberate UI-level guard: a format
+      // with no sequence component would generate the identical matric
+      // number for every student in the same programme/year, which
+      // build_matric_number() would happily do since it has no opinion on
+      // uniqueness itself (that's students.matric_number's own unique
+      // constraint, which would then reject every admission after the
+      // first with a confusing DB error instead of this clear one).
+      setMatricError('The format needs a sequence component, or every student in the same programme/year would get the same number.')
+      return
+    }
+    setMatricSaving(true)
+    setMatricError(null)
+    const res = await saveMatricNumberFormat(schoolId, matricComponents)
+    if (res.error) { setMatricError(res.error); setMatricSaving(false); return }
+    setMatricSaving(false)
+    setMatricSaved(true)
   }
 
   if (loading) return <Skeleton />
@@ -2424,6 +2599,101 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
         ))
       }
 
+      {/* Matric number format (§12, SESSION 65) — fully admin-configurable
+          per school: an ordered list of components, each with its own
+          preceding separator. build_matric_number() (migration_session_65.sql)
+          is the only place this actually gets assembled into a real number
+          — this section only defines the shape. */}
+      <div className="set-section-header">
+        <SectionLabel>Matric number format</SectionLabel>
+      </div>
+      <p className="set-hint-text">
+        Build the shape of this school's matriculation numbers from components, in order. Each component after the first has its own separator.
+      </p>
+      {matricComponents.length === 0 ? (
+        <p className="set-empty-hint">No format set up yet — add components below, then Save.</p>
+      ) : (
+        <div className="set-matric-preview">
+          <span className="set-list-row-meta">Preview shape: </span>
+          <code>{previewMatricFormat(matricComponents)}</code>
+        </div>
+      )}
+      {matricComponents.map((c, i) => (
+        <div key={i} className="set-list-row set-matric-row">
+          <div className="set-matric-row-fields">
+            {i > 0 && (
+              <input
+                type="text"
+                className="set-input set-matric-sep-input"
+                value={c.separator ?? ''}
+                onChange={e => updateMatricComponent(i, { separator: e.target.value || null })}
+                placeholder="/"
+                aria-label="Separator before this component"
+              />
+            )}
+            <span className="set-type-chip">{MATRIC_COMPONENT_LABELS[c.type]}</span>
+            {c.type === 'constant' && (
+              <input
+                type="text"
+                className="set-input set-matric-const-input"
+                value={c.value ?? ''}
+                onChange={e => updateMatricComponent(i, { value: e.target.value })}
+                placeholder="e.g. SCH"
+                aria-label="Fixed text value"
+              />
+            )}
+            {c.type === 'session_year' && (
+              <select
+                className="set-select set-select--sm"
+                value={c.year_format ?? '2digit'}
+                onChange={e => updateMatricComponent(i, { year_format: e.target.value as '2digit' | '4digit' })}
+              >
+                <option value="2digit">2 digits (e.g. 26)</option>
+                <option value="4digit">4 digits (e.g. 2026)</option>
+              </select>
+            )}
+            {c.type === 'sequence' && (
+              <span className="set-matric-digits-field">
+                <label className="set-field-label" htmlFor={`matric-digits-${i}`}>Digits</label>
+                <input
+                  id={`matric-digits-${i}`}
+                  type="number"
+                  className="set-input set-matric-digits-input"
+                  value={String(c.digits ?? 3)}
+                  onChange={e => updateMatricComponent(i, { digits: Math.max(1, Number(e.target.value) || 1) })}
+                  min={1}
+                />
+              </span>
+            )}
+          </div>
+          <div className="set-list-row-actions">
+            <button className="set-edit-btn" onClick={() => moveMatricComponent(i, -1)} disabled={i === 0}>↑</button>
+            <button className="set-edit-btn" onClick={() => moveMatricComponent(i, 1)} disabled={i === matricComponents.length - 1}>↓</button>
+            <button className="set-edit-btn" onClick={() => removeMatricComponent(i)}>Remove</button>
+          </div>
+        </div>
+      ))}
+      <div className="set-section-header">
+        <SectionLabel>Add component</SectionLabel>
+        <div className="set-add-btn-group">
+          <select
+            className="set-select set-select--sm"
+            value=""
+            onChange={e => { if (e.target.value) addMatricComponent(e.target.value as MatricNumberComponent['type']) }}
+          >
+            <option value="">Choose type…</option>
+            {(Object.keys(MATRIC_COMPONENT_LABELS) as MatricNumberComponent['type'][]).map(t => (
+              <option key={t} value={t}>{MATRIC_COMPONENT_LABELS[t]}</option>
+            ))}
+          </select>
+          <button className="set-save-btn" onClick={handleSaveMatricFormat} disabled={matricSaving}>
+            {matricSaving ? 'Saving…' : 'Save format'}
+          </button>
+        </div>
+      </div>
+      {matricError && <p className="set-form-error">{matricError}</p>}
+      {matricSaved && !matricError && <p className="set-hint-text">Saved.</p>}
+
       <div className="set-section-header">
         <SectionLabel>Programmes</SectionLabel>
         <button className="set-add-btn" onClick={() => openProgForm()} disabled={departments.length === 0}>+ Add programme</button>
@@ -2456,7 +2726,7 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
                 </div>
                 <div className="set-list-row-actions">
                   <button className="set-edit-btn" onClick={() => openLevelForm(p.id, l)}>Edit</button>
-                  <button className="set-add-sub-btn" onClick={() => openPlacementForm(l.id, l.level_label)}>+ Place student</button>
+                  <button className="set-add-sub-btn" onClick={() => openPlacementForm(l.id, l.level_label)}>+ Admit student</button>
                 </div>
               </div>
               {(placementsByLevel[l.id] ?? []).length > 0 && (
@@ -2544,6 +2814,7 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
               </select>
             </FieldRow>
             <FieldRow label="Name"><Input value={pName} onChange={setPName} placeholder="e.g. Basic Nursing Science" /></FieldRow>
+            <FieldRow label="Code (optional)"><Input value={pCode} onChange={setPCode} placeholder="e.g. NSC" /></FieldRow>
             <FieldRow label="Award type">
               <select className="set-select" value={pAwardType} onChange={e => setPAwardType(e.target.value)}>
                 {AWARD_TYPE_OPTIONS_SETTINGS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -2605,57 +2876,144 @@ function InstitutionTab({ schoolId }: { schoolId: string }) {
       )}
 
       {showPlacementForm && (
-        <div className="set-overlay" onClick={() => setShowPlacementForm(false)}>
+        <div className="set-overlay" onClick={closeAdmitForm}>
           <div className="set-sheet" onClick={e => e.stopPropagation()}>
-            <h2 className="set-sheet-title">Place student — {placementLevelLabel}</h2>
-            <p className="set-hint-text">
-              {currentSessionName
-                ? `This places the student into ${placementLevelLabel} for the current session (${currentSessionName}).`
-                : 'No current session is set for this school — set one in the Sessions tab first.'}
-            </p>
-            <FieldRow label="Student">
-              {selectedStudent ? (
-                <div className="set-list-row">
-                  <div className="set-list-row-info">
-                    <p className="set-list-row-name">{selectedStudent.full_name}</p>
-                    <p className="set-list-row-meta">{selectedStudent.matric_number ?? 'No matric number yet'}</p>
-                  </div>
-                  <button className="set-edit-btn" onClick={() => { setSelectedStudent(null); setStudentQuery('') }}>Change</button>
+            <h2 className="set-sheet-title">Admit student — {placementLevelLabel}</h2>
+
+            {admitResult ? (
+              // SESSION 65 — the whole point of this screen: a real,
+              // generated matric number, shown right after the atomic
+              // admit_student() call succeeds, not hand-typed by the admin
+              // afterward the way SESSION 55's own Done Check had to.
+              <>
+                <p className="set-hint-text">
+                  {admitResult.generated_new_number
+                    ? 'Student admitted. Matric number generated:'
+                    : 'Placement created. This student already had a matric number, so it was kept:'}
+                </p>
+                <p className="set-matric-result"><code>{admitResult.matric_number}</code></p>
+                <div className="set-sheet-footer">
+                  <button className="set-save-btn" onClick={closeAdmitForm}>Done</button>
                 </div>
-              ) : (
-                <>
-                  <input
-                    type="text"
-                    className="set-input set-search-input"
-                    placeholder="Search by name or matric number…"
-                    value={studentQuery}
-                    onChange={e => setStudentQuery(e.target.value)}
-                  />
-                  {studentSearching && <p className="set-hint-text">Searching…</p>}
-                  {!studentSearching && studentQuery.trim().length >= 2 && studentResults.length === 0 && (
-                    <p className="set-empty-hint">No students match.</p>
-                  )}
-                  {studentResults.map(s => (
-                    <div key={s.id} className="set-list-row" onClick={() => setSelectedStudent(s)} style={{ cursor: 'pointer' }}>
-                      <div className="set-list-row-info">
-                        <p className="set-list-row-name">{s.full_name}</p>
-                        <p className="set-list-row-meta">{s.matric_number ?? 'No matric number yet'}</p>
+              </>
+            ) : (
+              <>
+                <p className="set-hint-text">
+                  {currentSessionName
+                    ? `This admits the student into ${placementLevelLabel} for the current session (${currentSessionName}).`
+                    : 'No current session is set for this school — set one in the Sessions tab first.'}
+                </p>
+
+                <div className="set-tab-switcher" role="group">
+                  <button
+                    className={`set-tab-btn${admitMode === 'search' ? ' set-tab-btn--active' : ''}`}
+                    onClick={() => { setAdmitMode('search'); setPlError(null) }}
+                  >
+                    Existing student
+                  </button>
+                  <button
+                    className={`set-tab-btn${admitMode === 'create' ? ' set-tab-btn--active' : ''}`}
+                    onClick={() => { setAdmitMode('create'); setPlError(null) }}
+                  >
+                    New student
+                  </button>
+                </div>
+
+                {admitMode === 'search' ? (
+                  <FieldRow label="Student">
+                    {selectedStudent ? (
+                      <div className="set-list-row">
+                        <div className="set-list-row-info">
+                          <p className="set-list-row-name">{selectedStudent.full_name}</p>
+                          <p className="set-list-row-meta">{selectedStudent.matric_number ?? 'No matric number yet'}</p>
+                        </div>
+                        <button className="set-edit-btn" onClick={() => { setSelectedStudent(null); setStudentQuery('') }}>Change</button>
                       </div>
-                    </div>
-                  ))}
-                </>
-              )}
-            </FieldRow>
-            {plError && <p className="set-form-error">{plError}</p>}
-            <div className="set-sheet-footer">
-              <button className="set-cancel-btn" onClick={() => setShowPlacementForm(false)}>Cancel</button>
-              <button className="set-save-btn" onClick={handleSavePlacement} disabled={plSaving || !currentSessionId}>{plSaving ? 'Saving…' : 'Save'}</button>
-            </div>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          className="set-input set-search-input"
+                          placeholder="Search by name or matric number…"
+                          value={studentQuery}
+                          onChange={e => setStudentQuery(e.target.value)}
+                        />
+                        {studentSearching && <p className="set-hint-text">Searching…</p>}
+                        {!studentSearching && studentQuery.trim().length >= 2 && studentResults.length === 0 && (
+                          <p className="set-empty-hint">No students match.</p>
+                        )}
+                        {studentResults.map(s => (
+                          <div key={s.id} className="set-list-row" onClick={() => setSelectedStudent(s)} style={{ cursor: 'pointer' }}>
+                            <div className="set-list-row-info">
+                              <p className="set-list-row-name">{s.full_name}</p>
+                              <p className="set-list-row-meta">{s.matric_number ?? 'No matric number yet'}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </FieldRow>
+                ) : (
+                  <>
+                    <FieldRow label="Full name"><Input value={newStudentName} onChange={setNewStudentName} placeholder="Student's full name" /></FieldRow>
+                    <FieldRow label="Gender (optional)">
+                      <select className="set-select" value={newStudentGender} onChange={e => setNewStudentGender(e.target.value)}>
+                        <option value="">Not specified</option>
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                      </select>
+                    </FieldRow>
+                    <FieldRow label="Date of birth (optional)"><Input value={newStudentDob} onChange={setNewStudentDob} type="date" /></FieldRow>
+                    <p className="set-hint-text">Other details (address, guardians, photo, etc.) can be filled in afterward from the Students module.</p>
+                  </>
+                )}
+
+                {plError && <p className="set-form-error">{plError}</p>}
+                <div className="set-sheet-footer">
+                  <button className="set-cancel-btn" onClick={closeAdmitForm}>Cancel</button>
+                  <button className="set-save-btn" onClick={handleAdmit} disabled={plSaving || !currentSessionId}>
+                    {plSaving ? 'Admitting…' : 'Admit'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
     </div>
   )
+}
+
+// SESSION 65 — display labels for each selectable matric-number-format
+// component, and a pure client-side preview of the shape (not a real
+// generated number — that only ever happens server-side, build_matric_number(),
+// migration_session_65.sql — this just shows the admin what pattern they're
+// building, e.g. "NSC/DEPT/26/0001").
+const MATRIC_COMPONENT_LABELS: Record<MatricNumberComponent['type'], string> = {
+  programme_code: 'Programme code',
+  faculty_code: 'Faculty code',
+  department_code: 'Department code',
+  session_year: 'Admission year',
+  constant: 'Fixed text',
+  sequence: 'Sequence number',
+}
+
+function previewMatricFormat(components: MatricNumberComponent[]): string {
+  return components
+    .map((c, i) => {
+      const sep = i > 0 ? (c.separator ?? '') : ''
+      let piece = ''
+      switch (c.type) {
+        case 'programme_code': piece = 'NSC'; break
+        case 'faculty_code': piece = 'MED'; break
+        case 'department_code': piece = 'DEPT'; break
+        case 'session_year': piece = c.year_format === '4digit' ? '2026' : '26'; break
+        case 'constant': piece = c.value || '—'; break
+        case 'sequence': piece = '1'.padStart(c.digits ?? 3, '0'); break
+      }
+      return sep + piece
+    })
+    .join('')
 }
 
 const AWARD_TYPE_OPTIONS_SETTINGS = [
