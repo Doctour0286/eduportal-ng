@@ -1466,140 +1466,14 @@ export async function loadStudentCurrentPlacement(
   }
 }
 
-// ─── Matric number format engine (§7.27.1/§12, PRD SESSION 65) ────────────
-// SESSION 65 (PRD Problem 8.7a, items 1 and 7) — the format is fully
-// admin-configurable per school, not fixed to one pattern: an ordered list
-// of components, each carrying its own preceding separator, matching real
-// Nigerian institutional practice (component choice/ordering/separators all
-// genuinely differ by institution — researched before assuming otherwise,
-// §12 decision 2026-07-17). The actual generation happens server-side
-// (build_matric_number(), migration_session_65.sql) so this file only reads/
-// writes the format definition itself — it never assembles a matric number
-// client-side, which would duplicate logic the atomic admit_student()
-// function already owns.
-export type MatricNumberComponentType =
-  | 'programme_code'
-  | 'faculty_code'
-  | 'department_code'
-  | 'session_year'
-  | 'constant'
-  | 'sequence'
-
-export interface MatricNumberComponent {
-  type: MatricNumberComponentType
-  separator: string | null        // printed immediately before this component; ignored on the first component in the list
-  value?: string                  // 'constant' only — the free-text literal (e.g. a school abbreviation)
-  year_format?: '2digit' | '4digit'  // 'session_year' only
-  digits?: number                 // 'sequence' only — zero-padding width
-}
-
-export interface MatricNumberFormat {
-  id: string
-  components: MatricNumberComponent[]
-}
-
-export async function loadMatricNumberFormat(
-  schoolId: string,
-): Promise<{ data: MatricNumberFormat | null; error: string | null }> {
-  const { data, error } = await supabase
-    .from('matric_number_formats')
-    .select('id, components')
-    .eq('school_id', schoolId)
-    .maybeSingle()
-  if (error) return { data: null, error: error.message }
-  if (!data) return { data: null, error: null }  // not configured yet — a normal state, not an error, same convention loadCgpaPolicy() already established
-  return {
-    data: { id: (data as any).id, components: ((data as any).components ?? []) as MatricNumberComponent[] },
-    error: null,
-  }
-}
-
-export async function saveMatricNumberFormat(
-  schoolId: string,
-  components: MatricNumberComponent[],
-): Promise<{ error: string | null }> {
-  const { error } = await supabase
-    .from('matric_number_formats')
-    .upsert(
-      { school_id: schoolId, components, updated_at: new Date().toISOString() },
-      { onConflict: 'school_id' },
-    )
-  return { error: error?.message ?? null }
-}
-
-// ─── Admission (§7.27.1a, PRD SESSION 65) ──────────────────────────────────
-// The real, atomic admission operation this session's card exists to build —
-// replaces the previous two disconnected manual steps (create the student
-// via StudentsModule's own Add form, then separately place them via this
-// file's upsertPlacement() with a hand-typed matric number, SESSION 55's own
-// Done Check). Calls a security-definer Postgres function
-// (admit_student(), migration_session_65.sql) rather than doing the
-// counter-increment + student-update + placement-insert as three separate
-// client calls, specifically because the sequence counter must be
-// incremented atomically under concurrent admissions (§12 decision,
-// 2026-07-17) — reading-then-incrementing a counter from the client is a
-// real race two admins hitting "Admit" for the same programme/year at the
-// same moment could hit; upsertPlacement()'s own client-side
-// demote-then-insert is fine for a placement alone, but not for a value that
-// must never repeat.
-export interface AdmitStudentResult {
-  matric_number: string
-  placement_id: string
-  // false when the selected student already had a matric_number (a
-  // re-placement into a new programme/level, not a first admission) — the
-  // existing number was reused rather than a second one generated. True on
-  // a genuine first admission.
-  generated_new_number: boolean
-}
-
-export async function admitStudent(params: {
-  schoolId: string
-  studentId: string
-  programmeLevelId: string
-  sessionId: string
-  admissionYear: number
-}): Promise<{ data: AdmitStudentResult | null; error: string | null }> {
-  const { data, error } = await supabase.rpc('admit_student', {
-    p_school_id: params.schoolId,
-    p_student_id: params.studentId,
-    p_programme_level_id: params.programmeLevelId,
-    p_session_id: params.sessionId,
-    p_admission_year: params.admissionYear,
-  })
-  if (error) return { data: null, error: friendlyAdmitError(error.message) }
-  // Postgres RETURNS TABLE functions come back as an array of rows via
-  // .rpc() — exactly one row here since admit_student() either returns one
-  // row or raises.
-  const row = Array.isArray(data) ? data[0] : data
-  if (!row) return { data: null, error: 'Admission did not return a result.' }
-  return {
-    data: {
-      matric_number: row.matric_number,
-      placement_id: row.placement_id,
-      generated_new_number: row.generated_new_number,
-    },
-    error: null,
-  }
-}
-
-// Maps admit_student()'s real raised exceptions to plain-English copy,
-// matching this file's own friendlyError()-family convention rather than
-// surfacing a raw Postgres message.
-function friendlyAdmitError(message: string): string {
-  if (message.includes('No matric number format configured')) {
-    return 'This school has no matric number format set up yet. Configure one in Settings → Institution before admitting a student.'
-  }
-  if (message.includes('Not authorized')) {
-    return 'You do not have permission to admit students.'
-  }
-  if (message.includes('Programme level not found')) {
-    return 'That programme level could not be found. Refresh and try again.'
-  }
-  if (message.includes('Student not found')) {
-    return 'That student could not be found for this school. Refresh and try again.'
-  }
-  return message
-}
+// ─── Matric number format & admission ──────────────────────────────────────
+// Moved to admissionService.ts (SESSION 65 correction pass, §12 decision
+// 2026-07-17): admission is a high-frequency operational workflow, not an
+// institution-structure config concern, and sharing this file's load
+// lifecycle / permission key with faculties-departments-programmes editing
+// was a real mismatch, not just organization — see MASTER_PLAN.md §12 for
+// the full reasoning. loadMatricNumberFormat/saveMatricNumberFormat/
+// admitStudent and their types now live there.
 
 // ─── Course catalogue & curriculum (§7.27.2, PRD SESSION 56) ──────────────
 // courses is school-wide institutional metadata, scoped by school_id +

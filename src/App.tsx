@@ -33,7 +33,7 @@ import { Icon } from './components/icons'
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
 // but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
-type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance'
+type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance' | 'admission'
 
 // Intent payload — carried from dashboard quick actions into target modules.
 // Only the three intents that open a form on arrival are defined here.
@@ -57,6 +57,7 @@ import LibraryModule from './routes/LibraryModule'
 import AnnouncementsModule from './routes/AnnouncementsModule'
 import GuardianPortal from './routes/GuardianPortal'
 import SettingsModule from './routes/SettingsModule'
+import AdmissionModule from './routes/AdmissionModule'
 import CourseRegistrationModule from './routes/CourseRegistrationModule'
 import CourseAttendanceModule from './routes/CourseAttendanceModule'
 import GuardianModule from './routes/GuardianModule'
@@ -1125,7 +1126,17 @@ function TabContent({
   }
 
   if (tab === 'settings') {
-    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} schoolType={schoolType} actorRecordId={actorRecordId} />
+    return <SettingsModule schoolId={schoolId} isAdmin={isAdmin} themeMode={themeMode} schoolType={schoolType} actorRecordId={actorRecordId} onNavigate={onNavigate} />
+  }
+
+  if (tab === 'admission') {
+    // SESSION 65 §12 correction — admission moved out of Settings entirely:
+    // high-frequency operational workflow, not a rarely-touched config
+    // screen, so it gets its own route rather than a Settings sub-tab.
+    // Gated at the nav layer (MoreSheetContent, admin-or-permission-key),
+    // not re-checked here — matches course_registration/course_attendance's
+    // own precedent immediately above/below.
+    return <AdmissionModule schoolId={schoolId} />
   }
 
   if (tab === 'course_registration') {
@@ -1243,6 +1254,15 @@ function MoreSheetContent({
   // timetable/attendance/students/finance/more). isAdmin still sees it too,
   // matching every other "or isAdmin" visibility check on this menu.
   const canViewCourseAttendance = can('academics.course_attendance.mark') || isAdmin
+  // Admission (PRD Tier 8 / Problem 8.7a, SESSION 65 §12 correction) — new
+  // permission key, deliberately distinct from
+  // academics.institution_structure.manage per that decision (see this
+  // session's own comment on AdmissionModule.tsx for why reusing the
+  // institution-structure key was wrong). NOT YET in the permissions
+  // catalog — needs a real DB insert before can() will ever return true for
+  // it; until that row exists, only isAdmin unlocks this entry. See the SQL
+  // provided alongside this change.
+  const canViewAdmission = can('academics.admission.manage') || isAdmin
   // Duplicated from SettingsModule.tsx's own private (unexported) list —
   // see CourseRegistrationModule.tsx's header note on the same
   // duplication. Course registration is a higher-institution-only concept
@@ -1304,6 +1324,16 @@ function MoreSheetContent({
             <div>
               <p className="more-menu-item-label">Course Attendance</p>
               <p className="more-menu-item-desc">Mark and review per-course attendance registers</p>
+            </div>
+            <span className="more-menu-item-arrow">›</span>
+          </button>
+        )}
+        {canViewAdmission && (
+          <button className="more-menu-item" onClick={() => onNavigate('admission')}>
+            <span className="more-menu-item-icon"><Icon name="users" /></span>
+            <div>
+              <p className="more-menu-item-label">Admission</p>
+              <p className="more-menu-item-desc">Admit students, generate matric numbers, set the format</p>
             </div>
             <span className="more-menu-item-arrow">›</span>
           </button>

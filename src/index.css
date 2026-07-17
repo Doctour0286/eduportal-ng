@@ -16546,136 +16546,6 @@ body {
   line-height: 1.5;
 }
 
-/* ── Matric number format builder + admission flow (PRD SESSION 65) ────────
-   New this session — checked against the full stylesheet for selector
-   collisions before adding (zero found). Reuses existing tokens throughout
-   rather than introducing new hex values, same discipline the SESSION 58
-   .catt-* block already established for itself. */
-
-/* Each configured component row: outer shell reuses .set-list-row as-is
-   (border/radius/padding/min-height all correct for this list already);
-   only the row's *internal* field layout needed a real, new class — the
-   original draft mistakenly reused .set-list-row-info (a plain block
-   container meant for a name+meta text stack) for a row of inline form
-   controls, which would have stacked each width:100% .set-input full-width
-   instead of laying them out side by side. Caught before shipping, not
-   after. */
-.set-matric-row-fields {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.set-matric-sep-input,
-.set-matric-const-input {
-  width: 64px;
-  min-height: 36px;
-  padding: var(--space-1) var(--space-2);
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.set-matric-const-input {
-  width: 100px;
-  text-align: left;
-}
-
-.set-matric-digits-field {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-shrink: 0;
-}
-
-.set-matric-digits-field .set-field-label {
-  margin: 0;
-}
-
-.set-matric-digits-input {
-  width: 56px;
-  min-height: 36px;
-  padding: var(--space-1) var(--space-2);
-  text-align: center;
-}
-
-.set-matric-preview {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--color-neutral-100, #f3f4f6);
-  border-radius: var(--radius-md);
-  margin-bottom: var(--space-2);
-}
-
-.set-matric-preview code {
-  font-family: monospace;
-  font-size: var(--text-sm);
-  color: var(--color-text-primary);
-  font-weight: 600;
-}
-
-/* The generated-number result shown after a real admit_student() call
-   succeeds — this is the one piece of UI the whole card exists to produce,
-   so it gets its own visible treatment rather than folding into
-   .set-hint-text. */
-.set-matric-result {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-4);
-  background: var(--color-success-100, #dcfce7);
-  border: 1px solid var(--color-success-700, #15803d);
-  border-radius: var(--radius-md);
-  margin: var(--space-2) 0;
-}
-
-.set-matric-result code {
-  font-family: monospace;
-  font-size: var(--text-lg, 1.125rem);
-  font-weight: 700;
-  color: var(--color-success-700, #15803d);
-  letter-spacing: 0.02em;
-}
-
-/* Existing-student / new-student segmented toggle in the admission sheet —
-   no prior two-option segmented-control pattern existed anywhere in this
-   file to reuse (checked before adding: .set-toggle-* is a boolean on/off
-   switch, not a two-way choice), so this is a genuine new small pattern,
-   not a duplicate of one that already existed. */
-.set-tab-switcher {
-  display: flex;
-  gap: var(--space-1);
-  padding: 3px;
-  background: var(--color-neutral-100, #f3f4f6);
-  border-radius: var(--radius-md);
-  margin-bottom: var(--space-3);
-}
-
-.set-tab-btn {
-  flex: 1;
-  padding: var(--space-2) var(--space-3);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  cursor: pointer;
-  min-height: 36px;
-  transition: background 0.15s, color 0.15s;
-}
-
-.set-tab-btn--active {
-  background: var(--color-surface);
-  color: var(--color-brand-600);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
-}
-
 /* ── Print: hide settings UI ─────────────────────────────────────────────── */
 
 @media print {
@@ -18314,3 +18184,581 @@ body {
 }
 
 .reg-save-btn:disabled { opacity: 0.5; cursor: default; }
+/* ─── Admission module (adm-*) ───────────────────────────────────────────────
+   New top-level module (SESSION 65 §12 correction) — admission was moved out
+   of SettingsModule.tsx/InstitutionTab entirely, so it needs its own prefix
+   rather than reusing set-*. Structure mirrors set-*'s own list-row/sheet/
+   overlay/form conventions directly (this screen was extracted from
+   InstitutionTab, so the visual language should stay recognizable), using
+   only Phase 0 design tokens (--color-*, --space-*, --radius-*, --text-*).
+   No conflicts with stu-*, set-*, tt-*, att-*, res-*, reg-*, catt-*, port-*.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Page shell ───────────────────────────────────────────────────────────── */
+
+.adm-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom));
+}
+
+.adm-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.adm-title {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.adm-subtitle {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+
+.adm-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.adm-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.adm-section-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  margin: 0;
+  padding-top: var(--space-2);
+}
+
+.adm-add-btn-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* ── Hints / errors ───────────────────────────────────────────────────────── */
+
+.adm-hint-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.adm-empty-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+  padding: var(--space-4) 0;
+  text-align: center;
+}
+
+.adm-form-error {
+  font-size: var(--text-sm);
+  color: var(--color-danger-600, #dc2626);
+  margin: 0;
+}
+
+.adm-lock-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--color-warning-subtle, #fffbeb);
+  border: 1px solid var(--color-warning, #d97706);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.adm-lock-notice svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* ── Matric format builder ────────────────────────────────────────────────── */
+
+.adm-matric-preview {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.adm-matric-preview code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.adm-matric-result {
+  padding: var(--space-3);
+  background: var(--color-success-subtle, #ecfdf5);
+  border: 1px solid var(--color-success, #16a34a);
+  border-radius: var(--radius-md);
+  text-align: center;
+  margin: 0;
+}
+
+.adm-matric-result code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-success, #16a34a);
+}
+
+/* Composes with .adm-list-row (border/padding/radius/min-height) — this
+   override exists because, unlike a plain name/meta list row, this row's
+   content can wrap onto multiple lines (separator input + type chip +
+   type-specific control), where center-alignment looks visually off once
+   wrapped; top-alignment reads correctly in both the single-line and
+   wrapped cases. */
+.adm-matric-row {
+  align-items: flex-start;
+}
+
+/* Each matric-format row: a reordering/remove list row (adm-list-row) whose
+   info column is a wrapping field group, not the shared -info block used
+   for plain name/meta pairs elsewhere — this row can hold a separator input,
+   a type chip, and a type-specific control (constant text, year-format
+   select, or digit count) all at once. */
+.adm-matric-row-fields {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.adm-matric-sep-input {
+  width: 44px;
+  text-align: center;
+  padding-left: var(--space-1);
+  padding-right: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.adm-matric-const-input {
+  width: 120px;
+  flex: 0 0 auto;
+}
+
+.adm-matric-digits-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.adm-matric-digits-field .adm-field-label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.adm-matric-digits-input {
+  width: 56px;
+  text-align: center;
+  padding-left: var(--space-1);
+  padding-right: var(--space-1);
+}
+
+/* ── Admit panel ──────────────────────────────────────────────────────────── */
+
+.adm-admit-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.adm-admit-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.adm-panel-footer {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.adm-panel-footer .adm-save-btn {
+  flex: 1;
+  margin-left: 0;
+}
+
+.adm-tab-switcher {
+  display: flex;
+  gap: var(--space-1);
+  padding: 3px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.adm-tab-btn {
+  flex: 1;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  min-height: 36px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.adm-tab-btn--active {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+/* ── Class/level picker (mirrors set-class-node) ─────────────────────────── */
+
+.adm-class-node {
+  border-left: 2px solid var(--color-border);
+  padding-left: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.adm-class-node-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 52px;
+}
+
+.adm-class-node-info {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.adm-class-node-name {
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.adm-type-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-neutral-100, #f3f4f6);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+/* ── List rows (student search results, selected student) ───────────────── */
+
+.adm-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 60px;
+}
+
+.adm-list-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.adm-list-row-name {
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.adm-list-row-meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 2px 0 0 0;
+}
+
+.adm-list-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* ── Form primitives (FieldRow/Input/SectionLabel) ───────────────────────── */
+
+.adm-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.adm-field-label {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.adm-field-control {
+  display: flex;
+  flex-direction: column;
+}
+
+.adm-input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  box-sizing: border-box;
+  min-height: 44px;
+  transition: border-color 0.15s;
+  -webkit-appearance: none;
+}
+
+.adm-input:focus {
+  outline: none;
+  border-color: var(--color-brand-600, var(--color-primary));
+}
+
+.adm-search-input {
+  margin-bottom: var(--space-1);
+}
+
+.adm-select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  color: var(--color-text-primary);
+  background: var(--color-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding-right: var(--space-8);
+}
+
+.adm-select--sm {
+  min-height: 36px;
+  font-size: var(--text-sm);
+  padding: var(--space-1) var(--space-3);
+  padding-right: var(--space-8);
+  width: auto;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+
+.adm-save-btn {
+  padding: var(--space-2) var(--space-5);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-brand-600, var(--color-primary));
+  color: white;
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  margin-left: auto;
+  transition: opacity 0.15s;
+}
+
+.adm-save-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.adm-cancel-btn {
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.adm-edit-btn {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  min-height: 36px;
+  transition: border-color 0.15s;
+}
+
+.adm-edit-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.adm-add-sub-btn {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-brand-600, var(--color-primary));
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-brand-600, var(--color-primary));
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 32px;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.adm-retry-btn {
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 40px;
+}
+
+/* ── Overlay / confirmation sheet (soft-lock save confirm) ───────────────── */
+
+.adm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  animation: adm-fade-in 0.15s ease;
+}
+
+.adm-sheet {
+  width: 100%;
+  max-height: 80vh;
+  background: var(--color-surface);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  padding: var(--space-5) var(--space-4) calc(var(--space-5) + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  animation: adm-slide-up 0.2s ease;
+}
+
+.adm-sheet-title {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.adm-sheet-footer {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.adm-sheet-footer .adm-save-btn {
+  flex: 1;
+  margin-left: 0;
+}
+
+@keyframes adm-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes adm-slide-up {
+  from { transform: translateY(24px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+/* ── Skeleton / error states ──────────────────────────────────────────────── */
+
+.adm-skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.adm-skel-line {
+  height: 14px;
+  border-radius: 7px;
+  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+.adm-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+.adm-error-icon {
+  color: var(--color-warning, #d97706);
+}
+
+.adm-error-msg {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
