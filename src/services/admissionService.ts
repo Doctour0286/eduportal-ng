@@ -226,3 +226,587 @@ function friendlyAdmitError(message: string): string {
   }
   return message
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION 65a/65b additions — pipeline-based admissions
+// ═══════════════════════════════════════════════════════════════════════════
+// These stay in this file rather than a separate applicationService.ts:
+// applications/pipelines/stages share the exact same domain, actor, and
+// permission key (academics.admission.manage) as admitStudent() above, and
+// the same load lifecycle. Splitting them out would recreate the "one
+// concern, two places" problem this codebase's own comments call out
+// repeatedly (the is_passing gap, current_staff_id()/current_actor_id()
+// duplication) — unlike the original settingsService.ts split, which was
+// justified by a genuine permission-key/lifecycle mismatch (see this file's
+// header comment), there's no such mismatch here.
+
+// ─── Types (mirrors admission_applications / admission_pipelines /
+// admission_pipeline_stages exactly — migration_session_65a.sql) ───────────
+
+export type AdmissionStage =
+  | 'application'
+  | 'screening'
+  | 'decision'
+  | 'clearance'
+  | 'admitted'
+  | 'rejected'
+  | 'withdrawn'
+
+export type EntryMode = 'utme' | 'direct_entry'
+
+export interface AdmissionApplication {
+  id: string
+  school_id: string
+  full_name: string
+  gender: string | null
+  date_of_birth: string | null
+  phone: string | null
+  email: string | null
+  address: string | null
+  programme_id: string | null
+  entry_level_id: string | null
+  entry_mode: EntryMode
+  session_id: string
+  pipeline_id: string | null
+  jamb_registration_no: string | null
+  jamb_score: number | null
+  jamb_subjects: { subject: string; score: number }[] | null
+  olevel_sitting_1: { subject: string; grade: string; exam_body: string; exam_year: number }[] | null
+  olevel_sitting_2: { subject: string; grade: string; exam_body: string; exam_year: number }[] | null
+  de_qualification_type: string | null
+  de_institution: string | null
+  de_grade: string | null
+  custom_field_values: Record<string, unknown>
+  stage: AdmissionStage
+  screening_notes: string | null
+  screening_completed_at: string | null
+  decision: string | null
+  decision_programme_id: string | null
+  decision_level_id: string | null
+  decision_note: string | null
+  decision_at: string | null
+  clearance_completed_at: string | null
+  rejected_at: string | null
+  purge_at: string | null
+  admitted_student_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+// Stub-form input, per the agreed 65b scope: core fields only
+// (identity + programme intent + entry_mode). JAMB/O'Level/Direct-Entry
+// detail capture and admission_field_settings-driven dynamic rendering are
+// explicitly deferred to 65c — this is a noted follow-up, not an oversight.
+export interface CreateApplicationInput {
+  schoolId: string
+  fullName: string
+  gender?: string | null
+  dateOfBirth?: string | null
+  phone?: string | null
+  email?: string | null
+  address?: string | null
+  programmeId?: string | null
+  entryLevelId?: string | null
+  entryMode: EntryMode
+  sessionId: string
+}
+
+export type PipelineStageType = 'screening' | 'decision' | 'clearance'
+
+export interface AdmissionPipelineStage {
+  id: string
+  pipeline_id: string
+  stage: PipelineStageType
+  components: Record<string, boolean>
+}
+
+export interface AdmissionPipeline {
+  id: string
+  school_id: string
+  name: string
+  applies_to: { entry_mode?: EntryMode; programme_id?: string }
+  is_default: boolean
+  is_active: boolean
+  stages: AdmissionPipelineStage[]
+}
+
+// ─── Applications ───────────────────────────────────────────────────────────
+
+// Loads applications for a school, optionally filtered to one stage — the
+// tab views (Screening/Decision/Clearance/Admitted/Rejected) all use the
+// stage filter; the Applications tab calls this with stage: 'application'.
+export async function loadApplications(
+  schoolId: string,
+  stage?: AdmissionStage,
+): Promise<{ data: AdmissionApplication[]; error: string | null }> {
+  let query = supabase
+    .from('admission_applications')
+    .select('*')
+    .eq('school_id', schoolId)
+    .order('created_at', { ascending: false })
+  if (stage) query = query.eq('stage', stage)
+  const { data, error } = await query
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as AdmissionApplication[], error: null }
+}
+
+export async function loadApplication(
+  applicationId: string,
+): Promise<{ data: AdmissionApplication | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('admission_applications')
+    .select('*')
+    .eq('id', applicationId)
+    .maybeSingle()
+  if (error) return { data: null, error: error.message }
+  return { data: data as AdmissionApplication | null, error: null }
+}
+
+// Creates a new application with core fields only (stub scope, 65b). Pipeline
+// assignment is intentionally NOT done here client-side — the matching rule
+// (§4.2 of the proposal) is a server-side concern, enforced by a
+// BEFORE INSERT trigger (assign_admission_pipeline(), see
+// migration_session_65b_pipeline_assignment.sql) so the client never has to
+// duplicate or risk drifting from it. That trigger falls back to a school's
+// is_default pipeline, and to null (a valid, visible-in-UI state, not an
+// error) if the school has authored no matching or default pipeline yet —
+// e.g. mid-setup, before 65c's pipeline-authoring UI has been used. The
+// `data` this function returns reflects whatever pipeline_id the trigger
+// assigned, since the insert's .select('*') reads the row back post-trigger.
+export async function createApplication(
+  input: CreateApplicationInput,
+): Promise<{ data: AdmissionApplication | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('admission_applications')
+    .insert({
+      school_id: input.schoolId,
+      full_name: input.fullName,
+      gender: input.gender ?? null,
+      date_of_birth: input.dateOfBirth ?? null,
+      phone: input.phone ?? null,
+      email: input.email ?? null,
+      address: input.address ?? null,
+      programme_id: input.programmeId ?? null,
+      entry_level_id: input.entryLevelId ?? null,
+      entry_mode: input.entryMode,
+      session_id: input.sessionId,
+    })
+    .select('*')
+    .single()
+  if (error) return { data: null, error: error.message }
+  return { data: data as AdmissionApplication, error: null }
+}
+
+// Plain column update for the mutable, non-stage-transition fields a stage
+// screen fills in as staff work through it (e.g. screening_notes,
+// decision_programme_id/decision_level_id/decision_note before a Decision
+// stage is actually advanced). Deliberately NOT used to change `stage`
+// itself — that always goes through advanceApplication()/admitFromApplication()
+// /rejectApplication() below, since only those enforce real transition rules.
+export async function updateApplicationFields(
+  applicationId: string,
+  fields: Partial<
+    Pick<
+      AdmissionApplication,
+      | 'screening_notes'
+      | 'decision'
+      | 'decision_programme_id'
+      | 'decision_level_id'
+      | 'decision_note'
+      | 'custom_field_values'
+    >
+  >,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('admission_applications')
+    .update({ ...fields, updated_at: new Date().toISOString() })
+    .eq('id', applicationId)
+  return { error: error?.message ?? null }
+}
+
+// ─── Pipelines / stages (read side — authoring lives in 65c Settings) ──────
+
+// Loads a school's active pipelines with their stages nested, for tab-bar
+// computation: the tab set is the union of enabled stage types across every
+// active pipeline (§7 of the proposal — "union of stages actually used
+// across the school's active pipelines", not scoped to only pipelines with
+// applicants currently in them).
+export async function loadActivePipelines(
+  schoolId: string,
+): Promise<{ data: AdmissionPipeline[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('admission_pipelines')
+    .select('id, school_id, name, applies_to, is_default, is_active, admission_pipeline_stages(id, pipeline_id, stage, components)')
+    .eq('school_id', schoolId)
+    .eq('is_active', true)
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((p: any) => ({
+      id: p.id,
+      school_id: p.school_id,
+      name: p.name,
+      applies_to: p.applies_to ?? {},
+      is_default: p.is_default,
+      is_active: p.is_active,
+      stages: (p.admission_pipeline_stages ?? []) as AdmissionPipelineStage[],
+    })),
+    error: null,
+  }
+}
+
+// Derives the tab set a school's admission screen should show, from its
+// active pipelines. Always includes 'application' and the terminal
+// admitted/rejected view; screening/decision/clearance are conditional on at
+// least one active pipeline enabling that stage.
+export function computeAdmissionTabs(pipelines: AdmissionPipeline[]): PipelineStageType[] {
+  const enabled = new Set<PipelineStageType>()
+  for (const pipeline of pipelines) {
+    for (const stage of pipeline.stages) {
+      enabled.add(stage.stage)
+    }
+  }
+  const order: PipelineStageType[] = ['screening', 'decision', 'clearance']
+  return order.filter((s) => enabled.has(s))
+}
+
+// ─── Stage transitions (all real Postgres-side rules — see
+// migration_session_65a.sql §6-8) ───────────────────────────────────────────
+
+export async function advanceApplication(
+  applicationId: string,
+  targetStage: Exclude<AdmissionStage, 'admitted' | 'rejected' | 'withdrawn'>,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('advance_admission_application', {
+    p_application_id: applicationId,
+    p_target_stage: targetStage,
+  })
+  return { error: error ? friendlyAdvanceError(error.message) : null }
+}
+
+export async function admitFromApplication(
+  applicationId: string,
+): Promise<{ data: AdmitStudentResult | null; error: string | null }> {
+  const { data, error } = await supabase.rpc('admit_from_application', {
+    p_application_id: applicationId,
+  })
+  if (error) return { data: null, error: friendlyAdmitError(error.message) }
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) return { data: null, error: 'Admission did not return a result.' }
+  return {
+    data: {
+      matric_number: row.matric_number,
+      placement_id: row.placement_id,
+      generated_new_number: row.generated_new_number,
+    },
+    error: null,
+  }
+}
+
+export async function rejectApplication(
+  applicationId: string,
+  decisionNote?: string,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('reject_admission_application', {
+    p_application_id: applicationId,
+    p_decision_note: decisionNote ?? null,
+  })
+  return { error: error?.message ?? null }
+}
+
+// New in SESSION 65e: steps an application back exactly one stage (never a
+// multi-stage jump — mirrors advance_admission_application()'s own
+// one-step-at-a-time discipline). Only valid from screening/decision/
+// clearance; the DB function itself is the real gate on this, matching
+// every other stage-transition rule in this file. See
+// migration_session_65e_decision_gate_and_revert.sql for exactly which
+// fields get cleared per stage.
+export async function revertApplication(
+  applicationId: string,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('revert_admission_application', {
+    p_application_id: applicationId,
+  })
+  return { error: error ? friendlyRevertError(error.message) : null }
+}
+
+function friendlyRevertError(message: string): string {
+  if (message.includes('Not authorized')) {
+    return 'You do not have permission to revert admission applications.'
+  }
+  if (message.includes('Cannot revert an application from stage')) {
+    return message
+  }
+  return message
+}
+
+function friendlyAdvanceError(message: string): string {
+  if (message.includes('Not authorized')) {
+    return 'You do not have permission to advance admission applications.'
+  }
+  if (message.includes('already closed')) {
+    return 'This application is already closed and cannot be advanced further.'
+  }
+  if (message.includes('No further stage exists')) {
+    return 'This application has no further stage to advance to for its pipeline — admit or reject it instead.'
+  }
+  if (message.includes('Cannot advance past Decision')) {
+    return message
+  }
+  return message
+}
+
+// ─── Pipeline / stage authoring (write side — SESSION 65c, Settings) ───────
+//
+// Counterpart to loadActivePipelines() above: that function is read-only and
+// active-only, built for the operational admission screen's tab-bar
+// computation. Authoring needs the full set (including inactive pipelines,
+// so a school can review/reactivate one) and real create/update for both
+// the pipeline row and its nested stage rows — hence a separate function
+// here rather than overloading loadActivePipelines() with an "include
+// inactive" flag that its one real caller never needs.
+
+export async function loadAllPipelines(
+  schoolId: string,
+): Promise<{ data: AdmissionPipeline[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('admission_pipelines')
+    .select('id, school_id, name, applies_to, is_default, is_active, admission_pipeline_stages(id, pipeline_id, stage, components)')
+    .eq('school_id', schoolId)
+    .order('created_at', { ascending: true })
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((p: any) => ({
+      id: p.id,
+      school_id: p.school_id,
+      name: p.name,
+      applies_to: p.applies_to ?? {},
+      is_default: p.is_default,
+      is_active: p.is_active,
+      stages: (p.admission_pipeline_stages ?? []) as AdmissionPipelineStage[],
+    })),
+    error: null,
+  }
+}
+
+// Upserts the pipeline row itself (name/applies_to/is_default/is_active).
+// Stage rows are managed separately via upsertPipelineStage()/
+// deletePipelineStage() below — a pipeline can be created with zero stages
+// (valid: falls straight through to admitted/rejected for any applicant
+// matched to it, same as no-pipeline-assigned), then stages added after.
+//
+// is_default is enforced at-most-one-per-school by
+// admission_pipelines_one_default_per_school (partial unique index,
+// migration_session_65a.sql) — setting is_default: true here on a second
+// pipeline while an existing default is still active will surface that
+// constraint's error, not silently double up. Caller should offer to
+// un-default the existing one first rather than let the raw DB error reach
+// the user; see the friendly error passthrough below.
+export async function upsertPipeline(
+  schoolId: string,
+  pipeline: {
+    id?: string
+    name: string
+    applies_to: { entry_mode?: EntryMode; programme_id?: string }
+    is_default: boolean
+    is_active: boolean
+  },
+): Promise<{ data: { id: string } | null; error: string | null }> {
+  const payload = {
+    name: pipeline.name,
+    applies_to: pipeline.applies_to,
+    is_default: pipeline.is_default,
+    is_active: pipeline.is_active,
+  }
+  if (pipeline.id) {
+    const { data, error } = await supabase
+      .from('admission_pipelines')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', pipeline.id)
+      .eq('school_id', schoolId)
+      .select('id')
+      .single()
+    if (error) return { data: null, error: friendlyPipelineError(error.message) }
+    return { data, error: null }
+  }
+  const { data, error } = await supabase
+    .from('admission_pipelines')
+    .insert({ school_id: schoolId, ...payload })
+    .select('id')
+    .single()
+  if (error) return { data: null, error: friendlyPipelineError(error.message) }
+  return { data, error: null }
+}
+
+function friendlyPipelineError(message: string): string {
+  if (message.includes('admission_pipelines_one_default_per_school')) {
+    return 'Another pipeline is already set as the default for this school. Turn that one off first, or leave this one as non-default.'
+  }
+  return message
+}
+
+// One row per (pipeline, stage type) — unique(pipeline_id, stage) in the DB
+// (migration_session_65a.sql), so this is a true upsert keyed on that pair,
+// not a plain id-based one: the caller (the stage checklist UI) toggles a
+// stage on/off by presence, not by an id it tracks itself.
+//
+// components must have at least one key mapped to true — enforced by
+// admission_pipeline_stages_has_component at the DB level (see that
+// constraint's own comment for why it's a jsonb_path_exists check, not a
+// subquery). Turning a stage off entirely is deletePipelineStage() below,
+// not an update to components: {} (which the DB would reject anyway).
+export async function upsertPipelineStage(
+  pipelineId: string,
+  stage: PipelineStageType,
+  components: Record<string, boolean>,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('admission_pipeline_stages')
+    .upsert(
+      { pipeline_id: pipelineId, stage, components },
+      { onConflict: 'pipeline_id,stage' },
+    )
+  if (error) return { error: friendlyStageError(error.message) }
+  return { error: null }
+}
+
+export async function deletePipelineStage(stageId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('admission_pipeline_stages')
+    .delete()
+    .eq('id', stageId)
+  return { error: error?.message ?? null }
+}
+
+function friendlyStageError(message: string): string {
+  if (message.includes('admission_pipeline_stages_has_component')) {
+    return 'A stage needs at least one component turned on. Toggle one on, or remove the stage entirely instead.'
+  }
+  return message
+}
+
+// ─── Application field settings (SESSION 65c) ──────────────────────────────
+//
+// One row per school (unique(school_id), migration_session_65a.sql) covering
+// every configurable JAMB/O'Level/Direct-Entry field plus the school's
+// custom-field list. Identity and programme-intent fields on
+// admission_applications are always captured and are NOT represented here —
+// per that table's own comment, they're "not configurable," so there is
+// deliberately no entry for full_name/programme_id/etc. in FIELD_CONFIG_KEYS.
+export type ConfigurableField =
+  | 'jamb_registration_no' | 'jamb_score' | 'jamb_subjects'
+  | 'olevel_sitting_1' | 'olevel_sitting_2'
+  | 'de_qualification_type' | 'de_institution' | 'de_grade'
+
+export const FIELD_CONFIG_KEYS: { key: ConfigurableField; label: string }[] = [
+  { key: 'jamb_registration_no',  label: 'JAMB registration number' },
+  { key: 'jamb_score',            label: 'JAMB score' },
+  { key: 'jamb_subjects',         label: 'JAMB subjects' },
+  { key: 'olevel_sitting_1',      label: "O'Level sitting 1" },
+  { key: 'olevel_sitting_2',      label: "O'Level sitting 2" },
+  { key: 'de_qualification_type', label: 'Direct Entry qualification type' },
+  { key: 'de_institution',        label: 'Direct Entry institution' },
+  { key: 'de_grade',              label: 'Direct Entry grade' },
+]
+
+export interface AdmissionCustomField {
+  key: string
+  label: string
+  type: 'text' | 'number' | 'date' | 'select'
+  options?: string[]
+  required: boolean
+}
+
+export interface AdmissionFieldSettings {
+  id: string
+  school_id: string
+  field_config: Record<string, { enabled: boolean; required: boolean }>
+  custom_fields: AdmissionCustomField[]
+}
+
+export async function loadFieldSettings(
+  schoolId: string,
+): Promise<{ data: AdmissionFieldSettings | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('admission_field_settings')
+    .select('id, school_id, field_config, custom_fields')
+    .eq('school_id', schoolId)
+    .maybeSingle()
+  if (error) return { data: null, error: error.message }
+  return { data: data as AdmissionFieldSettings | null, error: null }
+}
+
+// Upserts on school_id (unique), not id — mirrors loadFieldSettings()'s own
+// maybeSingle() lookup by school_id; the caller never needs to track this
+// row's id separately since there is at most one per school.
+export async function saveFieldSettings(
+  schoolId: string,
+  fieldConfig: Record<string, { enabled: boolean; required: boolean }>,
+  customFields: AdmissionCustomField[],
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('admission_field_settings')
+    .upsert(
+      {
+        school_id: schoolId,
+        field_config: fieldConfig,
+        custom_fields: customFields,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'school_id' },
+    )
+  return { error: error?.message ?? null }
+}
+
+// ─── Master switch + retention window (SESSION 65c) ────────────────────────
+//
+// Both live on schools (migration_session_65a.sql §4) — admission_pipeline_
+// enabled is the "students can no longer be added directly through
+// StudentsModule.tsx" switch (§5 of the proposal), rejection_retention_days
+// is the NDPA-driven purge window (§6). Neither needed its own table; both
+// are read/written as plain columns on the existing schools row, matching
+// how SchoolSettings already works elsewhere in settingsService.ts.
+export interface AdmissionMasterSettings {
+  admission_pipeline_enabled: boolean
+  rejection_retention_days: number
+}
+
+export async function loadAdmissionMasterSettings(
+  schoolId: string,
+): Promise<{ data: AdmissionMasterSettings | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('schools')
+    .select('admission_pipeline_enabled, rejection_retention_days')
+    .eq('id', schoolId)
+    .single()
+  if (error) return { data: null, error: error.message }
+  return { data: data as AdmissionMasterSettings, error: null }
+}
+
+// Deliberately two separate setters, not one combined save: the master
+// switch needs its own explicit confirmation step in the UI (§5 of the
+// proposal — "a real confirmation step since it changes how every future
+// student gets added"), while the retention window is a plain numeric
+// setting with no such ceremony. Bundling them into one call would make it
+// easy for a future edit to slip a retention-window change through the
+// confirmation flow meant only for the switch, or vice versa.
+export async function setAdmissionPipelineEnabled(
+  schoolId: string,
+  enabled: boolean,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('schools')
+    .update({ admission_pipeline_enabled: enabled })
+    .eq('id', schoolId)
+  return { error: error?.message ?? null }
+}
+
+export async function setRejectionRetentionDays(
+  schoolId: string,
+  days: number,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('schools')
+    .update({ rejection_retention_days: days })
+    .eq('id', schoolId)
+  return { error: error?.message ?? null }
+}

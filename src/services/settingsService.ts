@@ -2434,6 +2434,15 @@ export interface CourseOffering {
   term_id: string | null
   staff_id: string | null
   staff_name: string | null
+  // SESSION 69 (§7.27.2 amendment) — which cohort this specific offering
+  // is taught to, fixed at offering-creation time. Both nullable: an
+  // offering predating this session, or a genuinely shared/university-wide
+  // offering with no single owning cohort, are both real, permanent
+  // states, not a gap to backfill. See master_plan_7_27_2_amendment_
+  // session_69.md for the full reasoning (deliberately not derived live
+  // from programme_curriculum — see that doc for why).
+  programme_id: string | null
+  programme_level_id: string | null
   attendance_eligibility_threshold_pct: number | null
 }
 
@@ -2453,7 +2462,7 @@ export async function loadCourseOfferings(
 ): Promise<{ data: CourseOffering[]; error: string | null }> {
   let q = supabase
     .from('course_offerings')
-    .select('id, course_id, session_id, term_id, staff_id, attendance_eligibility_threshold_pct, courses(code, title), staff(full_name)')
+    .select('id, course_id, session_id, term_id, staff_id, programme_id, programme_level_id, attendance_eligibility_threshold_pct, courses(code, title), staff(full_name)')
     .eq('session_id', sessionId)
 
   if (termId) q = q.eq('term_id', termId)
@@ -2471,6 +2480,8 @@ export async function loadCourseOfferings(
       term_id: o.term_id,
       staff_id: o.staff_id,
       staff_name: o.staff?.full_name ?? null,
+      programme_id: o.programme_id ?? null,
+      programme_level_id: o.programme_level_id ?? null,
       attendance_eligibility_threshold_pct: o.attendance_eligibility_threshold_pct === null ? null : Number(o.attendance_eligibility_threshold_pct),
     })),
     error: null,
@@ -2484,6 +2495,8 @@ export async function upsertCourseOffering(
     session_id: string
     term_id?: string | null
     staff_id?: string | null
+    programme_id?: string | null
+    programme_level_id?: string | null
     attendance_eligibility_threshold_pct?: number | null
   },
 ): Promise<{ error: string | null }> {
@@ -2492,6 +2505,8 @@ export async function upsertCourseOffering(
     session_id: offering.session_id,
     term_id: offering.term_id ?? null,
     staff_id: offering.staff_id ?? null,
+    programme_id: offering.programme_id ?? null,
+    programme_level_id: offering.programme_level_id ?? null,
     attendance_eligibility_threshold_pct: offering.attendance_eligibility_threshold_pct ?? null,
   }
   // No .eq('school_id', ...) — the column doesn't exist on this table.

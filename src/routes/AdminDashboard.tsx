@@ -165,8 +165,19 @@ type DashboardNavTarget = 'students' | 'finance' | 'attendance' | 'timetable' | 
 
 export default function AdminDashboard({
   onNavigate,
+  // SESSION 66: threaded from App.tsx's TabContent (same source
+  // ResultsModule/CourseAttendanceModule/SettingsModule already receive
+  // schoolType from) rather than read off useSchoolStore's `school` —
+  // that store's School type does not carry school_type (confirmed by the
+  // real tsc build error this replaces: TS2339 on school?.school_type),
+  // and schoolStore.ts wasn't available to verify adding it there would be
+  // safe/complete. Nullable because TabContent's own schoolType prop is
+  // `string | null` (school_type can genuinely be unset for a school still
+  // mid-onboarding).
+  schoolType,
 }: {
   onNavigate: (tab: DashboardNavTarget) => void
+  schoolType: string | null
 }) {
   const school = useSchoolStore((s) => s.school);
   const session = useAuthStore((s) => s.session);
@@ -209,6 +220,74 @@ export default function AdminDashboard({
     setError(null);
     try {
       const today = todayDateString();
+      // SESSION 66: this card previously always queried attendance_records
+      // regardless of school_type. A higher-ed school's real attendance
+      // lives in course_attendance_sessions/course_attendance_records (see
+      // courseAttendanceService.ts) — attendance_records is structurally
+      // never written for these schools, so the card would silently always
+      // read 0/0 rather than an honest "not applicable" or a real course-
+      // attendance figure. Branch here, the same audit-for-hidden-shared-
+      // assumptions discipline SESSION 66's own PRD card calls for, not just
+      // fixing the nav route.
+      const isHigherEd = !!schoolType &&
+        ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType);
+
+      if (isHigherEd) {
+        // Higher-ed: "today's attendance" means sessions actually held today
+        // across all course offerings, and how many of those session-records
+        // are 'present'/'late' — there is no single school-wide daily
+        // register the way a secondary school has, so totalStudents-as-
+        // denominator (used below for the secondary path) would be
+        // meaningless here; the denominator is real marked records today,
+        // not the whole student body.
+        const [
+          studentsRes,
+          staffRes,
+          todaySessionsRes,
+          pendingScoresRes,
+          pendingLeaveRes,
+        ] = await Promise.all([
+          supabase.from('students').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+          supabase.from('staff').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+          // Sessions held today across every course offering (school-scoped via RLS)
+          supabase.from('course_attendance_sessions').select('id').eq('session_date', today),
+          supabase.from('scores').select('id', { count: 'exact', head: true }).is('approved_at', null),
+          supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+        ]);
+
+        const todaySessionIds = (todaySessionsRes.data ?? []).map((s: { id: string }) => s.id);
+        let recordsToday: { status: string }[] = [];
+        if (todaySessionIds.length > 0) {
+          const { data } = await supabase
+            .from('course_attendance_records')
+            .select('status')
+            .in('course_attendance_session_id', todaySessionIds);
+          recordsToday = data ?? [];
+        }
+        const presentToday = recordsToday.filter(
+          (r) => r.status === 'present' || r.status === 'late'
+        ).length;
+
+        const { data: allPayments } = await supabase
+          .from('payments')
+          .select('amount')
+          .eq('status', 'completed');
+        const paymentsTotal = (allPayments ?? []).reduce((sum, p) => sum + parseFloat(p.amount), 0);
+
+        setStats({
+          totalStudents: studentsRes.count ?? 0,
+          totalStaff: staffRes.count ?? 0,
+          // Denominator/numerator both real course-attendance-record counts
+          // today, not total active students — see comment above.
+          todayAttendanceMarked: recordsToday.length,
+          todayAttendanceTotal: recordsToday.length,
+          todayPresentCount: presentToday,
+          sessionPaymentsTotal: paymentsTotal,
+          pendingScoreApprovals: pendingScoresRes.count ?? 0,
+          pendingLeaveRequests: pendingLeaveRes.count ?? 0,
+        });
+        return;
+      }
 
       // Run all queries in parallel — each is a simple count/sum, fast on 3G
       const [

@@ -70,6 +70,17 @@ export interface CourseOffering {
   term_id: string | null
   staff_id: string | null
   staff_name: string | null
+  // SESSION 69 follow-up (§7.27.2 amendment) — carried through so this
+  // file's CourseOffering stays structurally assignable to
+  // settingsService.ts's own CourseOffering, which courseOfferingTimetable
+  // Service.ts's loadOfferingsForLecturer() requires (it passes this
+  // file's result straight through as that type). Both nullable for the
+  // same reason they're nullable everywhere else in this family: an
+  // offering predating this amendment, or a genuinely shared/university-
+  // wide offering with no single owning cohort, are both real, permanent
+  // states, not a gap.
+  programme_id: string | null
+  programme_level_id: string | null
   attendance_eligibility_threshold_pct: number | null
 }
 
@@ -161,6 +172,7 @@ export async function loadCourseOfferingsForStaff(params: {
       .from('course_offerings')
       .select(`
         id, course_id, session_id, term_id, staff_id,
+        programme_id, programme_level_id,
         attendance_eligibility_threshold_pct,
         courses!inner ( code, title, credit_units, school_id ),
         staff ( full_name )
@@ -189,6 +201,8 @@ export async function loadCourseOfferingsForStaff(params: {
         term_id: row.term_id ?? null,
         staff_id: row.staff_id ?? null,
         staff_name: staff?.full_name ?? null,
+        programme_id: row.programme_id ?? null,
+        programme_level_id: row.programme_level_id ?? null,
         attendance_eligibility_threshold_pct: row.attendance_eligibility_threshold_pct ?? null,
       }
     })

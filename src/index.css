@@ -15860,6 +15860,56 @@ body {
   flex-shrink: 0;
 }
 
+/* ── Offerings list grouping (SESSION 69 follow-up) ─────────────────────────
+   Programme -> Level -> rows, replacing OfferingsTab's previous flat list.
+   Deliberately its own small family rather than reusing .set-section-header
+   for the group headings — those headings sit inside a scrolling list body
+   (not a tab-level header with an action button beside it), so a plainer,
+   quieter heading style fits better than borrowing a component built for a
+   different job. Row markup itself (.set-list-row and its children, above)
+   is untouched — grouping only changes what wraps each row. */
+
+.set-offerings-grouped {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.set-offerings-programme-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.set-offerings-programme-heading {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.set-offerings-level-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+}
+
+.set-offerings-level-heading {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.set-offerings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 
 .set-add-btn {
@@ -16526,6 +16576,28 @@ body {
   margin: 0;
   padding: var(--space-4) 0;
   text-align: center;
+}
+
+/* SESSION 69 — inline text-button link, e.g. "Show all courses instead"
+   inside OfferingsTab's curriculum-filter hint text. Deliberately NOT a
+   full .set-edit-btn/.set-add-btn (those are boxed, standalone actions);
+   this sits inline inside a sentence of .set-empty-hint/.set-hint-text, so
+   it needs to read as a link, not a button, while still being a real
+   <button> element for accessibility/keyboard use. */
+.set-inline-link {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-brand-600, var(--color-primary));
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.set-inline-link:hover,
+.set-inline-link:focus-visible {
+  color: var(--color-brand-700, var(--color-primary-dark));
 }
 
 /* Descriptive helper text under a field/section (left-aligned, not the
@@ -18761,4 +18833,203 @@ body {
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
   margin: 0;
+}
+/* ─── Higher-ed course-offering timetable (SESSION 68) ──────────────────
+   New tt-oe-* class family — genuinely new elements this session
+   introduces (edit-panel slot list, add/edit-slot form, read-only detail
+   popup body, and the day-column grid's own filled/empty cell variants).
+   Tokens/spacing/radius reused from this project's existing scale
+   (--space-*, --radius-lg, --shadow-sm, --color-brand-*, --color-surface,
+   --color-border, --color-text-secondary), matching the file's own stated
+   discipline of not inventing new values — no new custom properties
+   declared in this block. Generic tt-* classes (tt-root, tt-header,
+   tt-empty-state, tt-error-state, tt-selector*, tt-grid-wrapper, tt-col,
+   tt-cell, tt-cell--day-header, tt-skel-*, tt-edit-btn, tt-done-btn,
+   tt-conflict-badge) are already defined by TimetableModuleSecondary's
+   own existing stylesheet and are reused as-is by this component — not
+   redefined here. */
+
+.tt-oe-edit-panel {
+  padding: var(--space-4, 1rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 0.75rem);
+}
+
+.tt-oe-slot-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+}
+
+.tt-oe-slot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-3, 0.75rem);
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: var(--radius-lg, 0.75rem);
+}
+
+.tt-oe-slot-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 0.5rem);
+  font-size: 0.9rem;
+}
+
+.tt-oe-slot-day {
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.tt-oe-slot-time {
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.tt-oe-slot-venue {
+  color: var(--color-text-secondary, #6b7280);
+  font-style: italic;
+}
+
+.tt-oe-slot-actions {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  flex-shrink: 0;
+}
+
+.tt-oe-slot-edit-btn,
+.tt-oe-slot-delete-btn,
+.tt-oe-slot-cancel-btn,
+.tt-oe-slot-confirm-btn {
+  padding: var(--space-1, 0.25rem) var(--space-3, 0.75rem);
+  border-radius: var(--radius-md, 0.5rem);
+  font-size: 0.85rem;
+  border: 1px solid var(--color-border, #e5e7eb);
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+}
+
+.tt-oe-slot-delete-btn {
+  color: var(--color-danger-600, #dc2626);
+  border-color: var(--color-danger-200, #fecaca);
+}
+
+.tt-oe-slot-confirm-btn {
+  color: #fff;
+  background: var(--color-danger-600, #dc2626);
+  border-color: var(--color-danger-600, #dc2626);
+}
+
+.tt-oe-add-slot-btn {
+  align-self: flex-start;
+  padding: var(--space-2, 0.5rem) var(--space-4, 1rem);
+  border-radius: var(--radius-md, 0.5rem);
+  border: none;
+  background: var(--color-brand-600, #2563eb);
+  color: var(--color-brand-on, #fff);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Read-only day-column grid */
+.tt-oe-grid {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  overflow-x: auto;
+  padding: var(--space-2, 0.5rem);
+}
+
+.tt-oe-cell--empty {
+  background: transparent;
+  border: 1px dashed var(--color-border, #e5e7eb);
+  min-height: 3rem;
+}
+
+.tt-oe-cell--filled {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: var(--space-2, 0.5rem);
+  background: var(--color-brand-50, #eff6ff);
+  border: 1px solid var(--color-brand-200, #bfdbfe);
+  border-radius: var(--radius-md, 0.5rem);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.tt-oe-cell--filled:hover,
+.tt-oe-cell--filled:focus-visible {
+  filter: brightness(0.97);
+}
+
+.tt-oe-cell-code {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--color-text-primary, #111827);
+}
+
+.tt-oe-cell-time,
+.tt-oe-cell-venue {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* Add/edit slot form (inside the shared Modal) */
+.tt-oe-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 0.75rem);
+}
+
+.tt-oe-form-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 0.25rem);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.tt-oe-form-error {
+  color: var(--color-danger-600, #dc2626);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.tt-oe-form-save-btn {
+  padding: var(--space-2, 0.5rem) var(--space-4, 1rem);
+  border-radius: var(--radius-md, 0.5rem);
+  border: none;
+  background: var(--color-brand-600, #2563eb);
+  color: var(--color-brand-on, #fff);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tt-oe-form-save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Read-only detail popup body (inside the shared Modal) */
+.tt-oe-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+  font-size: 0.9rem;
+}
+
+.tt-oe-detail p {
+  margin: 0;
+}
+
+.tt-oe-detail-conflict {
+  color: var(--color-warning, #d97706);
+  font-weight: 500;
 }

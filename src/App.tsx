@@ -45,6 +45,18 @@ export interface NavIntent {
   intent?: 'add_student' | 'record_payment' | 'mark_attendance'
   guardianId?: string
 }
+
+// SESSION 66: TabContent's own copy of the same higher-institution check
+// every other module/route-branch site already duplicates locally
+// (ResultsModule.tsx, CourseAttendanceModule.tsx, CourseRegistrationModule.tsx,
+// MoreSheetContent below) — not exported/shared per those files' own
+// "worth promoting to lib/schoolType.ts, out of scope here" note. Named
+// distinctly from MoreSheetContent's local `isHigherEd` const (same function
+// body) so as not to collide with or shadow it — they're two separate scopes
+// in this same file, not one shared binding.
+function isHigherEdSchool(schoolType: string | null | undefined): boolean {
+  return !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
+}
 import AdminDashboard from './routes/AdminDashboard'
 import TeacherDashboard from './routes/TeacherDashboard'
 import TimetableModule from './routes/TimetableModule'
@@ -958,8 +970,15 @@ function TabContent({
   // ── Home / Dashboard ──────────────────────────────────────────────────
   if (tab === 'home') {
     // Admin (is_admin_role = true) and platform_admin see the full AdminDashboard.
+    // schoolType threaded in (SESSION 66 build-error fix) so AdminDashboard's
+    // today's-attendance stat card can branch by school type without relying
+    // on useSchoolStore's School type carrying school_type — it doesn't (see
+    // the tsc error this replaces), and schoolStore.ts wasn't available to
+    // confirm it's safe/complete to add there. Same prop-threading pattern
+    // already used for ResultsModule/CourseAttendanceModule/SettingsModule
+    // above, not a new shape.
     if (isAdmin) {
-      return <AdminDashboard onNavigate={onNavigate} />
+      return <AdminDashboard onNavigate={onNavigate} schoolType={schoolType} />
     }
     // Non-admin staff (teachers etc.) — TeacherDashboard built SESSION 14 (Tier 4 /
     // Problem 4.1). Scoped entirely to this teacher's own data (assigned classes,
@@ -1032,7 +1051,34 @@ function TabContent({
         />
       )
     }
-    return <TimetableModule schoolId={schoolId} schoolName={schoolName} isAdmin={isAdmin} />
+    // SESSION 68: schoolType threaded in so TimetableModule's own thin
+    // dispatcher can branch to TimetableModuleHigherEd for a higher-ed
+    // school, mirroring the 'attendance' branch's SESSION 66 precedent
+    // exactly. currentStaffId also threaded (previously omitted from this
+    // call site entirely) — TimetableModuleHigherEd needs it to resolve a
+    // non-admin lecturer's own assigned offerings; TimetableModuleSecondary
+    // already declared this prop optional and simply had it default to
+    // null before this fix (its alarm-widget feature staying off), so this
+    // is a genuine, additive fix for both branches, not new scope for
+    // either. Owner-scoped: this branch only ever renders for a staff
+    // actor (guardian/student are routed to GuardianPortal above, before
+    // reaching this line) — a real, tracked-forward gap, not silently
+    // dropped: GuardianPortal.tsx has no course-offering-timetable
+    // awareness yet, same class of gap SESSION 58's own tracked-forward
+    // list already flagged for this file generally (item 3, course
+    // attendance/eligibility). TimetableModuleHigherEd's own student-view
+    // code path (currentStudentId prop, loadOfferingsForStudent()) is
+    // fully built and typed, ready to be wired in once GuardianPortal.tsx
+    // gains a real route to it — not wasted work, just not reachable yet.
+    return (
+      <TimetableModule
+        schoolId={schoolId}
+        schoolName={schoolName}
+        isAdmin={isAdmin}
+        schoolType={schoolType}
+        currentStaffId={actorRecordId}
+      />
+    )
   }
 
   if (tab === 'attendance') {
@@ -1052,6 +1098,28 @@ function TabContent({
           schoolType={schoolType}
         />
       )
+    }
+    // SESSION 66: branch by school type at the route level, mirroring
+    // ResultsModule.tsx's own SESSION 60 dispatcher-split precedent exactly
+    // (schoolType decides which of two entirely separate modules renders;
+    // never threaded further down into either module's own tree beyond the
+    // prop each already declares). Before this fix, a higher-ed school's
+    // BottomNav "Attendance" slot always rendered the secondary-school
+    // class-attendance module regardless of school_type — CourseAttendanceModule
+    // only existed as a second, additive entry buried in the More menu
+    // (MoreSheetContent's canViewCourseAttendance button below), so a
+    // higher-ed school saw BOTH attendance systems live at once instead of
+    // exactly one. This tab is now the canonical destination for course
+    // attendance at a higher-ed school. The More-menu button is deliberately
+    // LEFT IN PLACE for now (not removed) — BottomNav.tsx wasn't available to
+    // confirm the 'attendance' slot is visible to every staff role (e.g. a
+    // non-admin lecturer), so cutting that second entry point on an
+    // inference risks a real regression. Once BottomNav.tsx confirms the
+    // slot's visibility rules, the More-menu button becomes a genuinely
+    // redundant second door to the same destination and can be removed as
+    // its own small follow-up — logged, not silently dropped.
+    if (isHigherEdSchool(schoolType)) {
+      return <CourseAttendanceModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} />
     }
     return <AttendanceModule schoolId={schoolId} isAdmin={isAdmin} intent={intent.intent} />
   }
@@ -1247,13 +1315,13 @@ function MoreSheetContent({
   const can = useAuthStore((s) => s.can)
   const canViewHR = can('hr.staff.view') || isAdmin
   const canViewGuardians = can('students.records.view') || isAdmin
-  // Course attendance (PRD Tier 8 / Problem 8.7, SESSION 58) — permission-
-  // gated like HR/Guardians above, not admin-only: a non-admin lecturer with
-  // academics.course_attendance.mark still needs to reach this from
-  // somewhere, since it's not a BottomNav slot (all five are already taken —
-  // timetable/attendance/students/finance/more). isAdmin still sees it too,
-  // matching every other "or isAdmin" visibility check on this menu.
-  const canViewCourseAttendance = can('academics.course_attendance.mark') || isAdmin
+  // SESSION 66: canViewCourseAttendance's own More-menu button (the one
+  // real call site) was removed above — the BottomNav "Attendance" tab is
+  // now the canonical destination for course attendance at a higher-ed
+  // school, confirmed on-device. The const itself is removed too rather
+  // than left dead (would fail a strict noUnusedLocals build, and a stray
+  // unused permission check is exactly the kind of drift this codebase's
+  // own history has already caught more than once).
   // Admission (PRD Tier 8 / Problem 8.7a, SESSION 65 §12 correction) — new
   // permission key, deliberately distinct from
   // academics.institution_structure.manage per that decision (see this
@@ -1318,16 +1386,15 @@ function MoreSheetContent({
             <span className="more-menu-item-arrow">›</span>
           </button>
         )}
-        {isHigherEd && canViewCourseAttendance && (
-          <button className="more-menu-item" onClick={() => onNavigate('course_attendance')}>
-            <span className="more-menu-item-icon"><Icon name="clipboard-list" /></span>
-            <div>
-              <p className="more-menu-item-label">Course Attendance</p>
-              <p className="more-menu-item-desc">Mark and review per-course attendance registers</p>
-            </div>
-            <span className="more-menu-item-arrow">›</span>
-          </button>
-        )}
+        {/* SESSION 66: Course Attendance button removed from here — the
+            BottomNav "Attendance" tab now branches by school_type
+            (App.tsx's TabContent) and is the canonical destination for a
+            higher-ed school. Confirmed safe to remove this second door:
+            BottomNav.tsx shows 'attendance' is only guardianHidden, not
+            staffOnly or permission-gated, so every staff role (including a
+            non-admin lecturer) already reaches the tab directly — nothing
+            was reachable here that isn't reachable via the tab. Owner
+            confirmed on-device 2026-07-18. */}
         {canViewAdmission && (
           <button className="more-menu-item" onClick={() => onNavigate('admission')}>
             <span className="more-menu-item-icon"><Icon name="users" /></span>

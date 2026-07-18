@@ -331,21 +331,27 @@ function RegistrationStep({ schoolId, student, onBack }: {
         </p>
       </div>
 
+      {/* SESSION 67 follow-up: "Semester" not "Term" — this module only
+          ever renders for a higher-ed school (gated by
+          isHigherInstitutionSchoolType at the very top of this
+          component), so no branching is needed here, just the same
+          straight wording fix already applied to SettingsModule.tsx's
+          CurriculumTab/OfferingsTab. */}
       {terms.length > 0 && (
-        <FieldRow label="Term">
+        <FieldRow label="Semester">
           <select
             className="reg-select"
             value={selectedTermId ?? ''}
             onChange={e => setSelectedTermId(e.target.value || null)}
           >
-            <option value="">Choose a term</option>
+            <option value="">Choose a semester</option>
             {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </FieldRow>
       )}
 
       {!readyToShowCurriculum && (
-        <p className="reg-empty-hint">Choose a term to build this student's registration.</p>
+        <p className="reg-empty-hint">Choose a semester to build this student's registration.</p>
       )}
 
       {readyToShowCurriculum && curriculumLoading && <p className="reg-hint-text">Loading curriculum…</p>}
@@ -353,7 +359,7 @@ function RegistrationStep({ schoolId, student, onBack }: {
       {readyToShowCurriculum && !curriculumLoading && curriculum.length === 0 && carryover.length === 0 && (
         <p className="reg-empty-hint">
           No curriculum defined yet for {placement.programme_name} / Level {placement.level_label}
-          {terms.length > 0 ? ' for this term' : ''} — define it in the Curriculum tab first.
+          {terms.length > 0 ? ' for this semester' : ''} — define it in the Curriculum tab first.
         </p>
       )}
 

@@ -1,662 +1,914 @@
 /**
  * AdmissionModule.tsx
- * Student admission — matric-number format setup + the one real, atomic
- * admission flow (PRD Tier 8 / Problem 8.7a, SESSION 65; relocated out of
- * SettingsModule.tsx/InstitutionTab in the same session's correction pass,
- * §12 decision 2026-07-17).
+ * Student admission — pipeline-based application intake and stage progression
+ * (PRD Tier 8 / Problem 8.7a, SESSION 65a/65b — rebuild of SESSION 65's
+ * original single-screen admit flow, owner walkthrough 2026-07-17,
+ * MASTER_PLAN.md §12 "SESSION 65a" rows).
  *
- * Why this is its own top-level module, not a Settings tab: admission is a
- * high-frequency operational workflow, potentially exercised by several
- * staff during a real admission period, not a rarely-touched config screen.
- * Three concrete problems the old placement created (not just tidiness) are
- * recorded in MASTER_PLAN.md §12 — permission-key mismatch with
- * institution-structure edits, load-lifecycle collision with Settings'
- * load-once-and-idle pattern, and discoverability (an admin digging through
- * Settings during an admission rush is bad information architecture).
+ * What this replaces and why: SESSION 65 shipped a single screen that
+ * created a real `students` row at the moment of admission — via a
+ * search-existing-or-create-new-student step — then attached a matric
+ * number and placement to it directly. Two owner-reported defects traced
+ * straight back to that shape: matric numbers generating before a programme
+ * was actually settled, and a cramped single-screen UI with no room for
+ * screening/decision/clearance steps schools actually run in practice. This
+ * file's rebuild moves the real "does this person become a student" decision
+ * to admit_from_application() (migration_session_65a.sql) and makes this
+ * screen a pipeline: Applications → Screening → Decision → Clearance →
+ * Admitted/Rejected, with tabs shown only for stages the school's active
+ * pipelines actually use (§7 of the redesign proposal — "union of stages
+ * actually used across the school's active pipelines").
  *
- * NOT YET WIRED: this file has no route/nav entry yet — App.tsx was not
- * available when this file was built (not uploaded to this session), so the
- * actual `<Route>`/nav-item addition and this module's real permission key
- * (deliberately NOT reusing academics.institution_structure.manage, per the
- * §12 decision) still need to be added there. See the bottom of this file's
- * header comment continuation, "WIRING NEEDED", for the exact touch points.
+ * What moved OUT of this file:
+ *   - The search-or-create-student step and its New Student sub-form — gone
+ *     entirely. A real students row is only ever created by
+ *     admit_from_application(), never picked/typed here.
+ *   - The inline matric-number-format editor — relocated to Settings.
+ *     SESSION 65c has since built the Admission Settings tab (pipelines,
+ *     field settings, matric format, retention window) — this file still
+ *     calls admitStudent()'s sibling admitFromApplication(), which needs a
+ *     format to already exist; if a school has none, the RPC's own
+ *     friendly error surfaces here at the point of admitting, same
+ *     convention as before.
  *
- * Props: { schoolId } — same minimal shape InstitutionTab already used for
- * this same data; no isAdmin prop consumed directly, matching this
- * codebase's Session-10-era convention of gating via useAuthStore's can()
- * inside the component rather than a boolean prop (see WIRING NEEDED below
- * for the permission key this needs once added to the catalog).
+ * What this turn (65b) deliberately stubbed, per the agreed scope: the new
+ * application intake form (Applications tab) still captures only core
+ * fields — identity + programme intent + entry_mode. SESSION 65c built the
+ * *authoring* side (admission_field_settings: which JAMB/O'Level/
+ * Direct-Entry fields are enabled/required, plus custom fields), but this
+ * form was never wired to actually read that config and render the
+ * dynamic fields. That consumer-side wiring is still a real, open gap —
+ * not closed by 65c, and not silently forgotten either.
  *
- * CSS prefix: adm-* (new — every existing top-level module already has its
- * own short prefix: stu-/set-/reg-/port-/etc.; adm- was unused, confirmed by
- * grep across index.css before choosing it).
+ * Pipeline assignment on application creation, previously flagged here as
+ * an unbuilt gap, is now closed: migration_session_65b_pipeline_assignment.sql
+ * adds assign_admission_pipeline(), a BEFORE INSERT trigger on
+ * admission_applications, so pipeline_id is set server-side per §4.2's
+ * applies_to matching rule the moment an application is created — the
+ * client never computes or duplicates that rule (see admissionService.ts's
+ * createApplication() comment for the trigger's exact matching/fallback
+ * order). pipeline_id can still legitimately be null — a school that has
+ * authored no pipelines yet, or none that match and none marked default —
+ * and that remains a visible, handled UI state (see the empty-pipeline
+ * notice on stage tabs below), not an error.
  *
- * WIRING NEEDED (left for the session that has App.tsx):
- *   1. Add a permission key (e.g. academics.admission.manage) to the
- *      permissions catalog, distinct from academics.institution_structure.manage
- *      — this is the entire point of the §12 correction; do not reuse the
- *      institution-structure key here.
- *   2. Add a route + nav entry for this module (alongside Students, not
- *      inside Settings).
- *   3. Gate this component's render behind that new key via useAuthStore's
- *      can(), the same pattern StudentsModule.tsx/CourseRegistrationModule.tsx
- *      already use — not yet added here since the permission key itself
- *      doesn't exist in the catalog yet.
- *   4. If a level→admission deep link is wanted (InstitutionTab's own
- *      "+ Admit student" button per programme level now navigates here, see
- *      that file's own updated button), thread an optional
- *      `initialProgrammeLevelId`/`initialLevelLabel` prop through from
- *      whatever navigation mechanism App.tsx uses (NavIntent-style, matching
- *      StudentsModule.tsx's own `intent` prop convention) so the picker below
- *      can pre-select instead of the admin re-choosing a level they already
- *      picked once in Settings.
+ * Nav entry, route, and permission key (academics.admission.manage) are
+ * already wired in App.tsx from SESSION 65 — unchanged by this rebuild, per
+ * the PRD's own scope note that only this module's internal content is
+ * rebuilt.
+ *
+ * CSS prefix: adm-* (existing, SESSION 65). Reuses adm-tab-switcher/
+ * adm-tab-btn (previously the search/create toggle) for the new top-level
+ * tab bar, and adm-section/adm-list-row/adm-empty-hint/adm-hint-text etc.
+ * throughout — no new prefix introduced.
+ * SESSION 65e (owner audit, 2026-07-18) — three real gaps found and closed:
+ *   1. Every component a school could enable in Admission Settings
+ *      (screening: document_review/jamb_verification/olevel_verification/
+ *      interview/aptitude_test; decision: committee_review/
+ *      programme_confirmation; clearance: fee_payment/medical_clearance/
+ *      document_submission) is now actually rendered here — previously
+ *      only a notes box (screening) and two decision fields were wired,
+ *      and one of those two was checked under the WRONG key
+ *      ('programme_override', which has never existed in
+ *      SettingsModule.tsx's real component vocabulary — the correct key is
+ *      'programme_confirmation'), so it silently never rendered even when
+ *      enabled. Checklist-only components (no dedicated column) persist
+ *      into custom_field_values._admission_checklist, since the schema
+ *      reserves real columns for screening_notes, the decision_ fields,
+ *      and clearance_completed_at — not one column per checklist item.
+ *   2. A real, on-device deadlock is now closed: an application could
+ *      reach Clearance with no programme/level ever set, correctly fail
+ *      admission there, and then have no way forward OR backward.
+ *      migration_session_65e_decision_gate_and_revert.sql adds a hard DB
+ *      block on leaving Decision without a resolvable programme/level, and
+ *      a new revert_admission_application() RPC that steps an application
+ *      back exactly one stage (owner decision: one step at a time, not an
+ *      arbitrary jump). The "Move back" button here is shown only
+ *      contextually — when stuck at Decision with no programme/level, or
+ *      at Clearance with an unfinished checklist item — not as a general
+ *      always-available control.
+ *   3. This module previously had no awareness of the admission_pipeline_
+ *      enabled master switch at all — turning it off in Settings did
+ *      nothing here, even though the DB-side direct-add lock (students
+ *      table trigger) already correctly reacted to it. This screen now
+ *      reads that switch and renders blank with a note when off, instead
+ *      of staying fully live and usable while direct student-add is
+ *      simultaneously blocked elsewhere.
+ * A fourth, larger item was raised in the same audit — an admission
+ * scheduler/window concept (blur tabs when the switch is on but no
+ * admission period is currently active, optionally per-stage) — and was
+ * deliberately NOT built here; it's real net-new schema+UI, logged as its
+ * own follow-up session rather than folded into this pass.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Icon } from '../components/icons'
 import {
-  loadFaculties,
-  loadDepartments,
   loadProgrammes,
   loadProgrammeLevels,
   loadCurrentSession,
-  searchStudents,
-  loadPlacementsForProgramme,
-  type Department,
   type Programme,
   type ProgrammeLevel,
-  type StudentSearchResult,
-  type StudentProgrammePlacement,
 } from '../services/settingsService'
 import {
-  loadMatricNumberFormat,
-  saveMatricNumberFormat,
-  hasAnyMatricAdmissions,
-  admitStudent,
-  type MatricNumberComponent,
+  loadApplications,
+  createApplication,
+  updateApplicationFields,
+  loadActivePipelines,
+  computeAdmissionTabs,
+  advanceApplication,
+  revertApplication,
+  admitFromApplication,
+  rejectApplication,
+  loadAdmissionMasterSettings,
+  type AdmissionApplication,
+  type AdmissionPipeline,
+  type PipelineStageType,
+  type EntryMode,
   type AdmitStudentResult,
 } from '../services/admissionService'
-import { createStudent, type StudentUpsertParams } from '../services/studentsService'
 
 export interface AdmissionModuleProps {
   schoolId: string
-  // See header's WIRING NEEDED item 4 — optional deep-link from
-  // InstitutionTab's level rows, wired once App.tsx's navigation mechanism
-  // is known.
-  initialProgrammeLevelId?: string
-  initialLevelLabel?: string
 }
 
-export default function AdmissionModule({ schoolId, initialProgrammeLevelId, initialLevelLabel }: AdmissionModuleProps) {
+type TopTab = 'application' | PipelineStageType | 'closed'
+
+export default function AdmissionModule({ schoolId }: AdmissionModuleProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-
-  const [departments, setDepartments] = useState<Department[]>([])
   const [programmes, setProgrammes] = useState<Programme[]>([])
   const [levelsByProgramme, setLevelsByProgramme] = useState<Record<string, ProgrammeLevel[]>>({})
-  const [placementsByLevel, setPlacementsByLevel] = useState<Record<string, StudentProgrammePlacement[]>>({})
-
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [currentSessionName, setCurrentSessionName] = useState<string | null>(null)
-  const [currentSessionStartYear, setCurrentSessionStartYear] = useState<number | null>(null)
 
-  // ── Matric number format (§12, SESSION 65 + correction pass) ───────────
-  const [matricComponents, setMatricComponents] = useState<MatricNumberComponent[]>([])
-  const [matricSaving, setMatricSaving] = useState(false)
-  const [matricError, setMatricError] = useState<string | null>(null)
-  const [matricSaved, setMatricSaved] = useState(false)
-  // Soft-lock (§12 correction, 2026-07-17): true once any student has
-  // genuinely been admitted under this school's format. Does not block
-  // saving — Save always works — it only changes the copy shown so an
-  // admin understands the consequence before confirming, matching the
-  // decision's own "not blocked outright, just no longer casual" framing.
-  const [hasRealAdmissions, setHasRealAdmissions] = useState(false)
-  const [showLockConfirm, setShowLockConfirm] = useState(false)
+  const [pipelines, setPipelines] = useState<AdmissionPipeline[]>([])
+  const stageTabs = useMemo(() => computeAdmissionTabs(pipelines), [pipelines])
+  const [pipelineEnabled, setPipelineEnabled] = useState(false)
 
-  // ── Programme/level picker for the active admission ─────────────────────
-  const [pickedLevelId, setPickedLevelId] = useState<string | null>(initialProgrammeLevelId ?? null)
-  const [pickedLevelLabel, setPickedLevelLabel] = useState(initialLevelLabel ?? '')
+  const [activeTab, setActiveTab] = useState<TopTab>('application')
 
-  // ── Admit form ────────────────────────────────────────────────────────
-  const [admitMode, setAdmitMode] = useState<'search' | 'create'>('search')
-  const [studentQuery, setStudentQuery] = useState('')
-  const debouncedStudentQuery = useDebouncedValue(studentQuery, 300)
-  const [studentResults, setStudentResults] = useState<StudentSearchResult[]>([])
-  const [studentSearching, setStudentSearching] = useState(false)
-  const [selectedStudent, setSelectedStudent] = useState<StudentSearchResult | null>(null)
-  const [newStudentName, setNewStudentName] = useState('')
-  const [newStudentGender, setNewStudentGender] = useState('')
-  const [newStudentDob, setNewStudentDob] = useState('')
-  const [plSaving, setPlSaving] = useState(false)
-  const [plError, setPlError] = useState<string | null>(null)
-  const [admitResult, setAdmitResult] = useState<AdmitStudentResult | null>(null)
+  // Applications loaded per-tab, refetched on tab switch and after any
+  // mutating action, rather than one big cross-stage load — each tab's list
+  // is genuinely a different stage filter and can be sizeable during a real
+  // admission period.
+  const [applications, setApplications] = useState<AdmissionApplication[]>([])
+  const [listLoading, setListLoading] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [fRes, dRes, pRes, sessRes, mfRes, lockRes] = await Promise.all([
-      loadFaculties(schoolId),
-      loadDepartments(schoolId),
+    const [pRes, sessRes, pipeRes, masterRes] = await Promise.all([
       loadProgrammes(schoolId),
       loadCurrentSession(schoolId),
-      loadMatricNumberFormat(schoolId),
-      hasAnyMatricAdmissions(schoolId),
+      loadActivePipelines(schoolId),
+      loadAdmissionMasterSettings(schoolId),
     ])
-    if (fRes.error) { setError(fRes.error); setLoading(false); return }
-    if (dRes.error) { setError(dRes.error); setLoading(false); return }
     if (pRes.error) { setError(pRes.error); setLoading(false); return }
-    // mfRes.error is deliberately not a hard blocker — "no format configured
-    // yet" is a normal state (same convention loadCgpaPolicy() established),
-    // and admitStudent() itself surfaces a clear error at admit-time if a
-    // school somehow reaches this screen with no format saved.
-    if (!mfRes.error && mfRes.data) {
-      setMatricComponents(mfRes.data.components)
-    }
-    if (!lockRes.error) {
-      setHasRealAdmissions(lockRes.data)
-    }
-    if (!sessRes.error && sessRes.data) {
-      setCurrentSessionId(sessRes.data.id)
-      setCurrentSessionName(sessRes.data.name)
-      // Admission year for the matric-number sequence's reset scope (§12
-      // decision, 2026-07-17) — derived from the current session's real
-      // start_date, same as the original SESSION 65 design.
-      const startYear = new Date(sessRes.data.start_date).getFullYear()
-      setCurrentSessionStartYear(Number.isFinite(startYear) ? startYear : null)
-    }
-    setDepartments(dRes.data)
+    if (pipeRes.error) { setError(pipeRes.error); setLoading(false); return }
     setProgrammes(pRes.data)
     const levelEntries = await Promise.all(
       pRes.data.map(async (prog) => [prog.id, (await loadProgrammeLevels(prog.id)).data] as const),
     )
     setLevelsByProgramme(Object.fromEntries(levelEntries))
-    const allLevelIds = Object.values(Object.fromEntries(levelEntries)).flat().map(l => l.id)
-    if (allLevelIds.length > 0) {
-      const placementEntries = await Promise.all(
-        allLevelIds.map(async (levelId) => [levelId, (await loadPlacementsForProgramme(levelId)).data] as const),
-      )
-      setPlacementsByLevel(Object.fromEntries(placementEntries))
+    if (!sessRes.error && sessRes.data) {
+      setCurrentSessionId(sessRes.data.id)
+      setCurrentSessionName(sessRes.data.name)
     }
+    setPipelines(pipeRes.data)
+    // Master-switch read failing outright (e.g. a permissions edge case) is
+    // treated as "not enabled" rather than blocking the whole screen on a
+    // secondary read — the switch is a display/gate concern here, not the
+    // page's core data.
+    setPipelineEnabled(!masterRes.error && (masterRes.data?.admission_pipeline_enabled ?? false))
     setLoading(false)
   }, [schoolId])
 
   useEffect(() => { load() }, [load])
 
-  // Debounced student search — only fires once the query settles, and only
-  // against this school's own students (searchStudents scopes by schoolId
-  // itself).
-  useEffect(() => {
-    if (!debouncedStudentQuery || debouncedStudentQuery.trim().length < 2) {
-      setStudentResults([])
-      return
-    }
-    let cancelled = false
-    setStudentSearching(true)
-    searchStudents(schoolId, debouncedStudentQuery).then(res => {
-      if (cancelled) return
-      setStudentResults(res.error ? [] : res.data)
-      setStudentSearching(false)
-    })
-    return () => { cancelled = true }
-  }, [schoolId, debouncedStudentQuery])
+  const loadList = useCallback(async () => {
+    setListLoading(true)
+    setListError(null)
+    const stage = activeTab === 'application' ? 'application' : activeTab === 'closed' ? undefined : activeTab
+    const res = await loadApplications(schoolId, stage as any)
+    if (res.error) { setListError(res.error); setListLoading(false); return }
+    const rows = activeTab === 'closed'
+      ? res.data.filter(a => a.stage === 'admitted' || a.stage === 'rejected')
+      : res.data
+    setApplications(rows)
+    setListLoading(false)
+  }, [schoolId, activeTab])
 
-  function pickLevel(levelId: string, levelLabel: string) {
-    setPickedLevelId(levelId)
-    setPickedLevelLabel(levelLabel)
-    setAdmitMode('search')
-    setStudentQuery('')
-    setStudentResults([])
-    setSelectedStudent(null)
-    setNewStudentName('')
-    setNewStudentGender('')
-    setNewStudentDob('')
-    setPlError(null)
-    setAdmitResult(null)
+  useEffect(() => { if (!loading) loadList() }, [loading, loadList])
+
+  function refreshAfterAction() {
+    loadList()
   }
 
-  function clearPickedLevel() {
-    setPickedProgrammeId(null)
-    setPickedLevelId(null)
-    setPickedLevelLabel('')
-    setAdmitResult(null)
+  if (loading) {
+    return (
+      <div className="adm-module">
+        <h1 className="adm-page-title">Admission</h1>
+        <Skeleton lines={6} />
+      </div>
+    )
   }
 
-  // SESSION 65 (PRD Problem 8.7a, items 1 and 7) — the one real, atomic
-  // admission flow. Branches only on whether the student already exists
-  // (search) or needs creating (create) — everything after that point
-  // (matric-number generation + placement write) is the same single
-  // admitStudent() call either way.
-  async function handleAdmit() {
-    if (!pickedLevelId) { setPlError('Choose a programme level first.'); return }
-    if (!currentSessionId || currentSessionStartYear == null) {
-      // Real, current constraint, not something to silently work around —
-      // see settingsService.ts's original SESSION 65 note on why there is
-      // deliberately no "no session" fallback here.
-      setPlError('This school has no current session set. Set one in the Sessions tab before admitting students.')
-      return
-    }
-
-    let studentId: string
-    if (admitMode === 'search') {
-      if (!selectedStudent) { setPlError('Search for and select a student, or switch to "New student".'); return }
-      studentId = selectedStudent.id
-    } else {
-      if (!newStudentName.trim()) { setPlError('Enter the student\u2019s full name.'); return }
-      setPlSaving(true)
-      const createRes = await createStudent({
-        schoolId,
-        full_name: newStudentName,
-        date_of_birth: newStudentDob || null,
-        gender: newStudentGender || null,
-        class_node_id: null,        // higher-ed admission — class_node_id is secondary-only (§7.5)
-        admission_date: todayDateStringAdmission(),
-        student_code: null,
-        blood_group: null, address: null, medical_notes: null,
-        emergency_contact_name: null, emergency_contact_phone: null,
-        hobbies: null, email: null, phone: null,
-      } as StudentUpsertParams)
-      if (!createRes.ok) { setPlError(createRes.error); setPlSaving(false); return }
-      studentId = createRes.data.id
-    }
-
-    setPlSaving(true)
-    setPlError(null)
-    const res = await admitStudent({
-      schoolId,
-      studentId,
-      programmeLevelId: pickedLevelId,
-      sessionId: currentSessionId,
-      admissionYear: currentSessionStartYear,
-    })
-    if (res.error || !res.data) { setPlError(res.error ?? 'Admission failed.'); setPlSaving(false); return }
-    setAdmitResult(res.data)
-    await load()
-    setPlSaving(false)
+  if (error) {
+    return (
+      <div className="adm-module">
+        <h1 className="adm-page-title">Admission</h1>
+        <ErrorState message={error} onRetry={load} />
+      </div>
+    )
   }
 
-  // ── Matric number format builder (§12, SESSION 65 + correction pass) ───
-  function addMatricComponent(type: MatricNumberComponent['type']) {
-    setMatricSaved(false)
-    const next: MatricNumberComponent = { type, separator: matricComponents.length > 0 ? '/' : null }
-    if (type === 'sequence') next.digits = 3
-    if (type === 'session_year') next.year_format = '2digit'
-    if (type === 'constant') next.value = ''
-    setMatricComponents([...matricComponents, next])
-  }
-
-  function updateMatricComponent(index: number, patch: Partial<MatricNumberComponent>) {
-    setMatricSaved(false)
-    setMatricComponents(matricComponents.map((c, i) => (i === index ? { ...c, ...patch } : c)))
-  }
-
-  function removeMatricComponent(index: number) {
-    setMatricSaved(false)
-    setMatricComponents(matricComponents.filter((_, i) => i !== index))
-  }
-
-  function moveMatricComponent(index: number, direction: -1 | 1) {
-    const target = index + direction
-    if (target < 0 || target >= matricComponents.length) return
-    setMatricSaved(false)
-    const next = [...matricComponents]
-    ;[next[index], next[target]] = [next[target], next[index]]
-    setMatricComponents(next)
-  }
-
-  function requestSaveMatricFormat() {
-    if (matricComponents.length === 0) {
-      setMatricError('Add at least one component before saving.')
-      return
-    }
-    if (!matricComponents.some(c => c.type === 'sequence')) {
-      // Not a DB constraint — a real, deliberate UI-level guard: a format
-      // with no sequence component would generate the identical matric
-      // number for every student in the same programme/year.
-      setMatricError('The format needs a sequence component, or every student in the same programme/year would get the same number.')
-      return
-    }
-    setMatricError(null)
-    // Soft-lock (§12 correction, 2026-07-17): once real admissions exist,
-    // saving must go through an explicit confirm step rather than a plain
-    // click — the confirm dialog names the real consequence
-    // (matric_number_formats is now versioned, so past students keep their
-    // already-generated numbers; only future admissions use the new shape).
-    if (hasRealAdmissions) {
-      setShowLockConfirm(true)
-      return
-    }
-    void handleSaveMatricFormat()
-  }
-
-  async function handleSaveMatricFormat() {
-    setShowLockConfirm(false)
-    setMatricSaving(true)
-    setMatricError(null)
-    const res = await saveMatricNumberFormat(schoolId, matricComponents)
-    if (res.error) { setMatricError(res.error); setMatricSaving(false); return }
-    setMatricSaving(false)
-    setMatricSaved(true)
-    // A new version is now active — re-check the lock state (harmless if it
-    // was already true; guards against a same-session double-save race
-    // where the first save is what actually created the "real admissions"
-    // condition, which cannot happen here since saving a format doesn't
-    // admit anyone, but kept consistent with load()'s own re-fetch pattern
-    // rather than assumed unchanged).
-    const lockRes = await hasAnyMatricAdmissions(schoolId)
-    if (!lockRes.error) setHasRealAdmissions(lockRes.data)
-  }
-
-  if (loading) return <Skeleton />
-  if (error) return <ErrorState message={error} onRetry={load} />
-
-  return (
-    <div className="adm-page">
-      <div className="adm-header">
-        <h1 className="adm-title">Admission</h1>
-        <p className="adm-subtitle">
-          {currentSessionName ? `Current session: ${currentSessionName}` : 'No current session set — set one in Settings → Sessions.'}
+  if (!pipelineEnabled) {
+    return (
+      <div className="adm-module">
+        <h1 className="adm-page-title">Admission</h1>
+        <p className="adm-empty-hint">
+          The admission pipeline isn't enabled for this school right now. Students are
+          currently added directly through the Students module instead. An admin can turn
+          this on in Settings → Admission if this school is ready to run a formal
+          admission process.
         </p>
       </div>
+    )
+  }
 
-      {/* ── Matric number format ──────────────────────────────────────── */}
-      <section className="adm-section">
-        <div className="adm-section-header">
-          <SectionLabel>Matric number format</SectionLabel>
-        </div>
-        <p className="adm-hint-text">
-          Build the shape of this school's matriculation numbers from components, in order. Each component after the first has its own separator.
-        </p>
-        {hasRealAdmissions && (
-          <p className="adm-lock-notice">
-            {/* 'lock' is not a confirmed icon name in this codebase's registry
-                (components/icons.tsx wasn't available to check) — reusing
-                'alert-triangle', already confirmed in use in this same file's
-                ErrorState, rather than guessing at an unverified name. */}
-            <Icon name="alert-triangle" style={{ width: 14, height: 14 }} />
-            Students have already been admitted under the current format. Their numbers won't change — a new save only affects admissions from now on.
-          </p>
-        )}
-        {matricComponents.length === 0 ? (
-          <p className="adm-empty-hint">No format set up yet — add components below, then Save.</p>
-        ) : (
-          <div className="adm-matric-preview">
-            <span className="adm-hint-text">Preview shape: </span>
-            <code>{previewMatricFormat(matricComponents)}</code>
-          </div>
-        )}
-        {matricComponents.map((c, i) => (
-          <div key={i} className="adm-list-row adm-matric-row">
-            <div className="adm-matric-row-fields">
-              {i > 0 && (
-                <input
-                  type="text"
-                  className="adm-input adm-matric-sep-input"
-                  value={c.separator ?? ''}
-                  onChange={e => updateMatricComponent(i, { separator: e.target.value || null })}
-                  placeholder="/"
-                  aria-label="Separator before this component"
-                />
-              )}
-              <span className="adm-type-chip">{MATRIC_COMPONENT_LABELS[c.type]}</span>
-              {c.type === 'constant' && (
-                <input
-                  type="text"
-                  className="adm-input adm-matric-const-input"
-                  value={c.value ?? ''}
-                  onChange={e => updateMatricComponent(i, { value: e.target.value })}
-                  placeholder="e.g. SCH"
-                  aria-label="Fixed text value"
-                />
-              )}
-              {c.type === 'session_year' && (
-                <select
-                  className="adm-select adm-select--sm"
-                  value={c.year_format ?? '2digit'}
-                  onChange={e => updateMatricComponent(i, { year_format: e.target.value as '2digit' | '4digit' })}
-                >
-                  <option value="2digit">2 digits (e.g. 26)</option>
-                  <option value="4digit">4 digits (e.g. 2026)</option>
-                </select>
-              )}
-              {c.type === 'sequence' && (
-                <span className="adm-matric-digits-field">
-                  <label className="adm-field-label" htmlFor={`matric-digits-${i}`}>Digits</label>
-                  <input
-                    id={`matric-digits-${i}`}
-                    type="number"
-                    className="adm-input adm-matric-digits-input"
-                    value={String(c.digits ?? 3)}
-                    onChange={e => updateMatricComponent(i, { digits: Math.max(1, Number(e.target.value) || 1) })}
-                    min={1}
-                  />
-                </span>
-              )}
-            </div>
-            <div className="adm-list-row-actions">
-              <button className="adm-edit-btn" onClick={() => moveMatricComponent(i, -1)} disabled={i === 0}>↑</button>
-              <button className="adm-edit-btn" onClick={() => moveMatricComponent(i, 1)} disabled={i === matricComponents.length - 1}>↓</button>
-              <button className="adm-edit-btn" onClick={() => removeMatricComponent(i)}>Remove</button>
-            </div>
-          </div>
+  const tabDefs: { key: TopTab; label: string }[] = [
+    { key: 'application', label: 'Applications' },
+    ...stageTabs.map((s) => ({ key: s, label: STAGE_LABELS[s] })),
+    { key: 'closed', label: 'Admitted & Rejected' },
+  ]
+
+  return (
+    <div className="adm-module">
+      <h1 className="adm-page-title">
+        Admission
+        {currentSessionName && <span className="adm-page-subtitle"> · {currentSessionName}</span>}
+      </h1>
+
+      {!currentSessionId && (
+        <p className="adm-empty-hint">No current session is set for this school — set one in Settings → Sessions first.</p>
+      )}
+
+      <div className="adm-tab-switcher" role="group">
+        {tabDefs.map((t) => (
+          <button
+            key={t.key}
+            className={`adm-tab-btn${activeTab === t.key ? ' adm-tab-btn--active' : ''}`}
+            onClick={() => setActiveTab(t.key)}
+          >
+            {t.label}
+          </button>
         ))}
-        <div className="adm-section-header">
-          <SectionLabel>Add component</SectionLabel>
-          <div className="adm-add-btn-group">
-            <select
-              className="adm-select adm-select--sm"
-              value=""
-              onChange={e => { if (e.target.value) addMatricComponent(e.target.value as MatricNumberComponent['type']) }}
-            >
-              <option value="">Choose type…</option>
-              {(Object.keys(MATRIC_COMPONENT_LABELS) as MatricNumberComponent['type'][]).map(t => (
-                <option key={t} value={t}>{MATRIC_COMPONENT_LABELS[t]}</option>
-              ))}
-            </select>
-            <button className="adm-save-btn" onClick={requestSaveMatricFormat} disabled={matricSaving}>
-              {matricSaving ? 'Saving…' : 'Save format'}
-            </button>
-          </div>
-        </div>
-        {matricError && <p className="adm-form-error">{matricError}</p>}
-        {matricSaved && !matricError && <p className="adm-hint-text">Saved.</p>}
-      </section>
+      </div>
 
-      {/* ── Programme / level picker ──────────────────────────────────── */}
-      <section className="adm-section">
-        <div className="adm-section-header">
-          <SectionLabel>Admit a student</SectionLabel>
-        </div>
-        {!pickedLevelId ? (
-          departments.length === 0 || programmes.length === 0 ? (
-            <p className="adm-empty-hint">Set up at least one department and programme in Settings → Institution first.</p>
-          ) : (
-            programmes.map(p => (
-              <div key={p.id} className="adm-class-node">
-                <div className="adm-class-node-row">
-                  <div className="adm-class-node-info">
-                    <span className="adm-class-node-name">{p.name}</span>
-                    <span className="adm-type-chip">{p.award_type}</span>
-                  </div>
-                </div>
-                {(levelsByProgramme[p.id] ?? []).map(l => (
-                  <div key={l.id} className="adm-class-node" style={{ marginLeft: 16 }}>
-                    <div className="adm-class-node-row">
-                      <div className="adm-class-node-info">
-                        <span className="adm-class-node-name">{l.level_label}</span>
-                        {(placementsByLevel[l.id] ?? []).length > 0 && (
-                          <span className="adm-type-chip">{(placementsByLevel[l.id] ?? []).length} placed</span>
-                        )}
-                      </div>
-                      <button className="adm-add-sub-btn" onClick={() => pickLevel(l.id, l.level_label)}>Admit into this level</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))
-          )
-        ) : (
-          <div className="adm-admit-panel">
-            <div className="adm-admit-panel-header">
-              <p className="adm-list-row-name">{pickedLevelLabel}</p>
-              <button className="adm-edit-btn" onClick={clearPickedLevel}>Change level</button>
-            </div>
+      {activeTab === 'application' && (
+        <ApplicationsTab
+          schoolId={schoolId}
+          programmes={programmes}
+          levelsByProgramme={levelsByProgramme}
+          sessionId={currentSessionId}
+          applications={applications}
+          listLoading={listLoading}
+          listError={listError}
+          onCreated={refreshAfterAction}
+          onAdvance={async (id, target) => {
+            const res = await advanceApplication(id, target)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+        />
+      )}
 
-            {admitResult ? (
-              <>
-                <p className="adm-hint-text">
-                  {admitResult.generated_new_number
-                    ? 'Student admitted. Matric number generated:'
-                    : 'Placement created. This student already had a matric number, so it was kept:'}
-                </p>
-                <p className="adm-matric-result"><code>{admitResult.matric_number}</code></p>
-                <div className="adm-panel-footer">
-                  <button className="adm-save-btn" onClick={() => setAdmitResult(null)}>Admit another</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="adm-hint-text">
-                  {currentSessionName
-                    ? `This admits the student into ${pickedLevelLabel} for the current session (${currentSessionName}).`
-                    : 'No current session is set for this school — set one in Settings → Sessions first.'}
-                </p>
+      {(activeTab === 'screening' || activeTab === 'decision' || activeTab === 'clearance') && (
+        <StageTab
+          stage={activeTab}
+          applications={applications}
+          pipelines={pipelines}
+          programmes={programmes}
+          levelsByProgramme={levelsByProgramme}
+          listLoading={listLoading}
+          listError={listError}
+          onSaveFields={async (id, fields) => {
+            const res = await updateApplicationFields(id, fields)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+          onAdvance={async (id, target) => {
+            const res = await advanceApplication(id, target)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+          onRevert={async (id) => {
+            const res = await revertApplication(id)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+          onReject={async (id, note) => {
+            const res = await rejectApplication(id, note)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+          onAdmit={async (id) => {
+            const res = await admitFromApplication(id)
+            if (!res.error) refreshAfterAction()
+            return res
+          }}
+        />
+      )}
 
-                <div className="adm-tab-switcher" role="group">
-                  <button
-                    className={`adm-tab-btn${admitMode === 'search' ? ' adm-tab-btn--active' : ''}`}
-                    onClick={() => { setAdmitMode('search'); setPlError(null) }}
-                  >
-                    Existing student
-                  </button>
-                  <button
-                    className={`adm-tab-btn${admitMode === 'create' ? ' adm-tab-btn--active' : ''}`}
-                    onClick={() => { setAdmitMode('create'); setPlError(null) }}
-                  >
-                    New student
-                  </button>
-                </div>
-
-                {admitMode === 'search' ? (
-                  <FieldRow label="Student">
-                    {selectedStudent ? (
-                      <div className="adm-list-row">
-                        <div className="adm-list-row-info">
-                          <p className="adm-list-row-name">{selectedStudent.full_name}</p>
-                          <p className="adm-list-row-meta">{selectedStudent.matric_number ?? 'No matric number yet'}</p>
-                        </div>
-                        <button className="adm-edit-btn" onClick={() => { setSelectedStudent(null); setStudentQuery('') }}>Change</button>
-                      </div>
-                    ) : (
-                      <>
-                        <input
-                          type="text"
-                          className="adm-input adm-search-input"
-                          placeholder="Search by name or matric number…"
-                          value={studentQuery}
-                          onChange={e => setStudentQuery(e.target.value)}
-                        />
-                        {studentSearching && <p className="adm-hint-text">Searching…</p>}
-                        {!studentSearching && studentQuery.trim().length >= 2 && studentResults.length === 0 && (
-                          <p className="adm-empty-hint">No students match.</p>
-                        )}
-                        {studentResults.map(s => (
-                          <div key={s.id} className="adm-list-row" onClick={() => setSelectedStudent(s)} style={{ cursor: 'pointer' }}>
-                            <div className="adm-list-row-info">
-                              <p className="adm-list-row-name">{s.full_name}</p>
-                              <p className="adm-list-row-meta">{s.matric_number ?? 'No matric number yet'}</p>
-                            </div>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                  </FieldRow>
-                ) : (
-                  <>
-                    <FieldRow label="Full name"><Input value={newStudentName} onChange={setNewStudentName} placeholder="Student's full name" /></FieldRow>
-                    <FieldRow label="Gender (optional)">
-                      <select className="adm-select" value={newStudentGender} onChange={e => setNewStudentGender(e.target.value)}>
-                        <option value="">Not specified</option>
-                        <option value="male">Male</option>
-                        <option value="female">Female</option>
-                      </select>
-                    </FieldRow>
-                    <FieldRow label="Date of birth (optional)"><Input value={newStudentDob} onChange={setNewStudentDob} type="date" /></FieldRow>
-                    <p className="adm-hint-text">Other details (address, guardians, photo, etc.) can be filled in afterward from the Students module.</p>
-                  </>
-                )}
-
-                {plError && <p className="adm-form-error">{plError}</p>}
-                <div className="adm-panel-footer">
-                  <button className="adm-save-btn" onClick={handleAdmit} disabled={plSaving || !currentSessionId}>
-                    {plSaving ? 'Admitting…' : 'Admit'}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* ── Soft-lock confirm (§12 correction, 2026-07-17) ──────────────── */}
-      {showLockConfirm && (
-        <div className="adm-overlay" onClick={() => setShowLockConfirm(false)}>
-          <div className="adm-sheet" onClick={e => e.stopPropagation()}>
-            <h2 className="adm-sheet-title">Save a new matric number format?</h2>
-            <p className="adm-hint-text">
-              Students already admitted keep the matric numbers they were given — those don't change.
-              Every admission from now on will use this new format instead of the current one.
-            </p>
-            <div className="adm-sheet-footer">
-              <button className="adm-cancel-btn" onClick={() => setShowLockConfirm(false)}>Cancel</button>
-              <button className="adm-save-btn" onClick={handleSaveMatricFormat} disabled={matricSaving}>
-                {matricSaving ? 'Saving…' : 'Save new format'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {activeTab === 'closed' && (
+        <ClosedTab applications={applications} listLoading={listLoading} listError={listError} />
       )}
     </div>
   )
 }
 
-// Display labels for each selectable matric-number-format component, and a
-// pure client-side preview of the shape (not a real generated number — that
-// only ever happens server-side, build_matric_number(),
-// migration_session_65.sql/65b.sql — this just shows the admin the pattern
-// they're building, e.g. "NSC/DEPT/26/0001").
-const MATRIC_COMPONENT_LABELS: Record<MatricNumberComponent['type'], string> = {
-  programme_code: 'Programme code',
-  faculty_code: 'Faculty code',
-  department_code: 'Department code',
-  session_year: 'Admission year',
-  constant: 'Fixed text',
-  sequence: 'Sequence number',
+const STAGE_LABELS: Record<PipelineStageType, string> = {
+  screening: 'Screening',
+  decision: 'Decision',
+  clearance: 'Clearance',
 }
 
-function previewMatricFormat(components: MatricNumberComponent[]): string {
-  return components
-    .map((c, i) => {
-      const sep = i > 0 ? (c.separator ?? '') : ''
-      let piece = ''
-      switch (c.type) {
-        case 'programme_code': piece = 'NSC'; break
-        case 'faculty_code': piece = 'MED'; break
-        case 'department_code': piece = 'DEPT'; break
-        case 'session_year': piece = c.year_format === '4digit' ? '2026' : '26'; break
-        case 'constant': piece = c.value || '—'; break
-        case 'sequence': piece = '1'.padStart(c.digits ?? 3, '0'); break
-      }
-      return sep + piece
+// Fixed real-world order this screen walks applicants through — mirrors
+// advance_admission_application()'s own v_fixed_order exactly (migration
+// migration_session_65a.sql §6). Kept here only for the UI's own "what's
+// the next stage" button label; the DB is still the real authority on
+// whether a given advance is actually valid.
+const FIXED_ORDER: (PipelineStageType | 'clearance')[] = ['screening', 'decision', 'clearance']
+
+// ─── Applications tab ────────────────────────────────────────────────────
+
+function ApplicationsTab({
+  schoolId,
+  programmes,
+  levelsByProgramme,
+  sessionId,
+  applications,
+  listLoading,
+  listError,
+  onCreated,
+  onAdvance,
+}: {
+  schoolId: string
+  programmes: Programme[]
+  levelsByProgramme: Record<string, ProgrammeLevel[]>
+  sessionId: string | null
+  applications: AdmissionApplication[]
+  listLoading: boolean
+  listError: string | null
+  onCreated: () => void
+  onAdvance: (id: string, target: 'screening' | 'decision' | 'clearance') => Promise<{ error: string | null }>
+}) {
+  const [showForm, setShowForm] = useState(false)
+
+  return (
+    <section className="adm-section">
+      <div className="adm-section-header">
+        <SectionLabel>Applications</SectionLabel>
+        <button className="adm-save-btn" onClick={() => setShowForm(true)} disabled={!sessionId}>
+          + New application
+        </button>
+      </div>
+
+      {showForm && (
+        <NewApplicationForm
+          schoolId={schoolId}
+          programmes={programmes}
+          levelsByProgramme={levelsByProgramme}
+          sessionId={sessionId as string}
+          onDone={() => { setShowForm(false); onCreated() }}
+          onCancel={() => setShowForm(false)}
+        />
+      )}
+
+      {listError && <p className="adm-form-error">{listError}</p>}
+      {listLoading ? (
+        <Skeleton lines={3} />
+      ) : applications.length === 0 ? (
+        <p className="adm-empty-hint">No applications yet.</p>
+      ) : (
+        applications.map((a) => (
+          <div key={a.id} className="adm-list-row">
+            <div className="adm-list-row-info">
+              <p className="adm-list-row-name">{a.full_name}</p>
+              <p className="adm-list-row-meta">
+                {a.entry_mode === 'direct_entry' ? 'Direct Entry' : 'UTME'}
+                {!a.pipeline_id && ' · No pipeline assigned yet'}
+              </p>
+            </div>
+            <button
+              className="adm-add-sub-btn"
+              onClick={async () => {
+                const first = FIXED_ORDER[0] as 'screening'
+                await onAdvance(a.id, first)
+              }}
+            >
+              Move to next stage
+            </button>
+          </div>
+        ))
+      )}
+    </section>
+  )
+}
+
+function NewApplicationForm({
+  schoolId,
+  programmes,
+  levelsByProgramme,
+  sessionId,
+  onDone,
+  onCancel,
+}: {
+  schoolId: string
+  programmes: Programme[]
+  levelsByProgramme: Record<string, ProgrammeLevel[]>
+  sessionId: string
+  onDone: () => void
+  onCancel: () => void
+}) {
+  const [fullName, setFullName] = useState('')
+  const [gender, setGender] = useState('')
+  const [dob, setDob] = useState('')
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
+  const [entryMode, setEntryMode] = useState<EntryMode>('utme')
+  const [programmeId, setProgrammeId] = useState('')
+  const [levelId, setLevelId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const levels = programmeId ? (levelsByProgramme[programmeId] ?? []) : []
+
+  async function handleSave() {
+    if (!fullName.trim()) { setSaveError('Full name is required.'); return }
+    setSaving(true)
+    setSaveError(null)
+    const res = await createApplication({
+      schoolId,
+      fullName: fullName.trim(),
+      gender: gender || null,
+      dateOfBirth: dob || null,
+      phone: phone || null,
+      email: email || null,
+      programmeId: programmeId || null,
+      entryLevelId: levelId || null,
+      entryMode,
+      sessionId,
     })
-    .join('')
+    setSaving(false)
+    if (res.error) { setSaveError(res.error); return }
+    onDone()
+  }
+
+  return (
+    <div className="adm-admit-panel">
+      <p className="adm-hint-text">
+        Core fields only for now — JAMB/O'Level/Direct-Entry detail capture and
+        school-configured custom fields are set up in Admission Settings, but this
+        form doesn't render them yet. That wiring is still an open follow-up.
+      </p>
+      <FieldRow label="Full name"><Input value={fullName} onChange={setFullName} placeholder="Applicant's full name" /></FieldRow>
+      <FieldRow label="Gender (optional)">
+        <select className="adm-select" value={gender} onChange={e => setGender(e.target.value)}>
+          <option value="">Not specified</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
+      </FieldRow>
+      <FieldRow label="Date of birth (optional)"><Input value={dob} onChange={setDob} type="date" /></FieldRow>
+      <FieldRow label="Phone (optional)"><Input value={phone} onChange={setPhone} placeholder="Phone number" /></FieldRow>
+      <FieldRow label="Email (optional)"><Input value={email} onChange={setEmail} placeholder="Email address" type="email" /></FieldRow>
+      <FieldRow label="Entry mode">
+        <div className="adm-tab-switcher" role="group">
+          <button
+            className={`adm-tab-btn${entryMode === 'utme' ? ' adm-tab-btn--active' : ''}`}
+            onClick={() => setEntryMode('utme')}
+          >
+            UTME
+          </button>
+          <button
+            className={`adm-tab-btn${entryMode === 'direct_entry' ? ' adm-tab-btn--active' : ''}`}
+            onClick={() => setEntryMode('direct_entry')}
+          >
+            Direct Entry
+          </button>
+        </div>
+      </FieldRow>
+      <FieldRow label="Programme applied for (optional)">
+        <select className="adm-select" value={programmeId} onChange={e => { setProgrammeId(e.target.value); setLevelId('') }}>
+          <option value="">Not specified</option>
+          {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </FieldRow>
+      {programmeId && (
+        <FieldRow label="Entry level (optional)">
+          <select className="adm-select" value={levelId} onChange={e => setLevelId(e.target.value)}>
+            <option value="">Not specified</option>
+            {levels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+          </select>
+        </FieldRow>
+      )}
+      {saveError && <p className="adm-form-error">{saveError}</p>}
+      <div className="adm-panel-footer">
+        <button className="adm-cancel-btn" onClick={onCancel}>Cancel</button>
+        <button className="adm-save-btn" onClick={handleSave} disabled={saving}>
+          {saving ? 'Creating…' : 'Create application'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Screening / Decision / Clearance tabs ──────────────────────────────
+// Per §7 of the proposal: a single shared tab per stage type — not one tab
+// per pipeline — rendering, for each applicant, only the components that
+// applicant's own pipeline enabled for this stage.
+
+function StageTab({
+  stage,
+  applications,
+  pipelines,
+  programmes,
+  levelsByProgramme,
+  listLoading,
+  listError,
+  onSaveFields,
+  onAdvance,
+  onRevert,
+  onReject,
+  onAdmit,
+}: {
+  stage: PipelineStageType
+  applications: AdmissionApplication[]
+  pipelines: AdmissionPipeline[]
+  programmes: Programme[]
+  levelsByProgramme: Record<string, ProgrammeLevel[]>
+  listLoading: boolean
+  listError: string | null
+  onSaveFields: (id: string, fields: Partial<AdmissionApplication>) => Promise<{ error: string | null }>
+  onAdvance: (id: string, target: 'screening' | 'decision' | 'clearance') => Promise<{ error: string | null }>
+  onRevert: (id: string) => Promise<{ error: string | null }>
+  onReject: (id: string, note?: string) => Promise<{ error: string | null }>
+  onAdmit: (id: string) => Promise<{ data: AdmitStudentResult | null; error: string | null }>
+}) {
+  const pipelineById = useMemo(
+    () => Object.fromEntries(pipelines.map((p) => [p.id, p])),
+    [pipelines],
+  )
+
+  function nextStageAfter(current: PipelineStageType): 'decision' | 'clearance' | null {
+    const idx = FIXED_ORDER.indexOf(current)
+    const next = FIXED_ORDER[idx + 1]
+    return (next as 'decision' | 'clearance') ?? null
+  }
+
+  return (
+    <section className="adm-section">
+      <div className="adm-section-header">
+        <SectionLabel>{STAGE_LABELS[stage]}</SectionLabel>
+      </div>
+      {listError && <p className="adm-form-error">{listError}</p>}
+      {listLoading ? (
+        <Skeleton lines={3} />
+      ) : applications.length === 0 ? (
+        <p className="adm-empty-hint">No applications at this stage.</p>
+      ) : (
+        applications.map((a) => {
+          const pipeline = a.pipeline_id ? pipelineById[a.pipeline_id] : null
+          const stageRow = pipeline?.stages.find((s) => s.stage === stage)
+          const components = stageRow?.components ?? {}
+          return (
+            <StageApplicantCard
+              key={a.id}
+              application={a}
+              stage={stage}
+              components={components}
+              programmes={programmes}
+              levelsByProgramme={levelsByProgramme}
+              nextStage={nextStageAfter(stage)}
+              onSaveFields={onSaveFields}
+              onAdvance={onAdvance}
+              onRevert={onRevert}
+              onReject={onReject}
+              onAdmit={onAdmit}
+            />
+          )
+        })
+      )}
+    </section>
+  )
+}
+
+function StageApplicantCard({
+  application,
+  stage,
+  components,
+  programmes,
+  levelsByProgramme,
+  nextStage,
+  onSaveFields,
+  onAdvance,
+  onRevert,
+  onReject,
+  onAdmit,
+}: {
+  application: AdmissionApplication
+  stage: PipelineStageType
+  components: Record<string, boolean>
+  programmes: Programme[]
+  levelsByProgramme: Record<string, ProgrammeLevel[]>
+  nextStage: 'decision' | 'clearance' | null
+  onSaveFields: (id: string, fields: Partial<AdmissionApplication>) => Promise<{ error: string | null }>
+  onAdvance: (id: string, target: 'screening' | 'decision' | 'clearance') => Promise<{ error: string | null }>
+  onRevert: (id: string) => Promise<{ error: string | null }>
+  onReject: (id: string, note?: string) => Promise<{ error: string | null }>
+  onAdmit: (id: string) => Promise<{ data: AdmitStudentResult | null; error: string | null }>
+}) {
+  const [notes, setNotes] = useState(application.screening_notes ?? '')
+  const [decisionProgrammeId, setDecisionProgrammeId] = useState(application.decision_programme_id ?? '')
+  const [decisionLevelId, setDecisionLevelId] = useState(application.decision_level_id ?? '')
+  const [decisionNote, setDecisionNote] = useState(application.decision_note ?? '')
+  // Local checklist state for the components that are pure "mark as done"
+  // toggles with no other field attached (document_review, jamb_verification,
+  // olevel_verification, interview, aptitude_test, committee_review,
+  // fee_payment, medical_clearance, document_submission). Persisted into
+  // custom_field_values under an "_admission_checklist" key, since none of
+  // these have a dedicated column of their own — the schema's real,
+  // per-stage columns are reserved for screening_notes, the decision_
+  // fields, and clearance_completed_at — not one column per checklist item.
+  const existingChecklist = (application.custom_field_values?._admission_checklist as Record<string, boolean>) ?? {}
+  const [checklist, setChecklist] = useState<Record<string, boolean>>(existingChecklist)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [admitResult, setAdmitResult] = useState<AdmitStudentResult | null>(null)
+
+  const enabledKeys = Object.entries(components).filter(([, v]) => v).map(([k]) => k)
+  const levels = decisionProgrammeId ? (levelsByProgramme[decisionProgrammeId] ?? []) : []
+
+  // Mirrors the new DB-side gate in advance_admission_application() exactly
+  // (migration_session_65e): a resolvable programme AND level, decision
+  // override if set, otherwise the original application values. Used here
+  // only to decide whether to surface the "Move back" escape hatch and a
+  // clear warning before the person hits the real DB error — the DB call
+  // itself remains the actual authority, this is UI-side foresight only.
+  const resolvedProgrammeId = decisionProgrammeId || application.programme_id
+  const resolvedLevelId = decisionLevelId || application.entry_level_id
+  const missingProgrammeOrLevel = stage === 'decision' && (!resolvedProgrammeId || !resolvedLevelId)
+
+  // Checklist-based components enabled for this stage but not yet ticked.
+  // "Genuinely stuck" for screening/clearance (no DB-level gate exists for
+  // these, unlike decision) is treated as: at least one enabled checklist
+  // item still unticked, giving the admin a way back rather than forcing
+  // them to advance with something left undone.
+  const checklistKeys = enabledKeys.filter((k) => CHECKLIST_ONLY_KEYS.has(k))
+  const hasUnfinishedChecklist = checklistKeys.some((k) => !checklist[k])
+  const canGoBack = stage !== 'screening' && (missingProgrammeOrLevel || (stage === 'clearance' && hasUnfinishedChecklist))
+
+  function toggleChecklist(key: string) {
+    setChecklist((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  async function handleAdvanceOrAdmit() {
+    setBusy(true)
+    setActionError(null)
+    const nextChecklist = { ...existingChecklist, ...checklist }
+    if (stage === 'screening') {
+      await onSaveFields(application.id, {
+        screening_notes: notes,
+        custom_field_values: { ...application.custom_field_values, _admission_checklist: nextChecklist },
+      })
+    }
+    if (stage === 'decision') {
+      await onSaveFields(application.id, {
+        decision_programme_id: decisionProgrammeId || null,
+        decision_level_id: decisionLevelId || null,
+        decision_note: decisionNote || null,
+        custom_field_values: { ...application.custom_field_values, _admission_checklist: nextChecklist },
+      })
+    }
+    if (stage === 'clearance') {
+      await onSaveFields(application.id, {
+        custom_field_values: { ...application.custom_field_values, _admission_checklist: nextChecklist },
+      })
+    }
+    if (nextStage) {
+      const res = await onAdvance(application.id, nextStage)
+      if (res.error) setActionError(res.error)
+    } else {
+      const res = await onAdmit(application.id)
+      if (res.error) setActionError(res.error)
+      else setAdmitResult(res.data)
+    }
+    setBusy(false)
+  }
+
+  async function handleReject() {
+    setBusy(true)
+    setActionError(null)
+    const res = await onReject(application.id, decisionNote || undefined)
+    if (res.error) setActionError(res.error)
+    setBusy(false)
+  }
+
+  async function handleRevert() {
+    setBusy(true)
+    setActionError(null)
+    const res = await onRevert(application.id)
+    if (res.error) setActionError(res.error)
+    setBusy(false)
+  }
+
+  if (admitResult) {
+    return (
+      <div className="adm-admit-panel">
+        <p className="adm-hint-text">
+          {admitResult.generated_new_number
+            ? 'Applicant admitted. Matric number generated:'
+            : 'Placement created. This applicant already had a matric number, so it was kept:'}
+        </p>
+        <p className="adm-matric-result"><code>{admitResult.matric_number}</code></p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="adm-list-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+      <div className="adm-list-row-info">
+        <p className="adm-list-row-name">{application.full_name}</p>
+        <p className="adm-list-row-meta">{application.entry_mode === 'direct_entry' ? 'Direct Entry' : 'UTME'}</p>
+      </div>
+
+      {enabledKeys.length === 0 && (
+        <p className="adm-empty-hint">This applicant's pipeline has no components enabled for this stage.</p>
+      )}
+
+      {checklistKeys.length > 0 && (
+        <div className="adm-field-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          {checklistKeys.map((key) => (
+            <label key={key} className="adm-field-row" style={{ cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={!!checklist[key]}
+                onChange={() => toggleChecklist(key)}
+              />
+              <span className="adm-field-label" style={{ marginLeft: 8 }}>{CHECKLIST_LABELS[key] ?? key}</span>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {stage === 'screening' && enabledKeys.includes('jamb_verification') && (
+        <FieldRow label="JAMB score on record">
+          <p className="adm-hint-text">{application.jamb_score ?? 'Not captured yet on this application'}</p>
+        </FieldRow>
+      )}
+
+      {stage === 'screening' && enabledKeys.includes('olevel_verification') && (
+        <FieldRow label="O'Level sittings on record">
+          <p className="adm-hint-text">
+            {(application.olevel_sitting_1?.length ?? 0) + (application.olevel_sitting_2?.length ?? 0) > 0
+              ? `${(application.olevel_sitting_1?.length ?? 0) + (application.olevel_sitting_2?.length ?? 0)} subject result(s) on record`
+              : 'Not captured yet on this application'}
+          </p>
+        </FieldRow>
+      )}
+
+      {stage === 'screening' && enabledKeys.length > 0 && (
+        <FieldRow label="Screening notes">
+          <textarea className="adm-input" value={notes} onChange={e => setNotes(e.target.value)} rows={2} />
+        </FieldRow>
+      )}
+
+      {stage === 'decision' && enabledKeys.includes('programme_confirmation') && (
+        <>
+          <FieldRow label="Confirm/override programme">
+            <select className="adm-select" value={decisionProgrammeId} onChange={e => { setDecisionProgrammeId(e.target.value); setDecisionLevelId('') }}>
+              <option value="">{application.programme_id ? 'Keep applied-for programme' : 'Not specified'}</option>
+              {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </FieldRow>
+          {decisionProgrammeId && (
+            <FieldRow label="Level">
+              <select className="adm-select" value={decisionLevelId} onChange={e => setDecisionLevelId(e.target.value)}>
+                <option value="">Not specified</option>
+                {levels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+              </select>
+            </FieldRow>
+          )}
+        </>
+      )}
+
+      {stage === 'decision' && (
+        <FieldRow label="Decision note">
+          <textarea className="adm-input" value={decisionNote} onChange={e => setDecisionNote(e.target.value)} rows={2} />
+        </FieldRow>
+      )}
+
+      {missingProgrammeOrLevel && (
+        <p className="adm-form-error">
+          No programme/level is on record for this applicant (neither the original application nor a
+          confirmed override above). Advancing past Decision will be blocked until one is set here, or
+          this applicant can be moved back to Screening if a programme was never meant to be decided yet.
+        </p>
+      )}
+
+      {actionError && <p className="adm-form-error">{actionError}</p>}
+      <div className="adm-panel-footer">
+        {canGoBack && (
+          <button className="adm-cancel-btn" onClick={handleRevert} disabled={busy}>
+            {busy ? 'Saving…' : 'Move back'}
+          </button>
+        )}
+        {stage === 'decision' && (
+          <button className="adm-cancel-btn" onClick={handleReject} disabled={busy}>Reject</button>
+        )}
+        <button className="adm-save-btn" onClick={handleAdvanceOrAdmit} disabled={busy}>
+          {busy ? 'Saving…' : nextStage ? `Move to ${STAGE_LABELS[nextStage]}` : 'Admit'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Canonical component keys, matching SettingsModule.tsx's PIPELINE_STAGE_
+// TYPES exactly (the only writer of admission_pipeline_stages.components).
+// Split into "checklist-only" (plain mark-as-done toggles, no other field)
+// vs. the handful with dedicated UI/columns already handled inline above
+// (programme_confirmation has its own picker; decision_note is always
+// shown once Decision is reached, matching how a note is useful regardless
+// of whether it was specifically enabled — jamb_verification/
+// olevel_verification get their own read-only "on record" rows above,
+// then still appear here as a checklist item for the actual act of
+// verifying).
+const CHECKLIST_ONLY_KEYS = new Set([
+  'document_review', 'jamb_verification', 'olevel_verification', 'interview', 'aptitude_test',
+  'committee_review',
+  'fee_payment', 'medical_clearance', 'document_submission',
+])
+
+const CHECKLIST_LABELS: Record<string, string> = {
+  document_review: 'Document review complete',
+  jamb_verification: 'JAMB details verified',
+  olevel_verification: "O'Level results verified",
+  interview: 'Interview conducted',
+  aptitude_test: 'Aptitude test conducted',
+  committee_review: 'Committee review complete',
+  fee_payment: 'Fee payment confirmed',
+  medical_clearance: 'Medical clearance confirmed',
+  document_submission: 'Original documents submitted',
+}
+
+// ─── Admitted & Rejected tab ─────────────────────────────────────────────
+
+function ClosedTab({
+  applications,
+  listLoading,
+  listError,
+}: {
+  applications: AdmissionApplication[]
+  listLoading: boolean
+  listError: string | null
+}) {
+  return (
+    <section className="adm-section">
+      <div className="adm-section-header">
+        <SectionLabel>Admitted & Rejected</SectionLabel>
+      </div>
+      {listError && <p className="adm-form-error">{listError}</p>}
+      {listLoading ? (
+        <Skeleton lines={3} />
+      ) : applications.length === 0 ? (
+        <p className="adm-empty-hint">No admitted or rejected applications yet.</p>
+      ) : (
+        applications.map((a) => (
+          <div key={a.id} className="adm-list-row">
+            <div className="adm-list-row-info">
+              <p className="adm-list-row-name">{a.full_name}</p>
+              <p className="adm-list-row-meta">
+                {a.stage === 'admitted' ? 'Admitted' : 'Rejected'}
+                {a.stage === 'rejected' && a.purge_at && ` · Data purged ${new Date(a.purge_at).toLocaleDateString()}`}
+              </p>
+            </div>
+            <span className="adm-type-chip">{a.stage === 'admitted' ? 'Admitted' : 'Rejected'}</span>
+          </div>
+        ))
+      )}
+    </section>
+  )
 }
 
 // ── Small local UI primitives ───────────────────────────────────────────
 // Duplicated from SettingsModule.tsx rather than imported — that file
-// defines these locally, not as shared exports, and this module is small
-// enough that a shared-components extraction is out of this session's scope
-// (flagged, not silently worked around).
+// defines these locally, not as shared exports, same convention the
+// original SESSION 65 version of this file already followed.
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return <p className="adm-section-label">{children}</p>
 }
@@ -680,28 +932,6 @@ function Input({ value, onChange, placeholder, type = 'text' }: { value: string;
       onChange={e => onChange(e.target.value)}
     />
   )
-}
-
-function useDebouncedValue<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), delayMs)
-    return () => clearTimeout(t)
-  }, [value, delayMs])
-  return debounced
-}
-
-// Local date-string helper, matching studentsService.ts's own
-// todayDateString() (local YYYY-MM-DD, no window/navigator dependency,
-// React Native safe) rather than importing a function this file didn't
-// otherwise need — same reasoning SettingsModule.tsx's own
-// todayDateStringSettings() already used.
-function todayDateStringAdmission(): string {
-  const d = new Date()
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd}`
 }
 
 function Skeleton({ lines = 4 }: { lines?: number }) {

@@ -98,6 +98,28 @@ import {
   type StandingEvent,
   type CourseOffering,
 } from '../services/settingsService'
+// SESSION 65c — admission pipeline/field-settings/master-switch authoring.
+// Deliberately a separate import from admissionService.ts, not folded into
+// the block above: that file's own header comment (added in 65b) explains
+// why admission-domain functions live apart from settingsService.ts (same
+// actor/permission/load-lifecycle reasoning that split it out from
+// settingsService.ts in the first place). This tab is UI placed inside
+// Settings for the owner-facing reason (§0/§7 of the redesign proposal —
+// admission configuration belongs alongside every other school-config tab),
+// not a reason to re-merge the service files.
+import {
+  loadAllPipelines,        upsertPipeline,
+  upsertPipelineStage,     deletePipelineStage,
+  loadFieldSettings,       saveFieldSettings,
+  loadAdmissionMasterSettings,
+  setAdmissionPipelineEnabled, setRejectionRetentionDays,
+  loadMatricNumberFormat,  saveMatricNumberFormat, hasAnyMatricAdmissions,
+  FIELD_CONFIG_KEYS,
+  type AdmissionPipeline,  type PipelineStageType,
+  type EntryMode,
+  type ConfigurableField,  type AdmissionFieldSettings, type AdmissionCustomField,
+  type MatricNumberFormat, type MatricNumberComponent,   type MatricNumberComponentType,
+} from '../services/admissionService'
 import {
   // SESSION 60a: course_result_components' CRUD lives in
   // courseResultsService.ts, not settingsService.ts — deliberately NOT
@@ -166,7 +188,7 @@ const SCHOOL_TYPE_DISPLAY_LABELS: Record<string, string> = {
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
-type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
+type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'admission' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
 // Institution tab is hidden entirely when school_type is not a
 // higher-institution type — per SESSION 55 §0 instruction 5 — so TABS is
@@ -215,6 +237,17 @@ function buildTabs(schoolType: string | null | undefined): { id: SettingsTab; la
   } else {
     tabs.push({ id: 'classes', label: 'Classes', icon: <Icon name="tag" size={18} /> })
   }
+  // Admission (SESSION 65c, redesign proposal §7/§8) — not gated to
+  // isHigherEd: admission intake applies to any school type (secondary
+  // schools admit students same as higher-ed institutions do), unlike
+  // Institution/Curriculum/Offerings/Grading/Standing above, which are all
+  // gated because they're genuinely higher-ed-shaped data. Placed after
+  // Standing/Classes and before Subjects to sit with the other whole-school
+  // operational config rather than inside the higher-ed-only block.
+  // icons.tsx wasn't in this upload, so this uses 'user' — confirmed present
+  // elsewhere in the codebase — rather than a guessed name like 'user-plus'
+  // that might not exist in the icon set.
+  tabs.push({ id: 'admission', label: 'Admission', icon: <Icon name="user" size={18} /> })
   tabs.push(
     { id: 'subjects',      label: 'Subjects',      icon: <Icon name="book-open" size={18} /> },
     { id: 'roles',         label: 'Roles',         icon: <Icon name="key" size={18} /> },
@@ -283,14 +316,15 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
       <div className="set-body">
         {safeActiveTab === 'school'      && <SchoolTab      schoolId={schoolId} themeMode={themeMode} />}
         {safeActiveTab === 'homepage'    && <HomepageTab    schoolId={schoolId} />}
-        {safeActiveTab === 'calendar'    && <CalendarTab    schoolId={schoolId} />}
-        {safeActiveTab === 'schedule'    && <ScheduleTab    schoolId={schoolId} />}
+        {safeActiveTab === 'calendar'    && <CalendarTab    schoolId={schoolId} schoolType={schoolType} />}
+        {safeActiveTab === 'schedule'    && <ScheduleTab    schoolId={schoolId} schoolType={schoolType} />}
         {safeActiveTab === 'classes'     && <ClassesTab     schoolId={schoolId} />}
         {safeActiveTab === 'institution' && <InstitutionTab schoolId={schoolId} onNavigate={onNavigate} />}
         {safeActiveTab === 'curriculum'  && <CurriculumTab  schoolId={schoolId} />}
         {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
         {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
         {safeActiveTab === 'standing'     && <StandingTab     schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
+        {safeActiveTab === 'admission'    && <AdmissionSettingsTab schoolId={schoolId} />}
         {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}
         {safeActiveTab === 'roles'         && <RolesTab        schoolId={schoolId} />}
         {safeActiveTab === 'student-roles' && <StudentRolesTab schoolId={schoolId} />}
@@ -1322,7 +1356,15 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
       </FieldRow>
 
       <SectionLabel>Module flags</SectionLabel>
-      <Toggle checked={usesTerms} onChange={setUsesTerms} label="Use terms within each session (e.g. 1st, 2nd, 3rd term)" />
+      <Toggle
+        checked={usesTerms}
+        onChange={setUsesTerms}
+        label={
+          isHigherInstitutionSchoolType(schoolType)
+            ? 'Use semesters within each session (e.g. First, Second semester)'
+            : 'Use terms within each session (e.g. 1st, 2nd, 3rd term)'
+        }
+      />
       <Toggle checked={usesLedger} onChange={setUsesLedger} label="Enable double-entry ledger (advanced accounting)" />
 
       <SaveBar saving={saving} saved={saved} error={saveError} onSave={handleSave} />
@@ -1332,7 +1374,17 @@ function SchoolTab({ schoolId, themeMode }: { schoolId: string; themeMode: Theme
 
 // ─── Tab: Calendar ────────────────────────────────────────────────────────────
 
-function CalendarTab({ schoolId }: { schoolId: string }) {
+function CalendarTab({ schoolId, schoolType }: { schoolId: string; schoolType?: string | null }) {
+  // Higher-ed schools organize a session into two semesters, not the
+  // secondary-school "1st/2nd/3rd term" model (confirmed via research:
+  // Nigerian universities/polytechnics overwhelmingly run First/Second
+  // Semester per session). The schema/data model is already generic
+  // (terms.name is free text, sequence is just an int) — this is purely
+  // a copy fix using the same isHigherInstitutionSchoolType() helper
+  // already established at module scope, not a new local duplicate.
+  const isHigherEd = isHigherInstitutionSchoolType(schoolType)
+  const periodWord = isHigherEd ? 'semester' : 'term'
+  const periodWordCap = isHigherEd ? 'Semester' : 'Term'
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
@@ -1401,6 +1453,29 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
 
   async function handleSaveSession() {
     if (!sesName || !sesStart || !sesEnd) { setSesError('Name, start date, and end date are required.'); return }
+    if (sesStart >= sesEnd) { setSesError('Start date must be before end date.'); return }
+
+    // Warn-not-block, per owner decision: shrinking an existing session's
+    // dates below an already-saved term's range doesn't get silently
+    // rejected (that would trap an admin fixing a genuine typo), but it
+    // must never happen silently either. Fetch this session's own terms
+    // fresh rather than relying on `terms` state, which only ever holds
+    // whichever session is currently selected in the picker above — not
+    // necessarily the one being edited here.
+    if (editingSession) {
+      const existingTermsRes = await loadTerms(schoolId, editingSession.id)
+      const existingTerms = existingTermsRes.error ? [] : existingTermsRes.data
+      const orphaned = existingTerms.filter(t => t.start_date < sesStart || t.end_date > sesEnd)
+      if (orphaned.length > 0) {
+        const names = orphaned.map(t => t.name).join(', ')
+        const proceed = confirm(
+          `${orphaned.length} term${orphaned.length > 1 ? 's' : ''} (${names}) already exist${orphaned.length > 1 ? '' : 's'} outside these new session dates. ` +
+          `Saving will not change those terms' own dates, but they'll now sit outside their parent session. Save anyway?`
+        )
+        if (!proceed) return
+      }
+    }
+
     setSesSaving(true)
     const res = await upsertSession(schoolId, { id: editingSession?.id, name: sesName, start_date: sesStart, end_date: sesEnd, is_current: sesCurrent })
     if (res.error) { setSesError(res.error); setSesSaving(false); return }
@@ -1421,6 +1496,23 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
 
   async function handleSaveTerm() {
     if (!termName || !termStart || !termEnd || !selectedSessionId) { setTermError('All fields are required.'); return }
+    if (termStart >= termEnd) { setTermError(`This ${periodWord}'s start date must be before its end date.`); return }
+
+    // A term must fall within its parent session's own dates — this is a
+    // real data-integrity rule, not just a UI nicety, so it's also
+    // enforced at the DB level via a trigger (see
+    // session67_term_bounds_migration.sql). Checking it here too gives
+    // the admin an immediate, specific error instead of a generic
+    // server/DB error surfacing after the round-trip.
+    const parentSession = sessions.find(s => s.id === selectedSessionId)
+    if (parentSession && (termStart < parentSession.start_date || termEnd > parentSession.end_date)) {
+      setTermError(
+        `This ${periodWord}'s dates (${termStart} to ${termEnd}) must fall within its session's dates ` +
+        `(${parentSession.start_date} to ${parentSession.end_date}).`
+      )
+      return
+    }
+
     setTermSaving(true)
     const res = await upsertTerm(schoolId, { id: editingTerm?.id, session_id: selectedSessionId, name: termName, sequence: termSeq, start_date: termStart, end_date: termEnd })
     if (res.error) { setTermError(res.error); setTermSaving(false); return }
@@ -1431,6 +1523,7 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
     }
     setTermSaving(false)
   }
+
 
   if (loading) return <Skeleton />
   if (error) return <ErrorState message={error} onRetry={loadAll} />
@@ -1461,19 +1554,23 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
       {usesTerms && sessions.length > 0 && (
         <>
           <div className="set-section-header set-section-header--spaced">
-            <SectionLabel>Terms in session</SectionLabel>
+            <SectionLabel>{periodWordCap}s in session</SectionLabel>
             <div className="set-section-controls">
               <select className="set-select set-select--sm" value={selectedSessionId ?? ''} onChange={e => setSelectedSessionId(e.target.value)}>
                 {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
-              <button className="set-add-btn" onClick={() => openTermForm()}>+ Add term</button>
+              <button className="set-add-btn" onClick={() => openTermForm()}>+ Add {periodWord}</button>
             </div>
           </div>
 
           {termsLoading
             ? <Skeleton lines={3} />
             : terms.length === 0
-              ? <p className="set-empty-hint">No terms for this session. Add the 1st, 2nd, 3rd terms etc.</p>
+              ? <p className="set-empty-hint">
+                  {isHigherEd
+                    ? 'No semesters for this session. Add First Semester, Second Semester etc.'
+                    : 'No terms for this session. Add the 1st, 2nd, 3rd terms etc.'}
+                </p>
               : terms.map(t => (
                 <div key={t.id} className="set-list-row">
                   <div className="set-list-row-info">
@@ -1509,8 +1606,8 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
       {showTermForm && (
         <div className="set-overlay" onClick={() => setShowTermForm(false)}>
           <div className="set-sheet" onClick={e => e.stopPropagation()}>
-            <h2 className="set-sheet-title">{editingTerm ? 'Edit term' : 'Add term'}</h2>
-            <FieldRow label="Name"><Input value={termName} onChange={setTermName} placeholder="e.g. First Term" /></FieldRow>
+            <h2 className="set-sheet-title">{editingTerm ? `Edit ${periodWord}` : `Add ${periodWord}`}</h2>
+            <FieldRow label="Name"><Input value={termName} onChange={setTermName} placeholder={isHigherEd ? 'e.g. First Semester' : 'e.g. First Term'} /></FieldRow>
             <FieldRow label="Sequence">
               <select className="set-select" value={termSeq} onChange={e => setTermSeq(Number(e.target.value))}>
                 {[1, 2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n}</option>)}
@@ -1532,7 +1629,15 @@ function CalendarTab({ schoolId }: { schoolId: string }) {
 
 // ─── Tab: Schedule ────────────────────────────────────────────────────────────
 
-function ScheduleTab({ schoolId }: { schoolId: string }) {
+function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: string | null }) {
+  // Bug fix (build error TS2304): the calendar-days/holidays sub-panel
+  // below (extends_term chip, "Extend the term/session" toggle, its hint
+  // text, the Mid-term/semester placeholder) actually lives in this
+  // component, not in CalendarTab — periodWord/isHigherEd were originally
+  // added to CalendarTab under the wrong assumption both panels were the
+  // same function. Threading schoolType through here directly instead.
+  const isHigherEd = isHigherInstitutionSchoolType(schoolType)
+  const periodWord = isHigherEd ? 'semester' : 'term'
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [weekDays, setWeekDays] = useState<number[]>([])
@@ -1838,7 +1943,7 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
                 <span className={`set-caldaytype-chip set-caldaytype-chip--${d.day_type}`}>
                   {CAL_DAY_TYPE_LABELS[d.day_type]}
                 </span>
-                {d.extends_term && <span className="set-extends-chip">Extends term</span>}
+                {d.extends_term && <span className="set-extends-chip">Extends {periodWord}</span>}
               </p>
               {d.label && <p className="set-list-row-meta">{d.label}</p>}
             </div>
@@ -1880,18 +1985,18 @@ function ScheduleTab({ schoolId }: { schoolId: string }) {
             </FieldRow>
 
             <FieldRow label="Label (optional)">
-              <Input value={calLabel} onChange={setCalLabel} placeholder="e.g. Eid al-Fitr, Mid-term break" />
+              <Input value={calLabel} onChange={setCalLabel} placeholder={isHigherEd ? 'e.g. Eid al-Fitr, Mid-semester break' : 'e.g. Eid al-Fitr, Mid-term break'} />
             </FieldRow>
 
             <Toggle
               checked={calExtends}
               onChange={setCalExtends}
-              label="Extend the term/session end date to make up for this"
+              label={`Extend the ${periodWord}/session end date to make up for this`}
             />
             <p className="set-field-hint">
-              On: a school-day lost to this entry pushes the term's effective end date out by one
+              On: a school-day lost to this entry pushes the {periodWord}'s effective end date out by one
               day, so the same number of teaching days is still delivered. Off: this is just a
-              marked exception inside the term as originally planned — the common choice for a
+              marked exception inside the {periodWord} as originally planned — the common choice for a
               single stray public holiday. Only applies to dates that would otherwise have been
               real school days; already non-school dates (per the school week above) are ignored
               either way.
@@ -2681,17 +2786,21 @@ function CurriculumTab({ schoolId }: { schoolId: string }) {
         </FieldRow>
       )}
 
-      {/* Term picker only appears when this school actually has terms
-          defined for the current session — otherwise curriculum is scoped
-          by session alone (term_id stays null throughout), per §7.4. */}
+      {/* SESSION 67: "Semester" not "Term" — this tab is higher-ed-only
+          (gated behind isHigherEd in buildTabs, never rendered for a
+          secondary school), so no branching is needed here, just a
+          straight wording correction. Semester picker only appears when
+          this school actually has terms defined for the current session
+          — otherwise curriculum is scoped by session alone (term_id
+          stays null throughout), per §7.4. */}
       {selectedLevelId && terms.length > 0 && (
-        <FieldRow label="Term">
+        <FieldRow label="Semester">
           <select
             className="set-select"
             value={selectedTermId ?? ''}
             onChange={e => setSelectedTermId(e.target.value || null)}
           >
-            <option value="">Choose a term</option>
+            <option value="">Choose a semester</option>
             {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </FieldRow>
@@ -2708,7 +2817,7 @@ function CurriculumTab({ schoolId }: { schoolId: string }) {
           ) : entriesLoading ? (
             <p className="set-hint-text">Loading…</p>
           ) : entries.length === 0 ? (
-            <p className="set-empty-hint">No courses assigned yet for this {terms.length > 0 ? 'level/term' : 'level'}.</p>
+            <p className="set-empty-hint">No courses assigned yet for this {terms.length > 0 ? 'level/semester' : 'level'}.</p>
           ) : (
             <>
               <p className="set-hint-text">
@@ -2735,7 +2844,7 @@ function CurriculumTab({ schoolId }: { schoolId: string }) {
       )}
 
       {selectedLevelId && terms.length > 0 && !selectedTermId && (
-        <p className="set-empty-hint">Choose a term to view or edit that term's curriculum.</p>
+        <p className="set-empty-hint">Choose a semester to view or edit that semester's curriculum.</p>
       )}
 
       {showAddForm && (
@@ -2803,6 +2912,13 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
   const [terms, setTerms] = useState<Term[]>([])
   const [courses, setCourses] = useState<Course[]>([])
   const [staff, setStaff] = useState<StaffListItem[]>([])
+  // SESSION 69: programme/level pickers for the offering form — reuses
+  // loadProgrammes()/loadProgrammeLevels() exactly as CurriculumTab does
+  // above, not a new picker pattern. Kept separate from the
+  // selectedSessionId/selectedTermId picker above (which scopes the
+  // OFFERINGS LIST), since this pair scopes the FORM's course filter only.
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [levelsByProgramme, setLevelsByProgramme] = useState<Record<string, ProgrammeLevel[]>>({})
 
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [selectedTermId, setSelectedTermId] = useState<string | null>(null)
@@ -2812,6 +2928,8 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
 
   const [showForm, setShowForm] = useState(false)
   const [editingOffering, setEditingOffering] = useState<CourseOffering | null>(null)
+  const [fProgrammeId, setFProgrammeId] = useState<string | null>(null)
+  const [fLevelId, setFLevelId] = useState<string | null>(null)
   const [fCourseId, setFCourseId] = useState<string | null>(null)
   const [fStaffId, setFStaffId] = useState<string | null>(null)
   const [fThreshold, setFThreshold] = useState('')
@@ -2819,21 +2937,49 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
   const [fError, setFError] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
+  // SESSION 69: curriculum entries for the currently-picked level/term in
+  // the FORM — drives the filtered course dropdown. Separate from
+  // CurriculumTab's own `entries` state (different component instance);
+  // reuses the same loadCurriculum() call, not a new query.
+  const [formCurriculum, setFormCurriculum] = useState<CurriculumEntry[]>([])
+  const [formCurriculumLoading, setFormCurriculumLoading] = useState(false)
+  // Deliberate, visible override — an admin must actively opt out of the
+  // curriculum filter, not have it silently bypassed. Resets to false every
+  // time the form re-opens (see openForm below), so it's never accidentally
+  // left on from a previous offering.
+  const [fShowAllCourses, setFShowAllCourses] = useState(false)
+  // Save-time soft warning state — mirrors CourseRegistrationModule.tsx's
+  // checkCreditLoad()-then-confirm shape: a real question surfaced to the
+  // admin, not a silent save. Cleared whenever the course/level selection
+  // changes, so a stale warning can never linger against a new choice.
+  const [fOffCurriculumConfirm, setFOffCurriculumConfirm] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [sessRes, cRes, stRes, curRes] = await Promise.all([
+    const [sessRes, cRes, stRes, curRes, pRes] = await Promise.all([
       loadSessions(schoolId),
       loadCourses(schoolId),
       loadStaffWithRoles(schoolId),
       loadCurrentSession(schoolId),
+      loadProgrammes(schoolId),
     ])
     if (sessRes.error) { setError(sessRes.error); setLoading(false); return }
     if (cRes.error) { setError(cRes.error); setLoading(false); return }
     if (stRes.error) { setError(stRes.error); setLoading(false); return }
+    if (pRes.error) { setError(pRes.error); setLoading(false); return }
     setSessions(sessRes.data)
     setCourses(cRes.data)
     setStaff(stRes.data)
+    setProgrammes(pRes.data)
+    // Same pattern CurriculumTab uses: fetch every programme's levels up
+    // front, keyed by programme id, rather than lazily per-select — the
+    // form's Level dropdown needs to react instantly to a Programme pick
+    // with no extra loading state in between.
+    const levelEntries = await Promise.all(
+      pRes.data.map(async (prog: Programme) => [prog.id, (await loadProgrammeLevels(prog.id)).data] as const),
+    )
+    setLevelsByProgramme(Object.fromEntries(levelEntries))
     // Default the picker to the current session, same convention
     // CurriculumTab uses for its own term default — an admin opening this
     // tab almost always wants to see/build the current session's offerings
@@ -2865,12 +3011,51 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
 
   useEffect(() => { loadOfferingsList() }, [loadOfferingsList])
 
+  // SESSION 69: form's course filter — loads curriculum entries for the
+  // picked level, scoped to the SAME term the offering itself will be
+  // saved under (selectedTermId, the list-scoping picker above), not a
+  // separate term choice in the form. Deliberately reuses loadCurriculum()
+  // as-is — same function CurriculumTab calls, same fan-out-safe scoping
+  // (programme_level_id + term_id together, see PRD SESSION 57 finding).
+  const loadFormCurriculum = useCallback(async () => {
+    if (!fLevelId) { setFormCurriculum([]); return }
+    setFormCurriculumLoading(true)
+    const res = await loadCurriculum(fLevelId, terms.length > 0 ? selectedTermId : null)
+    setFormCurriculum(res.error ? [] : res.data)
+    setFormCurriculumLoading(false)
+  }, [fLevelId, selectedTermId, terms.length])
+
+  useEffect(() => { loadFormCurriculum() }, [loadFormCurriculum])
+
+  const formLevels = fProgrammeId ? (levelsByProgramme[fProgrammeId] ?? []) : []
+  // The actual list the course dropdown renders: curriculum-filtered by
+  // default once a level is chosen, full catalogue if no level is chosen
+  // yet OR the admin has explicitly opted into "show all courses" (§7.27.2
+  // amendment — filtering guides, it never hard-blocks).
+  const formCourseOptions = (!fLevelId || fShowAllCourses)
+    ? courses
+    : courses.filter(c => formCurriculum.some(e => e.course_id === c.id))
+  const selectedCourseOnCurriculum = !fCourseId || formCurriculum.some(e => e.course_id === fCourseId)
+
   function openForm(o?: CourseOffering) {
     setEditingOffering(o ?? null)
+    // Programme isn't stored directly on CourseOffering (only
+    // programme_level_id is) — resolving the programme by scanning
+    // levelsByProgramme (small, already-loaded data, no extra query)
+    // rather than storing a redundant programme_id-derivable-from-level
+    // echo in local state beyond what's needed to drive the picker.
+    const existingLevelId = o?.programme_level_id ?? null
+    const existingProgrammeId = existingLevelId
+      ? Object.entries(levelsByProgramme).find(([, levels]) => levels.some(l => l.id === existingLevelId))?.[0] ?? null
+      : null
+    setFProgrammeId(existingProgrammeId)
+    setFLevelId(existingLevelId)
     setFCourseId(o?.course_id ?? null)
     setFStaffId(o?.staff_id ?? null)
     setFThreshold(o?.attendance_eligibility_threshold_pct != null ? String(o.attendance_eligibility_threshold_pct) : '')
     setFError(null)
+    setFShowAllCourses(false)
+    setFOffCurriculumConfirm(false)
     setShowForm(true)
   }
 
@@ -2885,6 +3070,22 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
         return
       }
     }
+    // SESSION 69 soft warning — non-blocking, matches
+    // CourseRegistrationModule.tsx's checkCreditLoad()-then-confirm shape:
+    // a course chosen while curriculum-filtered is on-curriculum by
+    // construction and never hits this; a course chosen via the explicit
+    // "show all courses" override might not be, which is a real, surfaced
+    // question, not a silent save. Only fires once per attempt — a second
+    // click with fOffCurriculumConfirm already true proceeds.
+    if (fLevelId && !selectedCourseOnCurriculum && !fOffCurriculumConfirm) {
+      const course = courses.find(c => c.id === fCourseId)
+      setFError(
+        `${course ? `${course.code} — ${course.title}` : 'This course'} isn't on this level's curriculum yet. ` +
+        `Click Save again to save it anyway, or add it to the curriculum first.`,
+      )
+      setFOffCurriculumConfirm(true)
+      return
+    }
     setFSaving(true)
     const res = await upsertCourseOffering({
       id: editingOffering?.id,
@@ -2892,6 +3093,8 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
       session_id: selectedSessionId,
       term_id: terms.length > 0 ? selectedTermId : null,
       staff_id: fStaffId,
+      programme_id: fProgrammeId,
+      programme_level_id: fLevelId,
       attendance_eligibility_threshold_pct: threshold,
     })
     if (res.error) { setFError(res.error); setFSaving(false); return }
@@ -2907,6 +3110,103 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
     if (res.error) { alert(res.error); setDeletingId(null); return }
     setOfferings(prev => prev.filter(o => o.id !== offeringId))
     setDeletingId(null)
+  }
+
+  // ─── List regrouping (SESSION 69 follow-up) ─────────────────────────────
+  //
+  // Groups the flat `offerings` list into Programme → Level, in the same
+  // order programmes/levels already appear via loadProgrammes()/
+  // loadProgrammeLevels() (levels come back level_label/sequence_order-
+  // ordered per settingsService.ts's own query — not re-sorted here).
+  // Three real, permanent cases, not one flat list with gaps papered over:
+  //   - offering has both programme_id/programme_level_id -> filed under
+  //     that programme's level.
+  //   - offering has a programme_id but its programme_level_id doesn't
+  //     match any level currently in levelsByProgramme (a level deleted
+  //     out from under an existing offering) -> filed under that
+  //     programme's own "Unassigned level" bucket, not silently dropped or
+  //     merged into the top-level Unassigned group, since the programme
+  //     fact is still real even though the level fact no longer resolves.
+  //   - offering has no programme_id at all (pre-SESSION-69 row, or a
+  //     genuinely shared/university-wide offering, §7.27.2 amendment) ->
+  //     filed under the top-level "Unassigned" group.
+  // Built with a plain object accumulator (not Map) so it round-trips
+  // through nothing more exotic than JSX .map(), matching this file's own
+  // existing style elsewhere (levelsByProgramme itself is a plain Record).
+  type OfferingGroup = { level: ProgrammeLevel | null; offerings: CourseOffering[] }
+  type ProgrammeGroup = { programme: Programme | null; levelGroups: OfferingGroup[] }
+
+  function buildGroupedOfferings(): ProgrammeGroup[] {
+    const unassignedProgrammeOfferings: CourseOffering[] = []
+    const byProgramme: Record<string, CourseOffering[]> = {}
+
+    for (const o of offerings) {
+      if (!o.programme_id) { unassignedProgrammeOfferings.push(o); continue }
+      if (!byProgramme[o.programme_id]) byProgramme[o.programme_id] = []
+      byProgramme[o.programme_id].push(o)
+    }
+
+    const groups: ProgrammeGroup[] = []
+
+    for (const prog of programmes) {
+      const progOfferings = byProgramme[prog.id]
+      if (!progOfferings || progOfferings.length === 0) continue
+
+      const levels = levelsByProgramme[prog.id] ?? []
+      const byLevel: Record<string, CourseOffering[]> = {}
+      const unassignedLevelOfferings: CourseOffering[] = []
+
+      for (const o of progOfferings) {
+        const level = o.programme_level_id ? levels.find(l => l.id === o.programme_level_id) : undefined
+        if (!level) { unassignedLevelOfferings.push(o); continue }
+        if (!byLevel[level.id]) byLevel[level.id] = []
+        byLevel[level.id].push(o)
+      }
+
+      const levelGroups: OfferingGroup[] = levels
+        .filter(l => byLevel[l.id]?.length > 0)
+        .map(l => ({ level: l, offerings: byLevel[l.id] }))
+
+      if (unassignedLevelOfferings.length > 0) {
+        levelGroups.push({ level: null, offerings: unassignedLevelOfferings })
+      }
+
+      groups.push({ programme: prog, levelGroups })
+    }
+
+    if (unassignedProgrammeOfferings.length > 0) {
+      groups.push({ programme: null, levelGroups: [{ level: null, offerings: unassignedProgrammeOfferings }] })
+    }
+
+    return groups
+  }
+
+  // Shared row markup, unchanged from the previous flat list — regrouping
+  // only changes what wraps each row, not the row itself, so editing/
+  // deleting an offering works identically to before.
+  function renderOfferingRow(o: CourseOffering) {
+    return (
+      <div key={o.id} className="set-list-row">
+        <div className="set-list-row-info">
+          <p className="set-list-row-name">{o.course_code} — {o.course_title}</p>
+          <p className="set-list-row-meta">
+            {o.staff_name ? `Lecturer: ${o.staff_name}` : 'No lecturer assigned'}
+            {o.attendance_eligibility_threshold_pct != null ? ` · ${o.attendance_eligibility_threshold_pct}% eligibility threshold` : ''}
+          </p>
+        </div>
+        <div className="set-list-row-actions">
+          <button className="set-edit-btn" onClick={() => openForm(o)}>Edit</button>
+          <button
+            className="set-delete-btn"
+            onClick={() => handleDelete(o.id, `${o.course_code} — ${o.course_title}`)}
+            disabled={deletingId === o.id}
+            aria-label={`Delete offering ${o.course_code}`}
+          >
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+      </div>
+    )
   }
 
   if (loading) return <Skeleton />
@@ -2925,14 +3225,17 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
         </select>
       </FieldRow>
 
+      {/* SESSION 67: "Semester" not "Term" — OfferingsTab is higher-ed-only
+          (gated behind isHigherEd in buildTabs), so a straight wording fix,
+          same reasoning as CurriculumTab above. */}
       {selectedSessionId && terms.length > 0 && (
-        <FieldRow label="Term">
+        <FieldRow label="Semester">
           <select
             className="set-select"
             value={selectedTermId ?? ''}
             onChange={e => setSelectedTermId(e.target.value || null)}
           >
-            <option value="">Choose a term</option>
+            <option value="">Choose a semester</option>
             {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </FieldRow>
@@ -2949,48 +3252,118 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
           ) : offeringsLoading ? (
             <p className="set-hint-text">Loading…</p>
           ) : offerings.length === 0 ? (
-            <p className="set-empty-hint">No offerings yet for this {terms.length > 0 ? 'session/term' : 'session'}.</p>
+            <p className="set-empty-hint">No offerings yet for this {terms.length > 0 ? 'session/semester' : 'session'}.</p>
           ) : (
-            offerings.map(o => (
-              <div key={o.id} className="set-list-row">
-                <div className="set-list-row-info">
-                  <p className="set-list-row-name">{o.course_code} — {o.course_title}</p>
-                  <p className="set-list-row-meta">
-                    {o.staff_name ? `Lecturer: ${o.staff_name}` : 'No lecturer assigned'}
-                    {o.attendance_eligibility_threshold_pct != null ? ` · ${o.attendance_eligibility_threshold_pct}% eligibility threshold` : ''}
-                  </p>
+            <div className="set-offerings-grouped">
+              {buildGroupedOfferings().map((pg, pgIdx) => (
+                <div key={pg.programme?.id ?? 'unassigned-programme'} className="set-offerings-programme-group">
+                  <h3 className="set-offerings-programme-heading">
+                    {pg.programme ? pg.programme.name : 'Unassigned'}
+                  </h3>
+                  {pg.levelGroups.map((lg, lgIdx) => (
+                    <div key={lg.level?.id ?? `unassigned-level-${pgIdx}-${lgIdx}`} className="set-offerings-level-group">
+                      {/* Only show a level sub-heading when the programme is
+                          real — the top-level "Unassigned" bucket (no
+                          programme at all) has nothing meaningful to say at
+                          the level tier, so it skips straight to rows rather
+                          than showing a redundant "Unassigned > Unassigned". */}
+                      {pg.programme && (
+                        <h4 className="set-offerings-level-heading">
+                          {lg.level ? lg.level.level_label : 'Unassigned level'}
+                        </h4>
+                      )}
+                      <div className="set-offerings-rows">
+                        {lg.offerings.map(o => renderOfferingRow(o))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="set-list-row-actions">
-                  <button className="set-edit-btn" onClick={() => openForm(o)}>Edit</button>
-                  <button
-                    className="set-delete-btn"
-                    onClick={() => handleDelete(o.id, `${o.course_code} — ${o.course_title}`)}
-                    disabled={deletingId === o.id}
-                    aria-label={`Delete offering ${o.course_code}`}
-                  >
-                    <Icon name="x" size={16} />
-                  </button>
-                </div>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </>
       )}
 
       {selectedSessionId && terms.length > 0 && !selectedTermId && (
-        <p className="set-empty-hint">Choose a term to view or add offerings for that term.</p>
+        <p className="set-empty-hint">Choose a semester to view or add offerings for that semester.</p>
       )}
 
       {showForm && (
         <div className="set-overlay" onClick={() => setShowForm(false)}>
           <div className="set-sheet" onClick={e => e.stopPropagation()}>
             <h2 className="set-sheet-title">{editingOffering ? 'Edit offering' : 'Add offering'}</h2>
-            <FieldRow label="Course">
-              <select className="set-select" value={fCourseId ?? ''} onChange={e => setFCourseId(e.target.value || null)}>
-                <option value="">Choose a course</option>
-                {courses.map(c => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+
+            {/* SESSION 69: Programme → Level, above Course — reuses the
+                same picker pattern as CurriculumTab, not a new one. Both
+                optional: an offering with no programme/level is a real,
+                intentional state (unassigned, or genuinely shared across
+                programmes), not an incomplete form. */}
+            <FieldRow label="Programme (optional)">
+              <select
+                className="set-select"
+                value={fProgrammeId ?? ''}
+                onChange={e => {
+                  setFProgrammeId(e.target.value || null)
+                  setFLevelId(null)
+                  setFShowAllCourses(false)
+                  setFOffCurriculumConfirm(false)
+                }}
+              >
+                <option value="">No programme (shared/unassigned)</option>
+                {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </FieldRow>
+
+            {fProgrammeId && (
+              <FieldRow label="Level (optional)">
+                <select
+                  className="set-select"
+                  value={fLevelId ?? ''}
+                  onChange={e => {
+                    setFLevelId(e.target.value || null)
+                    setFShowAllCourses(false)
+                    setFOffCurriculumConfirm(false)
+                  }}
+                >
+                  <option value="">No specific level</option>
+                  {formLevels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+                </select>
+              </FieldRow>
+            )}
+
+            <FieldRow label="Course">
+              <select
+                className="set-select"
+                value={fCourseId ?? ''}
+                onChange={e => { setFCourseId(e.target.value || null); setFOffCurriculumConfirm(false) }}
+              >
+                <option value="">Choose a course</option>
+                {formCourseOptions.map(c => <option key={c.id} value={c.id}>{c.code} — {c.title}</option>)}
+              </select>
+            </FieldRow>
+
+            {/* Filtered-empty state: don't dead-end the admin — either
+                reveal the override or point them at CurriculumTab, same
+                programme/level already in hand for the deep link. */}
+            {fLevelId && !fShowAllCourses && !formCurriculumLoading && formCourseOptions.length === 0 && (
+              <p className="set-empty-hint">
+                No courses on this level's curriculum yet.{' '}
+                <button type="button" className="set-inline-link" onClick={() => setFShowAllCourses(true)}>
+                  Show all courses instead
+                </button>
+                , or add courses to the curriculum first.
+              </p>
+            )}
+
+            {fLevelId && !fShowAllCourses && !formCurriculumLoading && formCourseOptions.length > 0 && (
+              <p className="set-hint-text">
+                Showing courses on this level's curriculum.{' '}
+                <button type="button" className="set-inline-link" onClick={() => setFShowAllCourses(true)}>
+                  Show all courses instead
+                </button>
+              </p>
+            )}
+
             <FieldRow label="Lecturer (optional)">
               <select className="set-select" value={fStaffId ?? ''} onChange={e => setFStaffId(e.target.value || null)}>
                 <option value="">Unassigned</option>
@@ -4121,6 +4494,734 @@ function SubjectsTab({ schoolId }: { schoolId: string }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── Tab: Admission (SESSION 65c, redesign proposal §7/§8) ─────────────────────
+//
+// Five independent sections on one tab, matching the proposal's own §7/§8
+// grouping: master switch, pipelines (+ per-pipeline stage/component
+// checklist), application field settings, matric number format (relocated
+// here from AdmissionModule.tsx per 65b's own note — logic unchanged, still
+// backed by admissionService.ts's matric functions), and the rejection
+// retention window. Kept as one tab (not five) because they're all
+// "admission configuration" from the owner's point of view and none is
+// large enough alone to earn a dedicated top-level tab, unlike e.g.
+// Offerings vs Curriculum.
+
+function AdmissionSettingsTab({ schoolId }: { schoolId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [master, setMaster] = useState<AdmissionMasterSettingsLocal | null>(null)
+  const [pipelines, setPipelines] = useState<AdmissionPipeline[]>([])
+  const [fieldSettings, setFieldSettings] = useState<AdmissionFieldSettings | null>(null)
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [matricFormat, setMatricFormat] = useState<MatricNumberFormat | null>(null)
+  const [hasMatricAdmissions, setHasMatricAdmissions] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [masterRes, pipelinesRes, fieldRes, progRes, matricRes, matricLockRes] = await Promise.all([
+      loadAdmissionMasterSettings(schoolId),
+      loadAllPipelines(schoolId),
+      loadFieldSettings(schoolId),
+      loadProgrammes(schoolId),
+      loadMatricNumberFormat(schoolId),
+      hasAnyMatricAdmissions(schoolId),
+    ])
+    if (masterRes.error) { setError(masterRes.error); setLoading(false); return }
+    if (pipelinesRes.error) { setError(pipelinesRes.error); setLoading(false); return }
+    if (fieldRes.error) { setError(fieldRes.error); setLoading(false); return }
+    if (matricRes.error) { setError(matricRes.error); setLoading(false); return }
+    setMaster(masterRes.data)
+    setPipelines(pipelinesRes.data)
+    setFieldSettings(fieldRes.data)
+    setProgrammes(progRes.data)
+    setMatricFormat(matricRes.data)
+    setHasMatricAdmissions(matricLockRes.data)
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Skeleton />
+  if (error) return <ErrorState message={error} onRetry={load} />
+
+  return (
+    <div className="set-tab-content">
+      <AdmissionMasterSwitchSection schoolId={schoolId} master={master} onChange={setMaster} />
+      <AdmissionPipelinesSection schoolId={schoolId} pipelines={pipelines} programmes={programmes} onReload={load} />
+      <AdmissionFieldSettingsSection schoolId={schoolId} fieldSettings={fieldSettings} onReload={load} />
+      <AdmissionMatricFormatSection
+        schoolId={schoolId}
+        format={matricFormat}
+        hasAdmissions={hasMatricAdmissions}
+        onReload={load}
+      />
+      <AdmissionRetentionSection schoolId={schoolId} master={master} onChange={setMaster} />
+    </div>
+  )
+}
+
+// Local alias, not re-exported from admissionService.ts as a name change —
+// just avoids the section components below each re-declaring the same
+// inline shape.
+type AdmissionMasterSettingsLocal = { admission_pipeline_enabled: boolean; rejection_retention_days: number }
+
+// ─── Admission: master switch ───────────────────────────────────────────────
+//
+// Per the proposal's §5 requirement ("a real confirmation step since it
+// changes how every future student gets added") — this is a native confirm()
+// dialog, matching the same pattern RolesTab's handleDelete() already uses
+// for its own irreversible-ish action, rather than inventing a new modal
+// pattern for just this one toggle.
+
+function AdmissionMasterSwitchSection({
+  schoolId, master, onChange,
+}: {
+  schoolId: string
+  master: AdmissionMasterSettingsLocal | null
+  onChange: (m: AdmissionMasterSettingsLocal) => void
+}) {
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function handleToggle(next: boolean) {
+    const verb = next ? 'enable' : 'disable'
+    const consequence = next
+      ? 'Once enabled, students can no longer be added directly from the Students module — all new admissions must go through the pipeline here.'
+      : 'Once disabled, staff will be able to add students directly again, bypassing the admission pipeline.'
+    if (!confirm(`${verb.charAt(0).toUpperCase() + verb.slice(1)} the admission pipeline?\n\n${consequence}`)) return
+    setSaving(true)
+    setErr(null)
+    const res = await setAdmissionPipelineEnabled(schoolId, next)
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    if (master) onChange({ ...master, admission_pipeline_enabled: next })
+    setSaving(false)
+  }
+
+  return (
+    <div className="set-section-header" style={{ marginBottom: 0 }}>
+      <div className="set-list-row" style={{ padding: 0, border: 'none' }}>
+        <div className="set-list-row-info">
+          <p className="set-list-row-name">Admission pipeline</p>
+          <p className="set-list-row-meta">
+            {master?.admission_pipeline_enabled
+              ? 'Enabled — new students are added only through admission applications below.'
+              : 'Disabled — students can still be added directly from the Students module.'}
+          </p>
+          {saving && <p className="set-list-row-meta">Saving…</p>}
+          {err && <p className="set-form-error">{err}</p>}
+        </div>
+        <div style={{ opacity: saving ? 0.6 : 1, pointerEvents: saving ? 'none' : 'auto' }} aria-disabled={saving}>
+          <Toggle
+            checked={master?.admission_pipeline_enabled ?? false}
+            onChange={handleToggle}
+            label="Admission pipeline enabled"
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Admission: pipelines + stage/component checklist ──────────────────────
+//
+// Per §4.2/§7 of the proposal: each pipeline has a matching rule
+// (applies_to: entry_mode/programme_id, or is_default) and an ordered set of
+// stages (screening/decision/clearance, fixed order per the §12 decision),
+// each stage carrying a component checklist. Stage add/remove is
+// presence-based (upsertPipelineStage keyed on pipeline_id+stage,
+// deletePipelineStage by row id) — matching the service layer's own
+// documented convention, not a separate "stage order" field, since order is
+// fixed application-wide, not per-pipeline.
+
+const PIPELINE_STAGE_TYPES: { type: PipelineStageType; label: string; components: { key: string; label: string }[] }[] = [
+  {
+    type: 'screening', label: 'Screening',
+    components: [
+      { key: 'document_review', label: 'Document review' },
+      { key: 'jamb_verification', label: 'JAMB verification' },
+      { key: 'olevel_verification', label: "O'Level verification" },
+      { key: 'interview', label: 'Interview' },
+      { key: 'aptitude_test', label: 'Aptitude test' },
+    ],
+  },
+  {
+    type: 'decision', label: 'Decision',
+    components: [
+      { key: 'committee_review', label: 'Committee review' },
+      { key: 'programme_confirmation', label: 'Programme/level confirmation' },
+    ],
+  },
+  {
+    type: 'clearance', label: 'Clearance',
+    components: [
+      { key: 'fee_payment', label: 'Fee payment' },
+      { key: 'medical_clearance', label: 'Medical clearance' },
+      { key: 'document_submission', label: 'Original document submission' },
+    ],
+  },
+]
+
+function AdmissionPipelinesSection({
+  schoolId, pipelines, programmes, onReload,
+}: {
+  schoolId: string
+  pipelines: AdmissionPipeline[]
+  programmes: Programme[]
+  onReload: () => void
+}) {
+  const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<AdmissionPipeline | null>(null)
+  const [name, setName] = useState('')
+  const [entryMode, setEntryMode] = useState<EntryMode | ''>('')
+  const [programmeId, setProgrammeId] = useState('')
+  const [isDefault, setIsDefault] = useState(false)
+  const [isActive, setIsActive] = useState(true)
+  const [stageComponents, setStageComponents] = useState<Record<PipelineStageType, Record<string, boolean>>>({
+    screening: {}, decision: {}, clearance: {},
+  })
+  const [saving, setSaving] = useState(false)
+  const [formErr, setFormErr] = useState<string | null>(null)
+
+  function openForm(p?: AdmissionPipeline) {
+    setEditing(p ?? null)
+    setName(p?.name ?? '')
+    setEntryMode((p?.applies_to.entry_mode as EntryMode) ?? '')
+    setProgrammeId(p?.applies_to.programme_id ?? '')
+    setIsDefault(p?.is_default ?? false)
+    setIsActive(p?.is_active ?? true)
+    const initial: Record<PipelineStageType, Record<string, boolean>> = { screening: {}, decision: {}, clearance: {} }
+    p?.stages.forEach(s => { initial[s.stage] = { ...s.components } })
+    setStageComponents(initial)
+    setFormErr(null)
+    setShowForm(true)
+  }
+
+  function toggleComponent(stage: PipelineStageType, key: string) {
+    setStageComponents(prev => ({
+      ...prev,
+      [stage]: { ...prev[stage], [key]: !prev[stage][key] },
+    }))
+  }
+
+  async function handleSave() {
+    if (!name.trim()) { setFormErr('Pipeline name is required.'); return }
+    setSaving(true)
+    setFormErr(null)
+
+    const appliesTo: { entry_mode?: EntryMode; programme_id?: string } = {}
+    if (entryMode) appliesTo.entry_mode = entryMode
+    if (programmeId) appliesTo.programme_id = programmeId
+
+    const res = await upsertPipeline(schoolId, {
+      id: editing?.id,
+      name: name.trim(),
+      applies_to: appliesTo,
+      is_default: isDefault,
+      is_active: isActive,
+    })
+    if (res.error || !res.data) { setFormErr(res.error ?? 'Could not save pipeline.'); setSaving(false); return }
+    const pipelineId = res.data.id
+
+    // Reconcile stage rows: upsert any stage with at least one component
+    // checked, delete any existing stage row whose checklist was cleared to
+    // empty — matches upsertPipelineStage()'s own documented contract (a
+    // components: {} state isn't a valid upsert, it's a removal).
+    for (const stageDef of PIPELINE_STAGE_TYPES) {
+      const comps = stageComponents[stageDef.type]
+      const anyChecked = Object.values(comps).some(Boolean)
+      const existing = editing?.stages.find(s => s.stage === stageDef.type)
+      if (anyChecked) {
+        const stageRes = await upsertPipelineStage(pipelineId, stageDef.type, comps)
+        if (stageRes.error) { setFormErr(stageRes.error); setSaving(false); return }
+      } else if (existing) {
+        const delRes = await deletePipelineStage(existing.id)
+        if (delRes.error) { setFormErr(delRes.error); setSaving(false); return }
+      }
+    }
+
+    setShowForm(false)
+    setSaving(false)
+    onReload()
+  }
+
+  function stageSummary(p: AdmissionPipeline): string {
+    if (p.stages.length === 0) return 'No stages — admits or rejects directly'
+    return p.stages.map(s => PIPELINE_STAGE_TYPES.find(d => d.type === s.stage)?.label ?? s.stage).join(' → ')
+  }
+
+  function matchSummary(p: AdmissionPipeline): string {
+    const parts: string[] = []
+    if (p.applies_to.entry_mode) parts.push(p.applies_to.entry_mode === 'utme' ? 'UTME' : 'Direct Entry')
+    if (p.applies_to.programme_id) {
+      const prog = programmes.find(pr => pr.id === p.applies_to.programme_id)
+      parts.push(prog ? prog.name : 'a specific programme')
+    }
+    if (parts.length === 0) return p.is_default ? 'Default pipeline (fallback)' : 'No matching rule set'
+    return `Applies to: ${parts.join(', ')}`
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Admission pipelines</SectionLabel>
+        <button className="set-add-btn" onClick={() => openForm()}>+ Add pipeline</button>
+      </div>
+
+      {pipelines.length === 0
+        ? <p className="set-empty-hint">No pipelines yet. Applications will have no stages assigned until at least one pipeline exists — set one as default to cover every applicant, or add matching rules for specific entry modes/programmes.</p>
+        : pipelines.map(p => (
+          <div key={p.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">
+                {p.name}
+                {p.is_default && <span className="set-admin-chip">Default</span>}
+                {!p.is_active && <span className="set-admin-chip">Inactive</span>}
+              </p>
+              <p className="set-list-row-meta">{matchSummary(p)}</p>
+              <p className="set-list-row-meta">{stageSummary(p)}</p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openForm(p)}>Edit</button>
+            </div>
+          </div>
+        ))
+      }
+
+      {showForm && (
+        <div className="set-overlay" onClick={() => setShowForm(false)}>
+          <div className="set-sheet set-sheet--tall" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editing ? 'Edit pipeline' : 'Add pipeline'}</h2>
+            <FieldRow label="Pipeline name"><Input value={name} onChange={setName} placeholder="e.g. UTME General, Direct Entry Nursing" /></FieldRow>
+
+            <p className="set-section-label set-section-label--mt">Matching rule</p>
+            <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+              Leave both blank if this pipeline should only ever be used as the default fallback.
+            </p>
+            <FieldRow label="Entry mode">
+              <select className="set-select" value={entryMode} onChange={e => setEntryMode(e.target.value as EntryMode | '')}>
+                <option value="">Any entry mode</option>
+                <option value="utme">UTME</option>
+                <option value="direct_entry">Direct Entry</option>
+              </select>
+            </FieldRow>
+            <FieldRow label="Programme">
+              <select className="set-select" value={programmeId} onChange={e => setProgrammeId(e.target.value)}>
+                <option value="">Any programme</option>
+                {programmes.map(pr => <option key={pr.id} value={pr.id}>{pr.name}</option>)}
+              </select>
+            </FieldRow>
+            <Toggle checked={isDefault} onChange={setIsDefault} label="Use as the default pipeline for this school" />
+            <Toggle checked={isActive} onChange={setIsActive} label="Active" />
+
+            <p className="set-section-label set-section-label--mt">Stages</p>
+            <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+              Stage order is fixed (Screening → Decision → Clearance → Admitted/Rejected). Leave a stage's components all unchecked to skip that stage entirely for this pipeline.
+            </p>
+            <div className="set-perm-list">
+              {PIPELINE_STAGE_TYPES.map(stageDef => (
+                <div key={stageDef.type} className="set-perm-module">
+                  <p className="set-perm-module-name">{stageDef.label}</p>
+                  {stageDef.components.map(c => (
+                    <label key={c.key} className="set-perm-row">
+                      <input
+                        type="checkbox"
+                        className="set-perm-check"
+                        checked={!!stageComponents[stageDef.type][c.key]}
+                        onChange={() => toggleComponent(stageDef.type, c.key)}
+                      />
+                      <div><span className="set-perm-desc">{c.label}</span></div>
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            {formErr && <p className="set-form-error">{formErr}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save pipeline'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Admission: application field settings ──────────────────────────────────
+//
+// One shared, school-wide config (confirmed, not per-pipeline — the
+// proposal's own §10 flagged this as an assumption worth confirming; the
+// owner confirmed shared school-wide, which also matches the DB shape
+// already built: admission_field_settings is unique(school_id), not keyed
+// by pipeline). Identity/programme-intent fields aren't listed here at all
+// since they're not configurable, matching FIELD_CONFIG_KEYS' own scope.
+
+function AdmissionFieldSettingsSection({
+  schoolId, fieldSettings, onReload,
+}: {
+  schoolId: string
+  fieldSettings: AdmissionFieldSettings | null
+  onReload: () => void
+}) {
+  const [config, setConfig] = useState<Record<string, { enabled: boolean; required: boolean }>>(
+    fieldSettings?.field_config ?? {},
+  )
+  const [customFields, setCustomFields] = useState<AdmissionCustomField[]>(fieldSettings?.custom_fields ?? [])
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+
+  const [showCustomForm, setShowCustomForm] = useState(false)
+  const [cfKey, setCfKey] = useState('')
+  const [cfLabel, setCfLabel] = useState('')
+  const [cfType, setCfType] = useState<AdmissionCustomField['type']>('text')
+  const [cfOptions, setCfOptions] = useState('')
+  const [cfRequired, setCfRequired] = useState(false)
+
+  useEffect(() => {
+    setConfig(fieldSettings?.field_config ?? {})
+    setCustomFields(fieldSettings?.custom_fields ?? [])
+    setDirty(false)
+  }, [fieldSettings])
+
+  function toggle(key: ConfigurableField, field: 'enabled' | 'required') {
+    setConfig(prev => {
+      const current = prev[key] ?? { enabled: false, required: false }
+      const next = { ...current, [field]: !current[field] }
+      // A field can't be required without being enabled.
+      if (field === 'enabled' && !next.enabled) next.required = false
+      return { ...prev, [key]: next }
+    })
+    setDirty(true)
+  }
+
+  function addCustomField() {
+    if (!cfKey.trim() || !cfLabel.trim()) return
+    const field: AdmissionCustomField = {
+      key: cfKey.trim().toLowerCase().replace(/\s+/g, '_'),
+      label: cfLabel.trim(),
+      type: cfType,
+      required: cfRequired,
+      ...(cfType === 'select' ? { options: cfOptions.split(',').map(o => o.trim()).filter(Boolean) } : {}),
+    }
+    setCustomFields(prev => [...prev, field])
+    setDirty(true)
+    setShowCustomForm(false)
+    setCfKey(''); setCfLabel(''); setCfType('text'); setCfOptions(''); setCfRequired(false)
+  }
+
+  function removeCustomField(key: string) {
+    setCustomFields(prev => prev.filter(f => f.key !== key))
+    setDirty(true)
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    setErr(null)
+    const res = await saveFieldSettings(schoolId, config, customFields)
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    setSaving(false)
+    setDirty(false)
+    onReload()
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Application fields</SectionLabel>
+      </div>
+      <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+        Identity and programme details are always captured. These JAMB/O'Level/Direct Entry fields are optional — enable the ones this school needs, and mark any as required.
+      </p>
+
+      <div className="set-perm-list">
+        <div className="set-perm-module">
+          {FIELD_CONFIG_KEYS.map(f => (
+            <label key={f.key} className="set-perm-row">
+              <input
+                type="checkbox"
+                className="set-perm-check"
+                checked={config[f.key]?.enabled ?? false}
+                onChange={() => toggle(f.key, 'enabled')}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flex: 1 }}>
+                <span className="set-perm-desc">{f.label}</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, opacity: config[f.key]?.enabled ? 1 : 0.4 }}>
+                  <input
+                    type="checkbox"
+                    disabled={!config[f.key]?.enabled}
+                    checked={config[f.key]?.required ?? false}
+                    onChange={() => toggle(f.key, 'required')}
+                  />
+                  Required
+                </label>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="set-section-header" style={{ marginTop: 20 }}>
+        <SectionLabel>Custom fields</SectionLabel>
+        <button className="set-add-btn" onClick={() => setShowCustomForm(true)}>+ Add custom field</button>
+      </div>
+      {customFields.length === 0
+        ? <p className="set-empty-hint">No custom fields defined.</p>
+        : customFields.map(f => (
+          <div key={f.key} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{f.label}{f.required && <span className="set-admin-chip">Required</span>}</p>
+              <p className="set-list-row-meta">{f.type}{f.options ? ` — ${f.options.join(', ')}` : ''}</p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-delete-btn" onClick={() => removeCustomField(f.key)} aria-label={`Remove ${f.label}`}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          </div>
+        ))
+      }
+
+      {err && <p className="set-form-error">{err}</p>}
+      {dirty && (
+        <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+          <button className="set-save-btn" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save field settings'}</button>
+        </div>
+      )}
+
+      {showCustomForm && (
+        <div className="set-overlay" onClick={() => setShowCustomForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">Add custom field</h2>
+            <FieldRow label="Field key"><Input value={cfKey} onChange={setCfKey} placeholder="e.g. sponsor_name" /></FieldRow>
+            <FieldRow label="Label"><Input value={cfLabel} onChange={setCfLabel} placeholder="e.g. Sponsor's Name" /></FieldRow>
+            <FieldRow label="Type">
+              <select className="set-select" value={cfType} onChange={e => setCfType(e.target.value as AdmissionCustomField['type'])}>
+                <option value="text">Text</option>
+                <option value="number">Number</option>
+                <option value="date">Date</option>
+                <option value="select">Select (dropdown)</option>
+              </select>
+            </FieldRow>
+            {cfType === 'select' && (
+              <FieldRow label="Options (comma-separated)"><Input value={cfOptions} onChange={setCfOptions} placeholder="e.g. Yes, No, Not applicable" /></FieldRow>
+            )}
+            <Toggle checked={cfRequired} onChange={setCfRequired} label="Required" />
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowCustomForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={addCustomField}>Add field</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Admission: matric number format ────────────────────────────────────────
+//
+// Relocated here from AdmissionModule.tsx per 65b's own note — the UI editor
+// moved, the underlying data functions (loadMatricNumberFormat/
+// saveMatricNumberFormat/hasAnyMatricAdmissions, admissionService.ts) did
+// not, since that file's header comment already explains why they stay
+// there alongside admitStudent(). The soft-lock warning (§12 decision:
+// "once matric_sequence_counters has any row with current_value > 0") is
+// surfaced here via hasAnyMatricAdmissions, exactly as that function's own
+// comment specifies — this component is responsible for showing it before
+// save, saveMatricNumberFormat() itself does not block.
+
+const MATRIC_COMPONENT_TYPES: { type: MatricNumberComponentType; label: string }[] = [
+  { type: 'programme_code', label: 'Programme code' },
+  { type: 'faculty_code', label: 'Faculty code' },
+  { type: 'department_code', label: 'Department code' },
+  { type: 'session_year', label: 'Session year' },
+  { type: 'constant', label: 'Constant text' },
+  { type: 'sequence', label: 'Sequence number' },
+]
+
+function AdmissionMatricFormatSection({
+  schoolId, format, hasAdmissions, onReload,
+}: {
+  schoolId: string
+  format: MatricNumberFormat | null
+  hasAdmissions: boolean
+  onReload: () => void
+}) {
+  const [components, setComponents] = useState<MatricNumberComponent[]>(format?.components ?? [])
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => { setComponents(format?.components ?? []) }, [format])
+
+  function addComponent(type: MatricNumberComponentType) {
+    setComponents(prev => [
+      ...prev,
+      {
+        type,
+        separator: prev.length === 0 ? null : '/',
+        ...(type === 'constant' ? { value: '' } : {}),
+        ...(type === 'session_year' ? { year_format: '4digit' as const } : {}),
+        ...(type === 'sequence' ? { digits: 4 } : {}),
+      },
+    ])
+  }
+
+  function updateComponent(index: number, patch: Partial<MatricNumberComponent>) {
+    setComponents(prev => prev.map((c, i) => i === index ? { ...c, ...patch } : c))
+  }
+
+  function removeComponent(index: number) {
+    setComponents(prev => prev.filter((_, i) => i !== index))
+  }
+
+  function previewFormat(): string {
+    return components.map((c, i) => {
+      const sep = i === 0 ? '' : (c.separator ?? '')
+      switch (c.type) {
+        case 'programme_code': return sep + 'NUR'
+        case 'faculty_code': return sep + 'SCI'
+        case 'department_code': return sep + 'CSC'
+        case 'session_year': return sep + (c.year_format === '2digit' ? '26' : '2026')
+        case 'constant': return sep + (c.value || '')
+        case 'sequence': return sep + '1'.padStart(c.digits ?? 4, '0')
+        default: return sep
+      }
+    }).join('')
+  }
+
+  async function handleSave() {
+    if (components.length === 0) { setErr('Add at least one component.'); return }
+    if (hasAdmissions) {
+      if (!confirm('This school has already admitted students under the current format. Changing it now starts a new version — existing matric numbers are unaffected, but double-check this is intentional before saving.')) return
+    }
+    setSaving(true)
+    setErr(null)
+    const res = await saveMatricNumberFormat(schoolId, components)
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    setSaving(false)
+    onReload()
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Matric number format</SectionLabel>
+      </div>
+      {hasAdmissions && (
+        <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+          Students have already been admitted under the current format. You can still change it, but existing matric numbers won't be affected — only new admissions will use the updated format.
+        </p>
+      )}
+
+      {components.length === 0
+        ? <p className="set-empty-hint">No format configured yet — new admissions can't be given a matric number until one is set.</p>
+        : (
+          <div className="set-perm-list">
+            <div className="set-perm-module">
+              {components.map((c, i) => (
+                <div key={i} className="set-perm-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                  <span className="set-perm-desc" style={{ minWidth: 130 }}>
+                    {MATRIC_COMPONENT_TYPES.find(t => t.type === c.type)?.label ?? c.type}
+                  </span>
+                  {i > 0 && (
+                    <Input value={c.separator ?? ''} onChange={v => updateComponent(i, { separator: v || null })} placeholder="separator, e.g. /" />
+                  )}
+                  {c.type === 'constant' && (
+                    <Input value={c.value ?? ''} onChange={v => updateComponent(i, { value: v })} placeholder="e.g. UNI" />
+                  )}
+                  {c.type === 'session_year' && (
+                    <select className="set-select set-select--sm" value={c.year_format ?? '4digit'} onChange={e => updateComponent(i, { year_format: e.target.value as '2digit' | '4digit' })}>
+                      <option value="4digit">4 digits (2026)</option>
+                      <option value="2digit">2 digits (26)</option>
+                    </select>
+                  )}
+                  {c.type === 'sequence' && (
+                    <select className="set-select set-select--sm" value={c.digits ?? 4} onChange={e => updateComponent(i, { digits: Number(e.target.value) })}>
+                      {[3, 4, 5, 6].map(n => <option key={n} value={n}>{n} digits</option>)}
+                    </select>
+                  )}
+                  <button className="set-delete-btn" onClick={() => removeComponent(i)} aria-label="Remove component">
+                    <Icon name="x" size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '12px 0' }}>
+        {MATRIC_COMPONENT_TYPES.map(t => (
+          <button key={t.type} className="set-add-btn" onClick={() => addComponent(t.type)}>+ {t.label}</button>
+        ))}
+      </div>
+
+      {components.length > 0 && (
+        <p className="set-list-row-meta">Preview: <strong>{previewFormat()}</strong></p>
+      )}
+
+      {err && <p className="set-form-error">{err}</p>}
+      <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+        <button className="set-save-btn" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save format'}</button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Admission: rejection retention window ──────────────────────────────────
+//
+// §6 of the proposal — the NDPA-driven purge window feeding the pg_cron job
+// (migration_session_65a.sql). A plain numeric setting, deliberately with no
+// confirmation ceremony (see setRejectionRetentionDays()'s own comment on
+// why it's split from the master switch's setter).
+
+function AdmissionRetentionSection({
+  schoolId, master, onChange,
+}: {
+  schoolId: string
+  master: AdmissionMasterSettingsLocal | null
+  onChange: (m: AdmissionMasterSettingsLocal) => void
+}) {
+  const [days, setDays] = useState(String(master?.rejection_retention_days ?? 90))
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => { setDays(String(master?.rejection_retention_days ?? 90)) }, [master?.rejection_retention_days])
+
+  async function handleSave() {
+    const n = Number(days)
+    if (!Number.isFinite(n) || n <= 0) { setErr('Enter a whole number of days greater than zero.'); return }
+    setSaving(true)
+    setErr(null)
+    const res = await setRejectionRetentionDays(schoolId, Math.round(n))
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    if (master) onChange({ ...master, rejection_retention_days: Math.round(n) })
+    setSaving(false)
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Rejected applicant retention</SectionLabel>
+      </div>
+      <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+        Rejected applications are permanently purged this many days after rejection.
+      </p>
+      <FieldRow label="Retention window (days)">
+        <Input value={days} onChange={setDays} placeholder="e.g. 90" type="number" />
+      </FieldRow>
+      {err && <p className="set-form-error">{err}</p>}
+      <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+        <button className="set-save-btn" onClick={handleSave} disabled={saving || days === String(master?.rejection_retention_days ?? 90)}>
+          {saving ? 'Saving…' : 'Save retention window'}
+        </button>
+      </div>
     </div>
   )
 }
