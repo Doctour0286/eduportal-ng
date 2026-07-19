@@ -111,6 +111,13 @@ export interface FeeHeadBreakdown {
   discount: number
   paid: number
   balance: number
+  // The underlying fee_assignment id(s) this fee head's figures were rolled
+  // up from, and how much of the balance is still unpaid per assignment —
+  // needed so the portal can hand real fee_assignment_ids to
+  // remita-initiate-payment. A fee head can in principle roll up more than
+  // one assignment (e.g. a school_wide row and a programme_level row both
+  // tagged under the same fee_head_id), so this is a list, not a single id.
+  payableAssignments: { fee_assignment_id: string; balance: number }[]
 }
 
 export interface FeeSummary {
@@ -119,13 +126,27 @@ export interface FeeSummary {
   totalPaid: number
   balance: number
   breakdown: FeeHeadBreakdown[]
+  // Any Remita payment still awaiting server-side verification (bank
+  // teller/USSD paid but not yet confirmed, or an online payment whose
+  // redirect landed before verification completed). Surfaced separately
+  // from the completed-only balance above so a student isn't shown a
+  // stale "unpaid" balance while a real payment is mid-verification.
+  pendingPayments: PendingPaymentRow[]
+}
+
+export interface PendingPaymentRow {
+  id: string
+  amount: number
+  provider_reference: string | null
+  fee_head_name: string | null
+  created_at: string
 }
 
 export interface PaymentHistoryRow {
   id: string
   amount: number
   method: string
-  paid_at: string
+  paid_at: string | null // null for a payment that failed before ever settling
   notes: string | null
   fee_head_name: string | null
 }
@@ -792,7 +813,8 @@ export async function loadStudentResults(
 export async function loadFeeSummary(
   schoolId: string,
   studentId: string,
-  sessionId: string
+  sessionId: string,
+  isHigherEd: boolean = false
 ): Promise<FeeSummary> {
   const { data: studentRow } = await supabase
     .from('students')
@@ -801,9 +823,29 @@ export async function loadFeeSummary(
     .maybeSingle()
   const classNodeId = studentRow?.class_node_id ?? null
 
+  // Higher-ed only: resolve the student's current programme_level_id via
+  // student_programme_placements (is_current = true) — matching
+  // financeService.ts's loadStudentBalances() resolution exactly (SESSION
+  // 64's isHigherEd branch), not a second, potentially diverging read.
+  // Before this fix, a higher-ed student's programme_level-targeted fee
+  // assignments were invisible here — this file's applicability filter only
+  // ever checked school_wide/class_node/student, so the real enrolled
+  // school (school_type = 'other') would have seen "no fees assigned" even
+  // with real assignments on the books.
+  let studentProgrammeLevelId: string | null = null
+  if (isHigherEd) {
+    const { data: placement } = await supabase
+      .from('student_programme_placements')
+      .select('programme_level_id')
+      .eq('student_id', studentId)
+      .eq('is_current', true)
+      .maybeSingle()
+    studentProgrammeLevelId = placement?.programme_level_id ?? null
+  }
+
   const { data: assignments } = await supabase
     .from('fee_assignments')
-    .select('id, fee_head_id, amount, target_type, class_node_id, student_id, fee_heads ( name )')
+    .select('id, fee_head_id, amount, target_type, class_node_id, student_id, programme_level_id, fee_heads ( name )')
     .eq('school_id', schoolId)
     .eq('session_id', sessionId)
 
@@ -811,6 +853,9 @@ export async function loadFeeSummary(
     if (a.target_type === 'school_wide') return true
     if (a.target_type === 'class_node') return a.class_node_id === classNodeId
     if (a.target_type === 'student') return a.student_id === studentId
+    if (a.target_type === 'programme_level') {
+      return studentProgrammeLevelId !== null && a.programme_level_id === studentProgrammeLevelId
+    }
     return false
   })
 
@@ -820,6 +865,9 @@ export async function loadFeeSummary(
     .eq('school_id', schoolId)
     .eq('student_id', studentId)
 
+  // Completed payments only, for the real settled balance — a pending
+  // Remita RRR must not silently reduce the balance shown here before
+  // server-side verification actually confirms it.
   const { data: payments } = await supabase
     .from('payments')
     .select('amount, fee_assignment_id, method, paid_at, notes, fee_assignments ( fee_head_id, fee_heads ( name ) )')
@@ -827,6 +875,28 @@ export async function loadFeeSummary(
     .eq('student_id', studentId)
     .eq('status', 'completed')
     .order('paid_at', { ascending: false })
+
+  // Pending Remita payments, surfaced separately (see PendingPaymentRow's
+  // own doc comment) rather than folded into the balance math above.
+  const { data: pendingRows } = await supabase
+    .from('payments')
+    .select('id, amount, provider_reference, created_at, fee_assignments ( fee_heads ( name ) )')
+    .eq('school_id', schoolId)
+    .eq('student_id', studentId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+
+  const pendingPayments: PendingPaymentRow[] = (pendingRows ?? []).map((p) => {
+    const assignmentRel = unwrapEmbed<{ fee_heads: unknown }>(p.fee_assignments)
+    const headRel = unwrapEmbed<{ name: string }>(assignmentRel?.fee_heads)
+    return {
+      id: p.id,
+      amount: p.amount,
+      provider_reference: p.provider_reference,
+      fee_head_name: headRel?.name ?? null,
+      created_at: p.created_at,
+    }
+  })
 
   const discountByAssignment = new Map<string, number>()
   for (const d of discounts ?? []) {
@@ -858,12 +928,16 @@ export async function loadFeeSummary(
     const headName = headRel?.name ?? 'Fee'
     const discount = discountByAssignment.get(a.id) ?? 0
     const paid = paidByAssignment.get(a.id) ?? 0
+    const assignmentBalance = a.amount - discount - paid
     const existing = breakdownByHead.get(a.fee_head_id)
     if (existing) {
       existing.billed += a.amount
       existing.discount += discount
       existing.paid += paid
       existing.balance = existing.billed - existing.discount - existing.paid
+      if (assignmentBalance > 0) {
+        existing.payableAssignments.push({ fee_assignment_id: a.id, balance: assignmentBalance })
+      }
     } else {
       breakdownByHead.set(a.fee_head_id, {
         fee_head_id: a.fee_head_id,
@@ -871,7 +945,8 @@ export async function loadFeeSummary(
         billed: a.amount,
         discount,
         paid,
-        balance: a.amount - discount - paid,
+        balance: assignmentBalance,
+        payableAssignments: assignmentBalance > 0 ? [{ fee_assignment_id: a.id, balance: assignmentBalance }] : [],
       })
     }
   }
@@ -887,6 +962,7 @@ export async function loadFeeSummary(
     totalPaid,
     balance: totalBilled - totalDiscount - totalPaid,
     breakdown,
+    pendingPayments,
   }
 }
 

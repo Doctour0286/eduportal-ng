@@ -1152,7 +1152,7 @@ function TabContent({
         />
       )
     }
-    return <FinanceModule schoolId={schoolId} isAdmin={isAdmin} intent={intent.intent} />
+    return <FinanceModule schoolId={schoolId} isAdmin={isAdmin} intent={intent.intent} schoolType={schoolType} />
   }
 
   if (tab === 'results') {

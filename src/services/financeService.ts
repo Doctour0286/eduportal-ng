@@ -13,6 +13,7 @@
  *   loadStudentPayments()        — payment history for a student
  *   loadStudentDiscounts()       — discounts for a student in a session
  *   loadLeafClasses()            — leaf class nodes (for assignment target picker)
+ *   loadProgrammeLevels()        — programme/level options, higher-ed (for assignment target picker)
  *
  * Write exports:
  *   createFeeHead()              — create a new fee head
@@ -57,11 +58,15 @@ export interface FeeAssignment {
   fee_head_name: string
   session_id: string
   term_id: string | null
-  target_type: 'school_wide' | 'class_node' | 'student'
+  target_type: 'school_wide' | 'class_node' | 'student' | 'programme_level'
   class_node_id: string | null
   class_node_name: string | null
   student_id: string | null
   student_name: string | null
+  programme_id: string | null
+  programme_name: string | null
+  programme_level_id: string | null
+  programme_level_label: string | null
   amount: number
   currency: string
   due_date: string | null
@@ -78,6 +83,11 @@ export interface StudentBalance {
   student_name: string
   class_node_id: string | null
   class_path_label: string | null
+  // Populated only for higher-ed students (resolved via their current
+  // student_programme_placements row); null for secondary-school students,
+  // mirroring how class_node_id/class_path_label are null for higher-ed ones.
+  programme_level_id: string | null
+  programme_level_label: string | null
   assigned_total: number    // sum of fee_assignments that apply to this student
   discount_total: number    // sum of approved fee_discounts
   paid_total: number        // sum of completed payments
@@ -95,7 +105,7 @@ export interface Payment {
   provider_reference: string | null
   status: 'pending' | 'completed' | 'failed' | 'refunded'
   received_by_name: string | null
-  paid_at: string
+  paid_at: string | null
   notes: string | null
 }
 
@@ -122,7 +132,7 @@ export interface ClassNode {
 }
 
 // Payment methods a school can accept
-export type PaymentMethod = 'cash' | 'bank_transfer' | 'card' | 'paystack' | 'flutterwave' | 'ussd'
+export type PaymentMethod = 'cash' | 'bank_transfer' | 'card' | 'paystack' | 'flutterwave' | 'ussd' | 'remita'
 
 // Consistent Result shape (same as all other service files)
 type Ok<T>     = { ok: true; data: T }
@@ -254,11 +264,15 @@ export async function loadFeeAssignments(params: {
         target_type,
         class_node_id,
         student_id,
+        programme_id,
+        programme_level_id,
         amount,
         due_date,
         fee_heads ( name ),
         class_nodes ( name ),
-        students ( full_name )
+        students ( full_name ),
+        programmes ( name ),
+        programme_levels ( level_label )
       `)
       .eq('session_id', params.sessionId)
       .order('created_at', { ascending: false })
@@ -274,19 +288,23 @@ export async function loadFeeAssignments(params: {
     return {
       ok: true,
       data: (data ?? []).map((r: any) => ({
-        id:               r.id,
-        fee_head_id:      r.fee_head_id,
-        fee_head_name:    r.fee_heads?.name ?? '—',
-        session_id:       r.session_id,
-        term_id:          r.term_id ?? null,
-        target_type:      r.target_type,
-        class_node_id:    r.class_node_id ?? null,
-        class_node_name:  r.class_nodes?.name ?? null,
-        student_id:       r.student_id ?? null,
-        student_name:     r.students?.full_name ?? null,
-        amount:           Number(r.amount),
-        currency:         'NGN',
-        due_date:         r.due_date ?? null,
+        id:                     r.id,
+        fee_head_id:            r.fee_head_id,
+        fee_head_name:          r.fee_heads?.name ?? '—',
+        session_id:             r.session_id,
+        term_id:                r.term_id ?? null,
+        target_type:            r.target_type,
+        class_node_id:          r.class_node_id ?? null,
+        class_node_name:        r.class_nodes?.name ?? null,
+        student_id:             r.student_id ?? null,
+        student_name:           r.students?.full_name ?? null,
+        programme_id:           r.programme_id ?? null,
+        programme_name:         r.programmes?.name ?? null,
+        programme_level_id:     r.programme_level_id ?? null,
+        programme_level_label:  r.programme_levels?.level_label ?? null,
+        amount:                 Number(r.amount),
+        currency:               'NGN',
+        due_date:               r.due_date ?? null,
       })),
     }
   } catch (err: any) {
@@ -322,6 +340,13 @@ export async function loadStudentBalances(params: {
   sessionId: string
   classNodeId?: string | null
   classPathMap: Map<string, string>
+  // Higher-ed params — mirrors studentsService.ts's loadStudents() SESSION 64
+  // branch: class_node_id has no meaning for a higher-ed student, so this
+  // function must resolve programme/level via student_programme_placements
+  // instead when isHigherEd is true.
+  isHigherEd?: boolean
+  programmeLevelIds?: string[]
+  programmeLevelLabelMap?: Map<string, string>
 }): Promise<Result<StudentBalance[]>> {
   try {
     // Step 1: load students
@@ -331,7 +356,7 @@ export async function loadStudentBalances(params: {
       .eq('status', 'active')
       .order('full_name')
 
-    if (params.classNodeId) {
+    if (!params.isHigherEd && params.classNodeId) {
       studentQuery = studentQuery.eq('class_node_id', params.classNodeId)
     }
 
@@ -350,11 +375,53 @@ export async function loadStudentBalances(params: {
 
     const studentIds = students.map(s => s.id)
 
+    // Step 1b (higher-ed only): resolve each student's current programme_level_id
+    // via student_programme_placements (is_current = true). class_node_id is
+    // meaningless for these students, mirroring studentsService.ts's own
+    // isHigherEd branch (SESSION 64) exactly, not a second, diverging read.
+    let placementByStudent = new Map<string, string>() // student_id -> programme_level_id
+    if (params.isHigherEd) {
+      let placementQuery = supabase
+        .from('student_programme_placements')
+        .select('student_id, programme_level_id')
+        .eq('is_current', true)
+        .in('student_id', studentIds)
+
+      // Empty-array-means-no-filter Postgrest trap: only apply the
+      // programme-level filter when a real, non-empty list was supplied —
+      // same guard SESSION 64 already established for this exact trap.
+      if (params.programmeLevelIds && params.programmeLevelIds.length > 0) {
+        placementQuery = placementQuery.in('programme_level_id', params.programmeLevelIds)
+      }
+
+      const { data: placementData, error: placementError } = await placementQuery
+      if (placementError) return { ok: false, error: placementError.message }
+
+      for (const p of (placementData ?? []) as Array<{ student_id: string; programme_level_id: string }>) {
+        placementByStudent.set(p.student_id, p.programme_level_id)
+      }
+
+      // If a programme/level filter was supplied, narrow the student set to
+      // only those with a matching current placement — mirrors the
+      // classNodeId filter's effect on the secondary-school path above,
+      // since that filter had to happen at the students query and this one
+      // can't (class_node_id isn't how a higher-ed student is scoped).
+      if (params.programmeLevelIds && params.programmeLevelIds.length > 0) {
+        const allowed = new Set(placementByStudent.keys())
+        const filtered = students.filter(s => allowed.has(s.id))
+        if (filtered.length === 0) return { ok: true, data: [] }
+        // Replace in place so the rest of the function below is unaffected
+        // by which branch produced the final student list.
+        students.length = 0
+        students.push(...filtered)
+      }
+    }
+
     // Step 2: load applicable fee assignments
-    // We load all three target_type sets in one query and filter client-side
+    // We load all four target_type sets in one query and filter client-side
     const { data: assignmentData, error: assignmentError } = await supabase
       .from('fee_assignments')
-      .select('id, target_type, class_node_id, student_id, amount')
+      .select('id, target_type, class_node_id, student_id, programme_id, programme_level_id, amount')
       .eq('session_id', params.sessionId)
 
     if (assignmentError) return { ok: false, error: assignmentError.message }
@@ -363,6 +430,8 @@ export async function loadStudentBalances(params: {
       target_type: string
       class_node_id: string | null
       student_id: string | null
+      programme_id: string | null
+      programme_level_id: string | null
       amount: string
     }>
 
@@ -403,11 +472,18 @@ export async function loadStudentBalances(params: {
     const sessionAssignmentIds = new Set(assignments.map(a => a.id))
 
     const balances: StudentBalance[] = students.map(student => {
+      const studentProgrammeLevelId = params.isHigherEd
+        ? (placementByStudent.get(student.id) ?? null)
+        : null
+
       // Assignments that apply to this student
       const applicable = assignments.filter(a => {
         if (a.target_type === 'school_wide') return true
         if (a.target_type === 'class_node' && a.class_node_id === student.class_node_id) return true
         if (a.target_type === 'student' && a.student_id === student.id) return true
+        if (a.target_type === 'programme_level' &&
+            studentProgrammeLevelId !== null &&
+            a.programme_level_id === studentProgrammeLevelId) return true
         return false
       })
       const applicableIds = new Set(applicable.map(a => a.id))
@@ -448,11 +524,15 @@ export async function loadStudentBalances(params: {
       const balance = Math.max(0, assigned_total - discount_total - paid_total)
 
       return {
-        student_id:       student.id,
-        student_name:     student.full_name,
-        class_node_id:    student.class_node_id,
-        class_path_label: student.class_node_id
-          ? (params.classPathMap.get(student.class_node_id) ?? null)
+        student_id:            student.id,
+        student_name:          student.full_name,
+        class_node_id:         params.isHigherEd ? null : student.class_node_id,
+        class_path_label:      params.isHigherEd
+          ? null
+          : (student.class_node_id ? (params.classPathMap.get(student.class_node_id) ?? null) : null),
+        programme_level_id:    studentProgrammeLevelId,
+        programme_level_label: studentProgrammeLevelId
+          ? (params.programmeLevelLabelMap?.get(studentProgrammeLevelId) ?? null)
           : null,
         assigned_total,
         discount_total,
@@ -485,12 +565,13 @@ export async function loadStudentPayments(
         provider_reference,
         status,
         paid_at,
+        created_at,
         notes,
         fee_assignments ( fee_heads ( name ) ),
         staff ( full_name )
       `)
       .eq('student_id', studentId)
-      .order('paid_at', { ascending: false })
+      .order('created_at', { ascending: false })
 
     if (error) return { ok: false, error: error.message }
 
@@ -618,6 +699,54 @@ export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
   }
 }
 
+// ─── Load programme levels (for higher-ed assignment picker) ─────────────────
+
+export interface ProgrammeLevelOption {
+  id: string                  // programme_levels.id
+  programme_id: string
+  programme_name: string
+  level_label: string
+  sequence_order: number
+  path_label: string          // "<Programme name> · <Level label>", mirrors ClassNode.path_label
+}
+
+/**
+ * All programme levels across every programme in the school, flattened for
+ * the fee-assignment target picker — mirrors loadLeafClasses()'s shape so
+ * FinanceModule.tsx's picker UI can follow the same list/search/empty-state
+ * pattern already established for the class picker, per this project's own
+ * "extend the existing peer, don't invent a second shape" discipline.
+ */
+export async function loadProgrammeLevels(): Promise<Result<ProgrammeLevelOption[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('programme_levels')
+      .select(`
+        id,
+        programme_id,
+        level_label,
+        sequence_order,
+        programmes ( name )
+      `)
+      .order('sequence_order')
+
+    if (error) return { ok: false, error: error.message }
+
+    const levels: ProgrammeLevelOption[] = (data ?? []).map((r: any) => ({
+      id:             r.id,
+      programme_id:   r.programme_id,
+      programme_name: r.programmes?.name ?? '—',
+      level_label:    r.level_label,
+      sequence_order: r.sequence_order,
+      path_label:     `${r.programmes?.name ?? '—'} · ${r.level_label}`,
+    }))
+
+    return { ok: true, data: levels }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load programme levels' }
+  }
+}
+
 // ─── Write: create fee head ───────────────────────────────────────────────────
 
 export async function createFeeHead(params: {
@@ -678,9 +807,11 @@ export async function createFeeAssignment(params: {
   fee_head_id: string
   session_id: string
   term_id: string | null
-  target_type: 'school_wide' | 'class_node' | 'student'
+  target_type: 'school_wide' | 'class_node' | 'student' | 'programme_level'
   class_node_id: string | null
   student_id: string | null
+  programme_id: string | null
+  programme_level_id: string | null
   amount: number
   due_date: string | null
 }): Promise<Result<{ id: string }>> {
@@ -688,15 +819,17 @@ export async function createFeeAssignment(params: {
     const { data, error } = await supabase
       .from('fee_assignments')
       .insert({
-        school_id:     params.schoolId,
-        fee_head_id:   params.fee_head_id,
-        session_id:    params.session_id,
-        term_id:       params.term_id ?? null,
-        target_type:   params.target_type,
-        class_node_id: params.class_node_id ?? null,
-        student_id:    params.student_id ?? null,
-        amount:        params.amount,
-        due_date:      params.due_date ?? null,
+        school_id:           params.schoolId,
+        fee_head_id:         params.fee_head_id,
+        session_id:          params.session_id,
+        term_id:             params.term_id ?? null,
+        target_type:         params.target_type,
+        class_node_id:       params.class_node_id ?? null,
+        student_id:          params.student_id ?? null,
+        programme_id:        params.programme_id ?? null,
+        programme_level_id:  params.programme_level_id ?? null,
+        amount:              params.amount,
+        due_date:            params.due_date ?? null,
       })
       .select('id')
       .single()
@@ -912,6 +1045,9 @@ function friendlyAssignmentError(message: string): string {
   }
   if (message.includes('violates foreign key')) {
     return 'The selected fee head, session, or class no longer exists. Please refresh and try again.'
+  }
+  if (message.includes('fee_assignments_target_type_check')) {
+    return 'Select the class, student, or programme/level that matches the assignment type chosen.'
   }
   return `Failed to create fee assignment: ${message}`
 }

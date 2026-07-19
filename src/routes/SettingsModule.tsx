@@ -63,6 +63,8 @@ import {
   loadCgpaPolicy,           upsertCgpaPolicy,
   loadAcademicStandingRules, upsertAcademicStandingRules,
   runStandingEvaluation, loadPendingStandingEvents, reviewStandingEvent,
+  loadProgrammePromotionRules, upsertProgrammePromotionRule, deleteProgrammePromotionRule,
+  runProgrammePromotion, recordManualPromotionDecision, type PromotionRunResultRow,
   loadCourseOfferings,      upsertCourseOffering, deleteCourseOffering,
   type SchoolSettings,
   type SchoolPublicConfig,
@@ -96,6 +98,7 @@ import {
   type AcademicStandingRules,
   type StandingEvaluationResult,
   type StandingEvent,
+  type ProgrammePromotionRule,
   type CourseOffering,
 } from '../services/settingsService'
 // SESSION 65c — admission pipeline/field-settings/master-switch authoring.
@@ -188,7 +191,7 @@ const SCHOOL_TYPE_DISPLAY_LABELS: Record<string, string> = {
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
-type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'admission' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
+type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'promotion' | 'admission' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
 // Institution tab is hidden entirely when school_type is not a
 // higher-institution type — per SESSION 55 §0 instruction 5 — so TABS is
@@ -234,6 +237,18 @@ function buildTabs(schoolType: string | null | undefined): { id: SettingsTab; la
     // Grading's already-large form, consistent with Offerings earning its
     // own tab rather than being crammed into Curriculum.
     tabs.push({ id: 'standing', label: 'Standing', icon: <Icon name="alert-triangle" size={18} /> })
+    // Promotion rules (SESSION 69, PRD Tier 8, §7.27.1a Design A amendment).
+    // Distinct concern from Standing: Standing configures CGPA/residency
+    // thresholds that trigger a REVIEW (probation/withdrawal risk); this
+    // configures the actual "from level X to level Y, at what CGPA" mapping
+    // the annual advancement run reads. Same reasoning as Offerings earning
+    // its own tab apart from Curriculum -- a genuinely separate object, not
+    // a variant of an existing one. Icon: 'graduation-cap' reused rather
+    // than guessing an unconfirmed name like 'trending-up' -- this file's
+    // own Grading tab precedent explicitly reuses an existing icon
+    // ("clipboard-list", "no dedicated grading icon found") rather than
+    // assume a new name exists in this app's icon set; same discipline here.
+    tabs.push({ id: 'promotion', label: 'Promotion', icon: <Icon name="graduation-cap" size={18} /> })
   } else {
     tabs.push({ id: 'classes', label: 'Classes', icon: <Icon name="tag" size={18} /> })
   }
@@ -324,6 +339,7 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
         {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
         {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
         {safeActiveTab === 'standing'     && <StandingTab     schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
+        {safeActiveTab === 'promotion'    && <PromotionTab    schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
         {safeActiveTab === 'admission'    && <AdmissionSettingsTab schoolId={schoolId} />}
         {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}
         {safeActiveTab === 'roles'         && <RolesTab        schoolId={schoolId} />}
@@ -2737,6 +2753,7 @@ function CurriculumTab({ schoolId }: { schoolId: string }) {
   async function handleAddEntry() {
     if (!selectedProgrammeId || !selectedLevelId) { setAddError('Choose a programme and level first.'); return }
     if (!addCourseId) { setAddError('Choose a course.'); return }
+    if (terms.length > 0 && !selectedTermId) { setAddError('Choose a semester first.'); return }
     setAddSaving(true)
     const res = await addCurriculumEntry({
       programme_id: selectedProgrammeId,
@@ -4409,6 +4426,474 @@ function StandingTab({ schoolId, actorRecordId }: { schoolId: string; actorRecor
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab: Promotion rules ───────────────────────────────────────────────────
+// (SESSION 69, PRD Tier 8, §7.27.1a Design A amendment). Configures the
+// "from level X, to level Y, at CGPA cutoff Z" mapping the new
+// run_programme_promotion() DB function reads at session end. This tab is
+// rules-management ONLY (item 4b) — triggering the actual promotion run and
+// reviewing its manual-decision bucket (item 4c) is a deliberately separate,
+// later piece of work, not built here; owner's explicit sequencing choice
+// this session, since a run/review UI showing every student as
+// "no_rule_configured" until real rules exist would be premature.
+//
+// "To level" is scoped to the SAME programme as "from level" — confirmed
+// against real institutional practice before assuming this, not guessed:
+// routine annual advancement (the concern this table exists for) is
+// universally described as progressing within one programme; a genuine
+// change-of-programme is treated as its own distinct workflow everywhere
+// it's described (Workday's own docs: "when a student decides to change
+// program of study, automatically reevaluate transfer equivalences for the
+// NEW programme" — a separate credit-equivalency operation, not a same-
+// mechanism promotion). Building cross-programme selection into this rule
+// would silently misrepresent a different, harder problem as a simple
+// cutoff rule.
+function PromotionTab({ schoolId, actorRecordId }: { schoolId: string; actorRecordId: string | null }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [levelsByProgramme, setLevelsByProgramme] = useState<Record<string, ProgrammeLevel[]>>({})
+  const [rules, setRules] = useState<ProgrammePromotionRule[]>([])
+
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
+  const [formProgrammeId, setFormProgrammeId] = useState<string | null>(null)
+  const [formFromLevelId, setFormFromLevelId] = useState<string | null>(null)
+  const [formToLevelId, setFormToLevelId] = useState<string | null>(null)
+  const [formMinCgpa, setFormMinCgpa] = useState('')
+  const [formMaxCarryover, setFormMaxCarryover] = useState('')
+  const [formSaving, setFormSaving] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+
+  // SESSION 69, item 4c -- the run itself + the manual-review bucket. Kept
+  // independent of the rules-config state above, same separation
+  // StandingTab already established between its thresholds form and its
+  // own run/review state.
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [runSessionId, setRunSessionId] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [runError, setRunError] = useState<string | null>(null)
+  const [runResults, setRunResults] = useState<PromotionRunResultRow[] | null>(null)
+  const [reviewingStudentId, setReviewingStudentId] = useState<string | null>(null)
+  const [reviewToLevelId, setReviewToLevelId] = useState<Record<string, string>>({})
+  const [reviewReasonDraft, setReviewReasonDraft] = useState<Record<string, string>>({})
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [decidedStudentIds, setDecidedStudentIds] = useState<Set<string>>(new Set())
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [pRes, rRes, sRes] = await Promise.all([
+      loadProgrammes(schoolId),
+      loadProgrammePromotionRules(schoolId),
+      loadSessions(schoolId),
+    ])
+    if (pRes.error) { setError(pRes.error); setLoading(false); return }
+    if (rRes.error) { setError(rRes.error); setLoading(false); return }
+    setProgrammes(pRes.data)
+    setRules(rRes.data)
+    if (!sRes.error) {
+      setSessions(sRes.data)
+      // Default the run's session picker to the current session, same
+      // "sensible default, not forced to pick every time" reasoning as
+      // every other session picker in this file -- but never override an
+      // admin's own in-progress selection on a re-load.
+      setRunSessionId((prev) => prev ?? sRes.data.find((s: Session) => s.is_current)?.id ?? sRes.data[0]?.id ?? null)
+    }
+    const levelEntries = await Promise.all(
+      pRes.data.map(async (prog) => [prog.id, (await loadProgrammeLevels(prog.id)).data] as const),
+    )
+    setLevelsByProgramme(Object.fromEntries(levelEntries))
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  // Flat lookup so a rule row can display real level labels/programme
+  // names without a second per-row query — same "resolve once, render
+  // many" shape CurriculumTab's own entries list already uses.
+  const allLevels: ProgrammeLevel[] = Object.values(levelsByProgramme).flat()
+  const levelLabel = (levelId: string) => allLevels.find((l: ProgrammeLevel) => l.id === levelId)?.level_label ?? 'Unknown level'
+  const programmeForLevel = (levelId: string) => programmes.find((p: Programme) => (levelsByProgramme[p.id] ?? []).some((l: ProgrammeLevel) => l.id === levelId))
+  const programmeName = (levelId: string) => programmeForLevel(levelId)?.name ?? 'Unknown programme'
+
+  const formLevels = formProgrammeId ? (levelsByProgramme[formProgrammeId] ?? []) : []
+
+  function openAddForm() {
+    setEditingRuleId(null)
+    setFormProgrammeId(null)
+    setFormFromLevelId(null)
+    setFormToLevelId(null)
+    setFormMinCgpa('')
+    setFormMaxCarryover('')
+    setFormError(null)
+    setShowAddForm(true)
+  }
+
+  function openEditForm(rule: ProgrammePromotionRule) {
+    const prog = programmeForLevel(rule.from_programme_level_id)
+    setEditingRuleId(rule.id)
+    setFormProgrammeId(prog?.id ?? null)
+    setFormFromLevelId(rule.from_programme_level_id)
+    setFormToLevelId(rule.to_programme_level_id)
+    setFormMinCgpa(rule.min_cgpa !== null ? String(rule.min_cgpa) : '')
+    setFormMaxCarryover(rule.max_carryover_courses !== null ? String(rule.max_carryover_courses) : '')
+    setFormError(null)
+    setShowAddForm(true)
+  }
+
+  async function handleSaveRule() {
+    if (!formFromLevelId || !formToLevelId) { setFormError('Choose both a "from" level and a "to" level.'); return }
+    if (formFromLevelId === formToLevelId) { setFormError('"From" and "to" levels must be different.'); return }
+    let minCgpa: number | null = null
+    if (formMinCgpa) {
+      const n = Number(formMinCgpa)
+      if (Number.isNaN(n) || n < 0) { setFormError('Minimum CGPA must be a non-negative number.'); return }
+      minCgpa = n
+    }
+    let maxCarryover: number | null = null
+    if (formMaxCarryover) {
+      const n = Number(formMaxCarryover)
+      if (Number.isNaN(n) || n < 0 || !Number.isInteger(n)) { setFormError('Max carryover courses must be a non-negative whole number.'); return }
+      maxCarryover = n
+    }
+    setFormError(null)
+    setFormSaving(true)
+    const res = await upsertProgrammePromotionRule(schoolId, {
+      id: editingRuleId ?? undefined,
+      from_programme_level_id: formFromLevelId,
+      to_programme_level_id: formToLevelId,
+      min_cgpa: minCgpa,
+      max_carryover_courses: maxCarryover,
+    })
+    if (res.error) { setFormError(res.error); setFormSaving(false); return }
+    setShowAddForm(false)
+    setFormSaving(false)
+    await load()
+  }
+
+  async function handleDeleteRule(ruleId: string) {
+    if (!window.confirm('Delete this promotion rule? Students at this level will show as "no rule configured" in the promotion run until a new rule is added.')) return
+    const res = await deleteProgrammePromotionRule(schoolId, ruleId)
+    if (!res.error) await load()
+  }
+
+  // SESSION 69, item 4c -- the promotion run. This WRITES for real (see
+  // runProgrammePromotion()'s own doc comment) -- there is no dry-run mode
+  // exposed here on purpose, so the admin-facing "Run promotion" action
+  // always means a real run, never a silent no-op that could be mistaken
+  // for one.
+  async function handleRunPromotion() {
+    if (!runSessionId) { setRunError('Choose a session to run the promotion pass for.'); return }
+    if (!actorRecordId) { setRunError('Could not resolve your staff id -- try reloading the page before running this.'); return }
+    if (!window.confirm('This will actually promote every eligible student for the chosen session -- placements are flipped and history rows are written immediately, not previewed. Continue?')) return
+    setRunError(null)
+    setRunResults(null)
+    setDecidedStudentIds(new Set())
+    setRunning(true)
+    const res = await runProgrammePromotion(runSessionId, actorRecordId)
+    setRunning(false)
+    if (res.error) { setRunError(res.error); return }
+    setRunResults(res.data)
+  }
+
+  // One manual decision at a time, per the needs_review bucket -- never a
+  // second bulk path, matching record_manual_promotion_decision()'s own
+  // one-student-at-a-time design.
+  async function handleReviewDecision(row: PromotionRunResultRow, decision: 'promoted' | 'repeated' | 'manual_override') {
+    if (!runSessionId) return
+    if (!actorRecordId) { setReviewError('Could not resolve your staff id -- try reloading the page.'); return }
+    const toLevelId = reviewToLevelId[row.student_id] || null
+    const requiresDestination = decision === 'promoted' || decision === 'manual_override'
+    if (requiresDestination && !toLevelId) {
+      setReviewError(`Choose a destination level for ${row.student_full_name} before confirming a ${decision === 'manual_override' ? 'manual override' : 'promotion'}.`)
+      return
+    }
+    setReviewError(null)
+    setReviewingStudentId(row.student_id)
+    const res = await recordManualPromotionDecision({
+      studentId: row.student_id,
+      sessionId: runSessionId,
+      decision,
+      toProgrammeLevelId: requiresDestination ? toLevelId : null,
+      decidedByStaffId: actorRecordId,
+      reason: reviewReasonDraft[row.student_id]?.trim() || `Manual review: ${decision}`,
+    })
+    setReviewingStudentId(null)
+    if (res.error) { setReviewError(res.error); return }
+    setDecidedStudentIds(prev => { const next = new Set(prev); next.add(row.student_id); return next })
+  }
+
+  const REVIEW_DECISION_LABEL: Record<'promoted' | 'repeated' | 'manual_override', string> = {
+    promoted: 'Promote',
+    repeated: 'Repeat this level',
+    manual_override: 'Manual override',
+  }
+
+  if (loading) return <div className="set-tab-content"><p className="set-hint-text">Loading…</p></div>
+  if (error) return <div className="set-tab-content"><p className="set-form-error">{error}</p></div>
+
+  return (
+    <div className="set-tab-content">
+      <div className="set-section-header">
+        <SectionLabel>Promotion rules</SectionLabel>
+        <button className="set-add-btn" onClick={openAddForm} disabled={programmes.length === 0}>+ Add rule</button>
+      </div>
+
+      {programmes.length === 0 ? (
+        <p className="set-empty-hint">No programmes yet — add one in the Institution tab first.</p>
+      ) : rules.length === 0 ? (
+        <p className="set-empty-hint">
+          No promotion rules configured yet. Without a rule, students at a level are shown as
+          "no rule configured" when a promotion run is done, and are never silently promoted or held back.
+        </p>
+      ) : (
+        rules.map(r => (
+          <div key={r.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">
+                {programmeName(r.from_programme_level_id)}: {levelLabel(r.from_programme_level_id)} → {levelLabel(r.to_programme_level_id)}
+              </p>
+              <p className="set-list-row-meta">
+                {r.min_cgpa !== null ? `Min CGPA ${r.min_cgpa.toFixed(2)}` : 'No CGPA cutoff — always promotes'}
+                {r.max_carryover_courses !== null && ` · Max ${r.max_carryover_courses} carryover course${r.max_carryover_courses === 1 ? '' : 's'} (not yet enforced by the promotion run)`}
+              </p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => openEditForm(r)}>Edit</button>
+              <button className="set-edit-btn" onClick={() => handleDeleteRule(r.id)}>Delete</button>
+            </div>
+          </div>
+        ))
+      )}
+
+      {showAddForm && (
+        <div className="set-overlay" onClick={() => setShowAddForm(false)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">{editingRuleId ? 'Edit promotion rule' : 'Add promotion rule'}</h2>
+
+            <FieldRow label="Programme">
+              <select
+                className="set-select"
+                value={formProgrammeId ?? ''}
+                onChange={e => { setFormProgrammeId(e.target.value || null); setFormFromLevelId(null); setFormToLevelId(null) }}
+                disabled={!!editingRuleId}
+              >
+                <option value="">Choose a programme</option>
+                {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </FieldRow>
+
+            {formProgrammeId && (
+              <FieldRow label="From level">
+                <select className="set-select" value={formFromLevelId ?? ''} onChange={e => setFormFromLevelId(e.target.value || null)}>
+                  <option value="">Choose a level</option>
+                  {formLevels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+                </select>
+              </FieldRow>
+            )}
+
+            {formProgrammeId && (
+              <FieldRow label="To level">
+                <select className="set-select" value={formToLevelId ?? ''} onChange={e => setFormToLevelId(e.target.value || null)}>
+                  <option value="">Choose a level</option>
+                  {formLevels.filter(l => l.id !== formFromLevelId).map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+                </select>
+              </FieldRow>
+            )}
+
+            <FieldRow label="Minimum CGPA (optional)">
+              <Input value={formMinCgpa} onChange={setFormMinCgpa} placeholder="e.g. 2.00 — leave blank to always promote" />
+            </FieldRow>
+
+            <FieldRow label="Max carryover courses (optional)">
+              <Input value={formMaxCarryover} onChange={setFormMaxCarryover} placeholder="Not yet enforced by the promotion run" />
+            </FieldRow>
+
+            {formError && <p className="set-form-error">{formError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setShowAddForm(false)}>Cancel</button>
+              <button className="set-save-btn" onClick={handleSaveRule} disabled={formSaving}>{formSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SESSION 69, item 4c -- the run itself + three-bucket review, same
+          overall section shape as StandingTab's "Session-end evaluation" +
+          "Pending review" sections below its own thresholds form. */}
+      <div className="set-section-header" style={{ marginTop: '2rem' }}>
+        <SectionLabel>Promotion run</SectionLabel>
+      </div>
+      <p className="set-hint-text">
+        Auto-promotes every student at or above their level's CGPA cutoff, and lists everyone else
+        below for a manual decision — nobody is ever silently retained or silently skipped. This
+        writes for real the moment you run it; there is no separate preview step here.
+      </p>
+      <FieldRow label="Session">
+        <select className="set-select" value={runSessionId ?? ''} onChange={e => setRunSessionId(e.target.value || null)}>
+          <option value="">Choose a session</option>
+          {sessions.map(s => <option key={s.id} value={s.id}>{s.name}{s.is_current ? ' (current)' : ''}</option>)}
+        </select>
+      </FieldRow>
+      <div className="set-sheet-footer" style={{ paddingLeft: 0 }}>
+        <button className="set-save-btn" onClick={handleRunPromotion} disabled={running || !runSessionId}>
+          {running ? 'Running…' : 'Run promotion'}
+        </button>
+      </div>
+      {runError && <p className="set-form-error">{runError}</p>}
+
+      {runResults && (
+        <>
+          {(() => {
+            const autoPromoted = runResults.filter(r => r.outcome === 'auto_promoted')
+            const graduated = runResults.filter(r => r.outcome === 'graduated')
+            const needsReview = runResults.filter(r => r.outcome === 'needs_review')
+            const noRule = runResults.filter(r => r.outcome === 'no_rule_configured')
+            return (
+              <>
+                <p className="set-hint-text" style={{ marginTop: '1rem' }}>
+                  Considered {runResults.length} student{runResults.length === 1 ? '' : 's'}:{' '}
+                  {autoPromoted.length} promoted, {graduated.length} graduated,{' '}
+                  {needsReview.length} need{needsReview.length === 1 ? 's' : ''} manual review,{' '}
+                  {noRule.length} with no rule configured for their level.
+                </p>
+
+                {autoPromoted.length > 0 && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <SectionLabel>Auto-promoted ({autoPromoted.length})</SectionLabel>
+                    <ul className="set-list">
+                      {autoPromoted.map(r => (
+                        <li key={r.student_id} className="set-list-row">
+                          <div className="set-list-row-info">
+                            <p className="set-list-row-name">{r.student_full_name}</p>
+                            <p className="set-list-row-meta">
+                              {levelLabel(r.from_programme_level_id)} → {r.to_programme_level_id ? levelLabel(r.to_programme_level_id) : '—'}
+                              {r.cgpa !== null ? ` · CGPA ${r.cgpa.toFixed(2)}` : ''}
+                            </p>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {graduated.length > 0 && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <SectionLabel>Graduated ({graduated.length})</SectionLabel>
+                    <ul className="set-list">
+                      {graduated.map(r => (
+                        <li key={r.student_id} className="set-list-row">
+                          <div className="set-list-row-info">
+                            <p className="set-list-row-name">{r.student_full_name}</p>
+                            <p className="set-list-row-meta">
+                              {levelLabel(r.from_programme_level_id)} · final level
+                              {r.cgpa !== null ? ` · CGPA ${r.cgpa.toFixed(2)}` : ''}
+                            </p>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {noRule.length > 0 && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <SectionLabel>No rule configured ({noRule.length})</SectionLabel>
+                    <p className="set-hint-text">
+                      Add a promotion rule above for these students' levels — nothing was changed for them.
+                    </p>
+                    <ul className="set-list">
+                      {noRule.map(r => (
+                        <li key={r.student_id} className="set-list-row">
+                          <div className="set-list-row-info">
+                            <p className="set-list-row-name">{r.student_full_name}</p>
+                            <p className="set-list-row-meta">{programmeName(r.from_programme_level_id)}: {levelLabel(r.from_programme_level_id)}</p>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {needsReview.length > 0 && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <SectionLabel>Needs manual review ({needsReview.length})</SectionLabel>
+                    {reviewError && <p className="set-form-error">{reviewError}</p>}
+                    <ul className="set-list">
+                      {needsReview.map(r => {
+                        const decided = decidedStudentIds.has(r.student_id)
+                        const fromProg = programmeForLevel(r.from_programme_level_id)
+                        const levelsForThisProgramme = fromProg ? (levelsByProgramme[fromProg.id] ?? []) : []
+                        return (
+                          <li key={r.student_id} className="set-list-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+                            <div>
+                              <p className="set-list-row-title">{r.student_full_name}</p>
+                              <p className="set-list-row-meta">
+                                {programmeName(r.from_programme_level_id)}: {levelLabel(r.from_programme_level_id)}
+                                {r.cgpa !== null ? ` · CGPA ${r.cgpa.toFixed(2)}` : ' · no CGPA on record'}
+                                {r.min_cgpa !== null ? ` (cutoff ${r.min_cgpa.toFixed(2)})` : ''}
+                              </p>
+                            </div>
+                            {decided ? (
+                              <p className="set-hint-text">Decision recorded.</p>
+                            ) : (
+                              <>
+                                <select
+                                  className="set-select"
+                                  value={reviewToLevelId[r.student_id] ?? ''}
+                                  onChange={e => setReviewToLevelId(prev => ({ ...prev, [r.student_id]: e.target.value }))}
+                                >
+                                  <option value="">Destination level (only needed if promoting)</option>
+                                  {levelsForThisProgramme.filter(l => l.id !== r.from_programme_level_id).map(l => (
+                                    <option key={l.id} value={l.id}>{l.level_label}</option>
+                                  ))}
+                                </select>
+                                <Input
+                                  value={reviewReasonDraft[r.student_id] ?? ''}
+                                  onChange={(v) => setReviewReasonDraft(prev => ({ ...prev, [r.student_id]: v }))}
+                                  placeholder="Reason (optional)…"
+                                />
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                  <button
+                                    className="set-save-btn"
+                                    onClick={() => handleReviewDecision(r, 'promoted')}
+                                    disabled={reviewingStudentId === r.student_id}
+                                  >
+                                    {reviewingStudentId === r.student_id ? 'Saving…' : REVIEW_DECISION_LABEL.promoted}
+                                  </button>
+                                  <button
+                                    className="set-cancel-btn"
+                                    onClick={() => handleReviewDecision(r, 'repeated')}
+                                    disabled={reviewingStudentId === r.student_id}
+                                  >
+                                    {REVIEW_DECISION_LABEL.repeated}
+                                  </button>
+                                  <button
+                                    className="set-cancel-btn"
+                                    onClick={() => handleReviewDecision(r, 'manual_override')}
+                                    disabled={reviewingStudentId === r.student_id}
+                                  >
+                                    {REVIEW_DECISION_LABEL.manual_override}
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                )}
+              </>
+            )
+          })()}
+        </>
       )}
     </div>
   )

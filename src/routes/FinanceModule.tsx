@@ -48,6 +48,7 @@ import {
   loadStudentPayments,
   loadStudentDiscounts,
   loadLeafClasses,
+  loadProgrammeLevels,
   createFeeHead,
   updateFeeHead,
   createFeeAssignment,
@@ -67,6 +68,7 @@ import {
   type Discount,
   type ClassNode,
   type PaymentMethod,
+  type ProgrammeLevelOption,
 } from '../services/financeService'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -74,6 +76,14 @@ import {
 interface FinanceModuleProps {
   schoolId: string
   isAdmin: boolean
+  /**
+   * Threaded from App.tsx's TabContent, same call-site pattern already
+   * established for StudentsModule/SettingsModule/CourseAttendanceModule
+   * etc. Used to derive a local isHigherEd flag — see isHigherInstitutionSchoolType()
+   * below — since class_node_id has no meaning for a higher-ed student
+   * (SESSION 64) and fee assignments there target programme_level instead.
+   */
+  schoolType?: string | null
   /**
    * Optional intent forwarded from AdminDashboard's quick-action / App.tsx's
    * TabContent intent passthrough (PRD Problem 2.2c, Session 7b). Only
@@ -116,26 +126,28 @@ const EMPTY_FEE_HEAD_FORM: FeeHeadForm = {
 
 interface AssignmentForm {
   fee_head_id: string
-  target_type: 'school_wide' | 'class_node' | 'student'
+  target_type: 'school_wide' | 'class_node' | 'student' | 'programme_level'
   class_node_id: string
   student_search: string
   student_id: string
   student_name: string
+  programme_level_id: string
   amount: string
   term_id: string
   due_date: string
 }
 
 const EMPTY_ASSIGNMENT_FORM: AssignmentForm = {
-  fee_head_id:    '',
-  target_type:    'school_wide',
-  class_node_id:  '',
-  student_search: '',
-  student_id:     '',
-  student_name:   '',
-  amount:         '',
-  term_id:        '',
-  due_date:       '',
+  fee_head_id:         '',
+  target_type:         'school_wide',
+  class_node_id:       '',
+  student_search:      '',
+  student_id:          '',
+  student_name:        '',
+  programme_level_id:  '',
+  amount:              '',
+  term_id:             '',
+  due_date:            '',
 }
 
 // ─── Payment form ──────────────────────────────────────────────────────────────
@@ -158,9 +170,20 @@ interface DiscountForm {
   reason: string
 }
 
+// ─── School type helper ────────────────────────────────────────────────────────
+// Local copy, not a shared import — same established per-file convention as
+// CourseRegistrationModule.tsx/CourseAttendanceModule.tsx/ResultsModule.tsx
+// (flagged in those files as debt worth eventually promoting to a shared
+// lib/schoolType.ts; not done there, so not invented differently here either).
+function isHigherInstitutionSchoolType(schoolType?: string | null): boolean {
+  return !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) {
+export default function FinanceModule({ schoolId, schoolType, intent }: FinanceModuleProps) {
+
+  const isHigherEd = isHigherInstitutionSchoolType(schoolType)
 
   // ── Permissions (PRD Tier 3 / Problem 3.1, Session 10) ────────────────────
   // Read in-component via useAuthStore, matching Timetable/Attendance/Students —
@@ -172,6 +195,10 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
   // ── Boot data ─────────────────────────────────────────────────────────────
   const [classes,        setClasses]        = useState<ClassNode[]>([])
   const [classPathMap,   setClassPathMap]   = useState<Map<string, string>>(new Map())
+  // Higher-ed equivalent of classes/classPathMap — mirrors StudentsModule.tsx's
+  // SESSION 64 programme/level picker data shape, not a new one invented here.
+  const [programmeLevels,    setProgrammeLevels]    = useState<ProgrammeLevelOption[]>([])
+  const [programmeLevelMap,  setProgrammeLevelMap]  = useState<Map<string, string>>(new Map())
   const [feeHeads,       setFeeHeads]       = useState<FeeHead[]>([])
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [terms,          setTerms]          = useState<Term[]>([])
@@ -189,6 +216,9 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
   const [balancesState,  setBalancesState]  = useState<LoadState>('booting')
   const [balancesError,  setBalancesError]  = useState('')
   const [filterClass,    setFilterClass]    = useState<string>('')
+  // Higher-ed equivalent of filterClass — class_node_id has no meaning for
+  // these students (SESSION 64), so balance filtering uses programme_level_id.
+  const [filterProgrammeLevel, setFilterProgrammeLevel] = useState<string>('')
   const [searchQuery,    setSearchQuery]    = useState('')
 
   // ── Assignments tab ────────────────────────────────────────────────────────
@@ -256,20 +286,29 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     let cancelled = false
     async function boot() {
       setBootState('loading')
-      const [classesRes, feeHeadsRes, sessionRes] = await Promise.all([
+      const [classesRes, feeHeadsRes, sessionRes, programmeLevelsRes] = await Promise.all([
         loadLeafClasses(),
         loadFeeHeads(),
         loadCurrentSession(),
+        // Only meaningful for higher-ed — always call so hook order stays
+        // fixed regardless of schoolType, but the secondary-school branch
+        // below simply never reads programmeLevelsRes's data.
+        loadProgrammeLevels(),
       ])
       if (cancelled) return
 
       if (!classesRes.ok) { setBootError(classesRes.error); setBootState('error'); return }
       if (!feeHeadsRes.ok) { setBootError(feeHeadsRes.error); setBootState('error'); return }
       if (!sessionRes.ok) { setBootError(sessionRes.error); setBootState('error'); return }
+      if (isHigherEd && !programmeLevelsRes.ok) { setBootError(programmeLevelsRes.error); setBootState('error'); return }
 
       const cpm = buildClassPathMap(classesRes.data)
       setClasses(classesRes.data)
       setClassPathMap(cpm)
+      if (programmeLevelsRes.ok) {
+        setProgrammeLevels(programmeLevelsRes.data)
+        setProgrammeLevelMap(new Map(programmeLevelsRes.data.map(pl => [pl.id, pl.path_label])))
+      }
       setFeeHeads(feeHeadsRes.data)
       setFeeHeadsState(feeHeadsRes.data.length === 0 ? 'empty' : 'ready')
       setCurrentSession(sessionRes.data)
@@ -305,8 +344,11 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     setBalancesState('loading')
     const res = await loadStudentBalances({
       sessionId:    currentSession.id,
-      classNodeId:  filterClass || null,
+      classNodeId:  isHigherEd ? null : (filterClass || null),
       classPathMap,
+      isHigherEd,
+      programmeLevelIds:      isHigherEd && filterProgrammeLevel ? [filterProgrammeLevel] : undefined,
+      programmeLevelLabelMap: programmeLevelMap,
     })
     if (!res.ok) {
       setBalancesError(res.error)
@@ -315,7 +357,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
     }
     setBalances(res.data)
     setBalancesState(res.data.length === 0 ? 'empty' : 'ready')
-  }, [currentSession, filterClass, classPathMap])
+  }, [currentSession, filterClass, filterProgrammeLevel, classPathMap, isHigherEd, programmeLevelMap])
 
   useEffect(() => {
     if (bootState === 'ready') loadBalances()
@@ -523,10 +565,21 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
       setAssignmentError('Search and select a student.')
       return
     }
+    if (assignmentForm.target_type === 'programme_level' && !assignmentForm.programme_level_id) {
+      setAssignmentError('Select a programme/level.')
+      return
+    }
     if (!currentSession) {
       setAssignmentError('No current session set up. Please configure a session first.')
       return
     }
+
+    // programme_id is derived from the picked level, not stored separately in
+    // the form — mirrors how class_node_name/student_name are resolved from
+    // already-loaded lists elsewhere in this file rather than held redundantly.
+    const pickedLevel = assignmentForm.target_type === 'programme_level'
+      ? programmeLevels.find(pl => pl.id === assignmentForm.programme_level_id)
+      : undefined
 
     setAssignmentSaving(true)
     setAssignmentError('')
@@ -536,8 +589,15 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
       session_id:    currentSession.id,
       term_id:       assignmentForm.term_id || null,
       target_type:   assignmentForm.target_type,
-      class_node_id: assignmentForm.class_node_id || null,
-      student_id:    assignmentForm.student_id || null,
+      // Only the field matching the chosen target_type is ever sent — a stale
+      // value left in state from switching target_type mid-form (e.g. picking
+      // a student, then switching to "All students") must never ride along.
+      // Real bug found this way: 2 live school_wide rows had a stray student_id
+      // attached, because both fields were previously sent unconditionally.
+      class_node_id:       assignmentForm.target_type === 'class_node'       ? (assignmentForm.class_node_id || null) : null,
+      student_id:          assignmentForm.target_type === 'student'          ? (assignmentForm.student_id || null)    : null,
+      programme_id:        assignmentForm.target_type === 'programme_level'  ? (pickedLevel?.programme_id ?? null)    : null,
+      programme_level_id:  assignmentForm.target_type === 'programme_level'  ? (assignmentForm.programme_level_id || null) : null,
       amount:        parseFloat(assignmentForm.amount),
       due_date:      assignmentForm.due_date || null,
     })
@@ -672,7 +732,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
               value={selectedTermId}
               onChange={e => setSelectedTermId(e.target.value)}
             >
-              <option value="">All terms</option>
+              <option value="">{isHigherEd ? 'All semesters' : 'All terms'}</option>
               {terms.map(t => (
                 <option key={t.id} value={t.id}>{t.name}</option>
               ))}
@@ -680,19 +740,32 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
           </div>
         )}
 
-        {/* Class filter + search — only on balances tab */}
+        {/* Class/programme-level filter + search — only on balances tab */}
         {moduleTab === 'balances' && bootState === 'ready' && (
           <div className="fin-filter-bar">
-            <select
-              className="fin-class-filter"
-              value={filterClass}
-              onChange={e => { setFilterClass(e.target.value); setSearchQuery('') }}
-            >
-              <option value="">All classes</option>
-              {classes.map(c => (
-                <option key={c.id} value={c.id}>{c.path_label}</option>
-              ))}
-            </select>
+            {isHigherEd ? (
+              <select
+                className="fin-class-filter"
+                value={filterProgrammeLevel}
+                onChange={e => { setFilterProgrammeLevel(e.target.value); setSearchQuery('') }}
+              >
+                <option value="">All programmes/levels</option>
+                {programmeLevels.map(pl => (
+                  <option key={pl.id} value={pl.id}>{pl.path_label}</option>
+                ))}
+              </select>
+            ) : (
+              <select
+                className="fin-class-filter"
+                value={filterClass}
+                onChange={e => { setFilterClass(e.target.value); setSearchQuery('') }}
+              >
+                <option value="">All classes</option>
+                {classes.map(c => (
+                  <option key={c.id} value={c.id}>{c.path_label}</option>
+                ))}
+              </select>
+            )}
             <input
               type="search"
               className="fin-search"
@@ -807,7 +880,9 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
 
         <p className="fin-count">
           {filteredBalances.length} student{filteredBalances.length !== 1 ? 's' : ''}
-          {filterClass ? ` · ${classes.find(c => c.id === filterClass)?.path_label ?? ''}` : ''}
+          {isHigherEd
+            ? (filterProgrammeLevel ? ` · ${programmeLevels.find(pl => pl.id === filterProgrammeLevel)?.path_label ?? ''}` : '')
+            : (filterClass ? ` · ${classes.find(c => c.id === filterClass)?.path_label ?? ''}` : '')}
         </p>
 
         <ul className="fin-balance-list">
@@ -823,7 +898,9 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                 <div className="fin-balance-row-body">
                   <span className="fin-balance-row-name">{b.student_name}</span>
                   <span className="fin-balance-row-meta">
-                    {b.class_path_label ?? 'No class assigned'}
+                    {isHigherEd
+                      ? (b.programme_level_label ?? 'No placement on record')
+                      : (b.class_path_label ?? 'No class assigned')}
                   </span>
                 </div>
                 <div className="fin-balance-row-right">
@@ -892,6 +969,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                   <span className="fin-assignment-target">
                     {a.target_type === 'school_wide' ? 'All students'
                       : a.target_type === 'class_node' ? (a.class_node_name ?? 'Class')
+                      : a.target_type === 'programme_level' ? (a.programme_level_label ?? 'Programme/level')
                       : (a.student_name ?? 'Individual student')}
                   </span>
                   {a.due_date && (
@@ -938,7 +1016,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
         ) : feeHeads.length === 0 ? (
           <div className="fin-empty-state">
             <span className="fin-empty-icon"><Icon name="tag" size={40} /></span>
-            <p className="fin-empty-msg">No fee heads yet. Add a fee head (e.g. "School Fees", "PTA Levy") to start assigning fees.</p>
+            <p className="fin-empty-msg">No fee heads yet. Add a fee head (e.g. {isHigherEd ? '"Tuition", "Acceptance Fee"' : '"School Fees", "PTA Levy"'}) to start assigning fees.</p>
             {canManageFees && (
               <button className="fin-empty-action" onClick={openFeeHeadForm}>
                 Add first fee head →
@@ -1005,7 +1083,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                 ref={feeHeadNameRef}
                 className="fin-input"
                 type="text"
-                placeholder="e.g. School Fees, PTA Levy"
+                placeholder={isHigherEd ? 'e.g. Tuition, Acceptance Fee' : 'e.g. School Fees, PTA Levy'}
                 value={feeHeadForm.name}
                 onChange={e => setFeeHeadForm(prev => ({ ...prev, name: e.target.value }))}
                 autoComplete="off"
@@ -1114,7 +1192,10 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
             <div className="fin-field">
               <label className="fin-label">Applies to</label>
               <div className="fin-radio-group">
-                {(['school_wide', 'class_node', 'student'] as const).map(type => (
+                {(isHigherEd
+                  ? (['school_wide', 'programme_level', 'student'] as const)
+                  : (['school_wide', 'class_node', 'student'] as const)
+                ).map(type => (
                   <label key={type} className="fin-radio-label">
                     <input
                       type="radio"
@@ -1125,12 +1206,13 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                     />
                     {type === 'school_wide' ? 'All students'
                       : type === 'class_node' ? 'A specific class'
+                      : type === 'programme_level' ? 'A specific programme/level'
                       : 'A specific student'}
                   </label>
                 ))}
               </div>
             </div>
-            {assignmentForm.target_type === 'class_node' && (
+            {!isHigherEd && assignmentForm.target_type === 'class_node' && (
               <div className="fin-field">
                 <label className="fin-label" htmlFor="fin-asgn-class">
                   Class <span className="fin-required">*</span>
@@ -1144,6 +1226,24 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                   <option value="">— select class —</option>
                   {classes.map(c => (
                     <option key={c.id} value={c.id}>{c.path_label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {isHigherEd && assignmentForm.target_type === 'programme_level' && (
+              <div className="fin-field">
+                <label className="fin-label" htmlFor="fin-asgn-programme-level">
+                  Programme / Level <span className="fin-required">*</span>
+                </label>
+                <select
+                  id="fin-asgn-programme-level"
+                  className="fin-select"
+                  value={assignmentForm.programme_level_id}
+                  onChange={e => setAssignmentField('programme_level_id', e.target.value)}
+                >
+                  <option value="">— select programme/level —</option>
+                  {programmeLevels.map(pl => (
+                    <option key={pl.id} value={pl.id}>{pl.path_label}</option>
                   ))}
                 </select>
               </div>
@@ -1177,7 +1277,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
             )}
             {terms.length > 0 && (
               <div className="fin-field">
-                <label className="fin-label" htmlFor="fin-asgn-term">Term</label>
+                <label className="fin-label" htmlFor="fin-asgn-term">{isHigherEd ? 'Semester' : 'Term'}</label>
                 <select
                   id="fin-asgn-term"
                   className="fin-select"
@@ -1237,7 +1337,11 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
             </div>
             <div className="fin-detail-title-wrap">
               <p className="fin-detail-name">{b.student_name}</p>
-              <p className="fin-detail-class">{b.class_path_label ?? 'No class assigned'}</p>
+              <p className="fin-detail-class">
+                {isHigherEd
+                  ? (b.programme_level_label ?? 'No placement on record')
+                  : (b.class_path_label ?? 'No class assigned')}
+              </p>
             </div>
             <button className="fin-form-close" onClick={closeDetail} aria-label="Close"><Icon name="x" size={18} /></button>
           </div>
@@ -1341,7 +1445,7 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
                   {p.fee_head_name && (
                     <span className="fin-payment-feehead">· {p.fee_head_name}</span>
                   )}
-                  <span className="fin-payment-date">{formatDate(p.paid_at)}</span>
+                  <span className="fin-payment-date">{p.paid_at ? formatDate(p.paid_at) : 'Pending'}</span>
                 </div>
                 {p.received_by_name && (
                   <span className="fin-payment-by">Recorded by {p.received_by_name}</span>
@@ -1374,7 +1478,10 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
               .filter(a =>
                 a.target_type === 'school_wide' ||
                 (a.target_type === 'class_node' && a.class_node_id === detailBalance.class_node_id) ||
-                (a.target_type === 'student' && a.student_id === detailBalance.student_id)
+                (a.target_type === 'student' && a.student_id === detailBalance.student_id) ||
+                (a.target_type === 'programme_level' &&
+                  detailBalance.programme_level_id !== null &&
+                  a.programme_level_id === detailBalance.programme_level_id)
               )
               .map(a => (
                 <option key={a.id} value={a.id}>
@@ -1529,7 +1636,10 @@ export default function FinanceModule({ schoolId, intent }: FinanceModuleProps) 
               .filter(a =>
                 a.target_type === 'school_wide' ||
                 (a.target_type === 'class_node' && a.class_node_id === detailBalance.class_node_id) ||
-                (a.target_type === 'student' && a.student_id === detailBalance.student_id)
+                (a.target_type === 'student' && a.student_id === detailBalance.student_id) ||
+                (a.target_type === 'programme_level' &&
+                  detailBalance.programme_level_id !== null &&
+                  a.programme_level_id === detailBalance.programme_level_id)
               )
               .map(a => (
                 <option key={a.id} value={a.id}>

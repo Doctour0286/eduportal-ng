@@ -162,7 +162,13 @@ function StudentSearchStep({ schoolId, onPick }: {
 
 // ─── Step 2: resolve placement, pick term, build registration ─────────────
 
-function RegistrationStep({ schoolId, student, onBack }: {
+// Exported (SESSION 69): GuardianPortal's new RegistrationTab reuses this
+// component byte-for-byte for the student self-service flow -- see that
+// file's RegistrationTab for why reuse, not reimplementation, is required
+// here (registerStudent()'s withdraw-diff behavior is only safe when the
+// caller has first seen and edited the existing registration set, which
+// this component's own mount effect already guarantees).
+export function RegistrationStep({ schoolId, student, onBack }: {
   schoolId: string
   student: StudentSearchResult
   onBack: () => void

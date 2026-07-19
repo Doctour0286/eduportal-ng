@@ -48,6 +48,7 @@ import {
   type StudentTranscript,
 } from '../services/courseResultsService'
 import { downloadTranscriptPdf } from '../services/transcriptPdf'
+import { initiateFeesPayment, checkPaymentStatus } from '../services/remitaPortalService'
 import {
   loadTimetableData,
   loadCurrentSession as loadTimetableCurrentSession,
@@ -58,6 +59,10 @@ import {
   type WeekDay,
 } from '../services/timetableService'
 import { TermProgressCard } from '../components/TermProgressCard'
+// SESSION 69: reused byte-for-byte from the admin flow, not reimplemented --
+// see RegistrationTab below for why reuse (not a leaner rebuild) is required.
+import { RegistrationStep } from './CourseRegistrationModule'
+import { type StudentSearchResult } from '../services/settingsService'
 
 // SESSION 60b: 'results' is the secondary-school subject/CA/exam view
 // (loadStudentResults -> scores/subject_results). 'transcript' is its
@@ -68,7 +73,7 @@ import { TermProgressCard } from '../components/TermProgressCard'
 // per-render from schoolType rather than being a fixed array, since which
 // of the two tabs exists depends on which academic engine this school
 // runs — see buildPortalTabs() below.
-type PortalTab = 'summary' | 'results' | 'transcript' | 'attendance' | 'fees' | 'schedule' | 'announcements'
+type PortalTab = 'summary' | 'results' | 'transcript' | 'attendance' | 'fees' | 'schedule' | 'announcements' | 'registration'
 
 interface GuardianPortalProps {
   schoolId: string
@@ -230,6 +235,7 @@ export default function GuardianPortal({ schoolId, schoolName, authUserId, initi
           tab={tab}
           onTabChange={setTab}
           isHigherEd={isHigherEd}
+          isStudentSelf={isStudentSelf}
         />
       )}
     </div>
@@ -243,8 +249,23 @@ export default function GuardianPortal({ schoolId, schoolName, authUserId, initi
 // point rule), so building the tab list per-render off isHigherEd is the
 // correct shape here, not a fixed array with a tab hidden/disabled. Order
 // otherwise unchanged from the pre-existing array.
-function buildPortalTabs(isHigherEd: boolean): PortalTab[] {
-  return ['summary', isHigherEd ? 'transcript' : 'results', 'attendance', 'schedule', 'fees', 'announcements']
+// SESSION 69: 'registration' is added only when isHigherEd (secondary schools
+// have no self-service course registration concept -- their subject/class
+// assignment is admin-driven) AND only isStudentSelf (a guardian must never
+// register courses on a child's behalf -- this is the student's own academic
+// decision, matching the same "student, not guardian" restriction the new
+// RLS write policy on course_registrations already enforces server-side;
+// this tab visibility is the client-side mirror of that same boundary, not
+// a substitute for it).
+function buildPortalTabs(isHigherEd: boolean, isStudentSelf: boolean): PortalTab[] {
+  const base: PortalTab[] = ['summary', isHigherEd ? 'transcript' : 'results', 'attendance', 'schedule', 'fees', 'announcements']
+  if (isHigherEd && isStudentSelf) {
+    // Placed right after 'transcript' -- a student's two academic-record
+    // actions (see grades, manage registration) sit next to each other,
+    // ahead of the more logistical attendance/fees/news tabs.
+    base.splice(2, 0, 'registration')
+  }
+  return base
 }
 
 const PORTAL_TAB_LABELS: Record<PortalTab, string> = {
@@ -255,6 +276,7 @@ const PORTAL_TAB_LABELS: Record<PortalTab, string> = {
   schedule: 'Schedule',
   fees: 'Fees',
   announcements: 'News',
+  registration: 'Register',
 }
 
 // Minimum horizontal drag (px) before a swipe commits to switching tabs,
@@ -274,6 +296,7 @@ function ChildDetail({
   tab,
   onTabChange,
   isHigherEd,
+  isStudentSelf,
 }: {
   schoolId: string
   schoolName: string
@@ -285,8 +308,9 @@ function ChildDetail({
   tab: PortalTab
   onTabChange: (t: PortalTab) => void
   isHigherEd: boolean
+  isStudentSelf: boolean
 }) {
-  const PORTAL_TABS = buildPortalTabs(isHigherEd)
+  const PORTAL_TABS = buildPortalTabs(isHigherEd, isStudentSelf)
   const activeIndex = PORTAL_TABS.indexOf(tab)
 
   // Tracks which tabs have ever been opened. A tab's panel only mounts (and
@@ -441,12 +465,14 @@ function ChildDetail({
                 <ResultsTab schoolId={schoolId} child={child} session={session} terms={terms} usesTerms={usesTerms} />
               ) : t === 'transcript' ? (
                 <TranscriptTab schoolName={schoolName} child={child} />
+              ) : t === 'registration' ? (
+                <RegistrationTab schoolId={schoolId} child={child} />
               ) : t === 'attendance' ? (
                 <AttendanceTab schoolId={schoolId} child={child} session={session} />
               ) : t === 'schedule' ? (
                 <ScheduleTab child={child} />
               ) : t === 'fees' ? (
-                <FeesTab schoolId={schoolId} child={child} session={session} />
+                <FeesTab schoolId={schoolId} child={child} session={session} isStudentSelf={isStudentSelf} isHigherEd={isHigherEd} />
               ) : (
                 <AnnouncementsTab schoolId={schoolId} />
               )}
@@ -860,6 +886,52 @@ function TranscriptTab({
   )
 }
 
+// ─── Registration tab (SESSION 69 — higher-ed self-service course registration) ──
+
+// A thin adapter, not a reimplementation: RegistrationStep (imported from
+// CourseRegistrationModule, exported there for exactly this reuse) already
+// contains every rule this needs -- placement resolution, term selection,
+// core/elective/carryover curriculum logic, credit-load cap checking, and
+// the save call itself. That reuse is load-bearing, not just convenient:
+// registerStudent() replaces the student's full registration set for the
+// session+term with whatever course list it's given, silently withdrawing
+// anything left out -- safe only because RegistrationStep's own mount
+// effect loads and pre-checks existing registrations before any save is
+// possible, so the diff it computes always matches what the student
+// actually saw. A leaner rebuild here would risk silently dropping that
+// load-existing-state step and turning a normal save into silent data loss.
+//
+// child comes from loadPortalIdentity() (via GuardianPortal's boot()),
+// already scoped to this school_id and already confirmed to be the signed-in
+// student's own record when isStudentSelf is true -- no second identity
+// resolution needed here. Only { id, full_name } are read anywhere inside
+// RegistrationStep (confirmed by direct inspection of that file); matric_number
+// is read only by StudentSearchStep, which this tab never renders, since a
+// student doesn't search for themselves.
+function RegistrationTab({
+  schoolId,
+  child,
+}: {
+  schoolId: string
+  child: PortalChild
+}) {
+  // NOTE: matric_number's exact type (required string vs. nullable) can't be
+  // confirmed without settingsService.ts, where StudentSearchResult is
+  // actually declared -- not uploaded to this session. Using `null` here
+  // is a real, unverified assumption, not a safe placeholder: if that field
+  // is a required non-null string, this line will fail to compile (correctly),
+  // and if it's optional/nullable, this line is fine as-is. Left uncast
+  // deliberately so `npm run build` surfaces the true answer rather than
+  // this comment silently papering over a real mismatch.
+  const selfAsStudent: StudentSearchResult = { id: child.id, full_name: child.full_name, matric_number: null }
+
+  return (
+    <div className="port-registration">
+      <RegistrationStep schoolId={schoolId} student={selfAsStudent} onBack={() => {}} />
+    </div>
+  )
+}
+
 // ─── Attendance tab (§4.9 — percentage, count relative to total, calendar strip) ──
 
 function AttendanceTab({
@@ -1172,15 +1244,47 @@ function FeesTab({
   schoolId,
   child,
   session,
+  isStudentSelf,
+  isHigherEd,
 }: {
   schoolId: string
   child: PortalChild
   session: PortalSession | null
+  isStudentSelf: boolean
+  isHigherEd: boolean
 }) {
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [summary, setSummary] = useState<FeeSummary | null>(null)
   const [history, setHistory] = useState<PaymentHistoryRow[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  // Pay Now is gated to isStudentSelf — matching the owner's locked
+  // self-service-only decision (master plan §12): a guardian can view a
+  // child's fees but must never trigger a payment on their behalf, since
+  // remita-initiate-payment itself rejects any caller that doesn't resolve
+  // to actor_type='student' anyway — this is the client-side mirror of that
+  // same server-side boundary, not a substitute for it.
+  const [payState, setPayState] = useState<'idle' | 'starting' | 'error'>('idle')
+  const [payError, setPayError] = useState<string | null>(null)
+  const [checkingRrr, setCheckingRrr] = useState<string | null>(null)
+
+  const reload = useCallback(async () => {
+    if (!session) {
+      setLoadState('ready')
+      return
+    }
+    setLoadState('loading')
+    try {
+      const [sum, hist] = await Promise.all([
+        loadFeeSummary(schoolId, child.id, session.id, isHigherEd),
+        loadPaymentHistory(schoolId, child.id),
+      ])
+      setSummary(sum)
+      setHistory(hist)
+      setLoadState('ready')
+    } catch {
+      setLoadState('error')
+    }
+  }, [schoolId, child.id, session, isHigherEd])
 
   useEffect(() => {
     let cancelled = false
@@ -1192,7 +1296,7 @@ function FeesTab({
       setLoadState('loading')
       try {
         const [sum, hist] = await Promise.all([
-          loadFeeSummary(schoolId, child.id, session.id),
+          loadFeeSummary(schoolId, child.id, session.id, isHigherEd),
           loadPaymentHistory(schoolId, child.id),
         ])
         if (cancelled) return
@@ -1205,7 +1309,37 @@ function FeesTab({
     }
     run()
     return () => { cancelled = true }
-  }, [schoolId, child.id, session])
+  }, [schoolId, child.id, session, isHigherEd])
+
+  async function handlePayNow(feeAssignmentIds: string[]) {
+    setPayState('starting')
+    setPayError(null)
+    try {
+      const result = await initiateFeesPayment(feeAssignmentIds)
+      // Real navigation, not a fetch — the payment page is Remita's own
+      // hosted checkout (card/USSD/bank-transfer/eNaira channel selection),
+      // not something this app renders itself.
+      window.location.href = result.paymentPageUrl
+    } catch (e) {
+      setPayState('error')
+      setPayError(e instanceof Error ? e.message : 'Could not start payment. Please try again.')
+    }
+  }
+
+  async function handleCheckStatus(rrr: string) {
+    setCheckingRrr(rrr)
+    try {
+      await checkPaymentStatus(rrr)
+    } catch {
+      // Swallowed deliberately: whether verification resolved it or not,
+      // reload() below re-fetches the real current state from the DB —
+      // that's the source of truth, not whatever this call returned. A
+      // transient network failure here shouldn't block the refresh.
+    } finally {
+      await reload()
+      setCheckingRrr(null)
+    }
+  }
 
   if (!session) {
     return <p className="port-empty-inline">No active session yet.</p>
@@ -1219,9 +1353,13 @@ function FeesTab({
     return <p className="port-form-error">Couldn't load fees — check your connection and try again.</p>
   }
 
-  if (!summary || summary.breakdown.length === 0) {
+  if (!summary || (summary.breakdown.length === 0 && summary.pendingPayments.length === 0)) {
     return <p className="port-empty-inline">No fees assigned yet this session.</p>
   }
+
+  // Every payable assignment across every fee head with an outstanding
+  // balance — this is what "Pay all outstanding" sends in one RRR.
+  const allPayableIds = summary.breakdown.flatMap((b) => b.payableAssignments.map((p) => p.fee_assignment_id))
 
   return (
     <div className="port-fees">
@@ -1235,7 +1373,47 @@ function FeesTab({
           {summary.totalDiscount > 0 && ` · Discount ${formatNaira(summary.totalDiscount)}`}
           {' · '}Paid {formatNaira(summary.totalPaid)}
         </p>
+        {isStudentSelf && summary.balance > 0 && allPayableIds.length > 0 && (
+          <button
+            className="port-fee-pay-now-btn"
+            disabled={payState === 'starting'}
+            onClick={() => handlePayNow(allPayableIds)}
+          >
+            {payState === 'starting' ? 'Starting payment…' : `Pay ${formatNaira(summary.balance)} now`}
+          </button>
+        )}
+        {payState === 'error' && payError && (
+          <p className="port-form-error">{payError}</p>
+        )}
       </div>
+
+      {summary.pendingPayments.length > 0 && (
+        <div className="port-fee-pending-card">
+          <p className="port-fee-section-title">Awaiting confirmation</p>
+          {summary.pendingPayments.map((p) => (
+            <div key={p.id} className="port-fee-pending-row">
+              <div>
+                <p className="port-fee-pending-amount">{formatNaira(p.amount)}</p>
+                <p className="port-fee-pending-meta">
+                  {p.fee_head_name ?? 'Payment'} · Ref {p.provider_reference ?? '—'} · Started {formatDate(p.created_at)}
+                </p>
+              </div>
+              {isStudentSelf && p.provider_reference && (
+                <button
+                  className="port-fee-check-status-btn"
+                  disabled={checkingRrr === p.provider_reference}
+                  onClick={() => handleCheckStatus(p.provider_reference!)}
+                >
+                  {checkingRrr === p.provider_reference ? 'Checking…' : 'Check status'}
+                </button>
+              )}
+            </div>
+          ))}
+          <p className="port-fee-pending-hint">
+            Paid at a bank counter, USSD, or transfer? Tap "Check status" to confirm it — this can take a few minutes to reflect.
+          </p>
+        </div>
+      )}
 
       <p className="port-fee-section-title">By fee</p>
       <div className="port-fee-list">
@@ -1249,9 +1427,20 @@ function FeesTab({
                 {' · '}Paid {formatNaira(b.paid)}
               </p>
             </div>
-            <p className={`port-fee-row-balance ${b.balance > 0 ? 'port-fee-row-balance--warn' : 'port-fee-row-balance--ok'}`}>
-              {formatNaira(b.balance)}
-            </p>
+            <div className="port-fee-row-right">
+              <p className={`port-fee-row-balance ${b.balance > 0 ? 'port-fee-row-balance--warn' : 'port-fee-row-balance--ok'}`}>
+                {formatNaira(b.balance)}
+              </p>
+              {isStudentSelf && b.balance > 0 && b.payableAssignments.length > 0 && (
+                <button
+                  className="port-fee-row-pay-btn"
+                  disabled={payState === 'starting'}
+                  onClick={() => handlePayNow(b.payableAssignments.map((p) => p.fee_assignment_id))}
+                >
+                  Pay
+                </button>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -1268,7 +1457,7 @@ function FeesTab({
               <div>
                 <p className="port-fee-history-amount">{formatNaira(p.amount)}</p>
                 <p className="port-fee-history-meta">
-                  {p.fee_head_name ?? 'Payment'} · {formatDate(p.paid_at)} · {methodLabel(p.method)}
+                  {p.fee_head_name ?? 'Payment'} · {p.paid_at ? formatDate(p.paid_at) : 'Pending'} · {methodLabel(p.method)}
                 </p>
                 {p.notes && <p className="port-fee-history-notes">{p.notes}</p>}
               </div>
@@ -1378,6 +1567,7 @@ function methodLabel(method: string): string {
     paystack: 'Paystack',
     flutterwave: 'Flutterwave',
     ussd: 'USSD',
+    remita: 'Remita',
   }
   return labels[method] ?? method
 }

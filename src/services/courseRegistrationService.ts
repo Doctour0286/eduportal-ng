@@ -74,6 +74,34 @@ export interface ExistingRegistration {
   is_carryover: boolean
 }
 
+// ─── Resolve the currently-authenticated student's own student_id ─────────
+
+// SESSION 69 addition: the student self-service registration portal needs
+// its own student_id, resolved the same authoritative way the new RLS
+// write policy on course_registrations resolves it server-side
+// (app_identities.actor_record_id where auth_user_id = auth.uid() and
+// actor_type = 'student') -- not a second, possibly-stale notion of
+// "current student" threaded loosely from wherever the portal shell
+// happens to already store one. Client-side RLS still applies on this
+// read (app_identities' own self-read policy), so this can never resolve
+// to someone else's identity even if called incorrectly.
+export async function loadCurrentStudentId(): Promise<{ data: string | null; error: string | null }> {
+  const { data: authData, error: authErr } = await supabase.auth.getUser()
+  if (authErr) return { data: null, error: authErr.message }
+  const authUserId = authData.user?.id
+  if (!authUserId) return { data: null, error: 'Not signed in.' }
+
+  const { data, error } = await supabase
+    .from('app_identities')
+    .select('actor_record_id, actor_type')
+    .eq('auth_user_id', authUserId)
+    .eq('actor_type', 'student')
+    .maybeSingle()
+  if (error) return { data: null, error: error.message }
+  if (!data) return { data: null, error: 'No student identity found for this account.' }
+  return { data: data.actor_record_id, error: null }
+}
+
 // ─── Resolve a student's current placement ─────────────────────────────────
 
 // A registration is always built against the student's *current* placement

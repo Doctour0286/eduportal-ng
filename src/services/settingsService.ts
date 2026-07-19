@@ -2405,6 +2405,204 @@ export async function reviewStandingEvent(
   return { error: error?.message ?? null }
 }
 
+// ─── SESSION 69 — Programme-level promotion rules ──────────────────────────
+// (PRD Tier 8, SESSION 69, §7.27.1a Design A amendment). A school-configured
+// mapping "from this programme level, to that one, at this CGPA cutoff" —
+// read by the new run_programme_promotion()/record_manual_promotion_decision()
+// DB functions (migration_session69_promotion_run.sql), never computed or
+// guessed at here. This is definitional-side CRUD only, following
+// upsertHigherEdGradeBand()/deleteHigherEdGradeBand()'s exact established
+// pattern for a small per-school config/catalogue table (upsert by optional
+// id, real hard delete — same catalogue-data carve-out from this file's own
+// "no hard deletes" header rule already documented for grade_scales/periods/
+// roles/student roles).
+//
+// max_carryover_courses is read/written here (so the column isn't silently
+// unreachable from any UI) but is NOT YET enforced by the promotion run
+// itself — owner's explicit choice this session: CGPA-only eligibility for
+// now, carryover-cap as a clearly separate, later follow-up. Exposing the
+// field now means no second migration/UI pass is needed once that follow-up
+// lands; it simply starts being read by the DB function at that point.
+
+export interface ProgrammePromotionRule {
+  id: string
+  from_programme_level_id: string
+  to_programme_level_id: string
+  min_cgpa: number | null
+  max_carryover_courses: number | null
+}
+
+export async function loadProgrammePromotionRules(schoolId: string): Promise<{ data: ProgrammePromotionRule[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('programme_promotion_rules')
+    .select('id, from_programme_level_id, to_programme_level_id, min_cgpa, max_carryover_courses')
+    .eq('school_id', schoolId)
+    .order('created_at', { ascending: true })
+
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((r: any) => ({
+      id: r.id,
+      from_programme_level_id: r.from_programme_level_id,
+      to_programme_level_id: r.to_programme_level_id,
+      min_cgpa: r.min_cgpa === null ? null : Number(r.min_cgpa),
+      max_carryover_courses: r.max_carryover_courses === null ? null : Number(r.max_carryover_courses),
+    })),
+    error: null,
+  }
+}
+
+export async function upsertProgrammePromotionRule(
+  schoolId: string,
+  rule: {
+    id?: string
+    from_programme_level_id: string
+    to_programme_level_id: string
+    min_cgpa: number | null
+    max_carryover_courses: number | null
+  },
+): Promise<{ error: string | null }> {
+  const payload = {
+    from_programme_level_id: rule.from_programme_level_id,
+    to_programme_level_id: rule.to_programme_level_id,
+    min_cgpa: rule.min_cgpa,
+    max_carryover_courses: rule.max_carryover_courses,
+  }
+  if (rule.id) {
+    const { error } = await supabase
+      .from('programme_promotion_rules')
+      .update(payload)
+      .eq('id', rule.id)
+      .eq('school_id', schoolId)
+    return { error: error?.message ?? null }
+  }
+  const { error } = await supabase
+    .from('programme_promotion_rules')
+    .insert({ school_id: schoolId, ...payload })
+  return { error: error?.message ?? null }
+}
+
+// Catalogue/config data, not a person or financial record — real hard
+// delete, same carve-out this file's header rule already documents for
+// grade_scales/periods/roles/student roles (deleteHigherEdGradeBand is the
+// most directly analogous precedent — same table shape, same reasoning).
+export async function deleteProgrammePromotionRule(schoolId: string, ruleId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('programme_promotion_rules')
+    .delete()
+    .eq('id', ruleId)
+    .eq('school_id', schoolId)
+  return { error: error?.message ?? null }
+}
+
+// ─── SESSION 69, item 4c — the promotion run itself + manual-review queue ──
+// Calls the two real security-definer DB functions directly
+// (session69_promotion_run.sql) via supabase.rpc() — the first .rpc() call
+// in this file. Neither function is a plain client write under this
+// school's existing RLS: run_programme_promotion() flips
+// student_programme_placements.is_current and inserts a new placement row
+// in the same pass, and record_manual_promotion_decision() does the same
+// for a single student — both writes broader than any staff role's direct
+// RLS grant, per the SQL file's own documented justification (mirroring
+// apply_carryover_status()'s precedent). This mirrors
+// runStandingEvaluation()'s role in this file (a session-end sweep +
+// review queue) but is NOT built the same way internally — that function
+// computes client-side against ordinary RLS-gated reads/writes;
+// run_programme_promotion() is real, server-side, transactional logic that
+// cannot safely be replicated as a sequence of client calls (see the SQL
+// file's own header comment on why a client-side loop of individual
+// updates would race).
+
+export interface PromotionRunResultRow {
+  student_id: string
+  student_full_name: string
+  from_programme_level_id: string
+  to_programme_level_id: string | null
+  cgpa: number | null
+  min_cgpa: number | null
+  outcome: 'auto_promoted' | 'needs_review' | 'graduated' | 'no_rule_configured'
+}
+
+/**
+ * Runs run_programme_promotion() for real — this WRITES: auto-promotes
+ * every eligible student (flips their current placement, inserts the new
+ * one, writes a programme_promotion_history row), and returns one row per
+ * considered student covering all four outcomes, including
+ * needs_review/no_rule_configured, which this function does NOT act on —
+ * per the SQL function's own "never silent" design, every considered
+ * student is returned, not just the ones it changed. There is
+ * deliberately no separate "dry run" mode exposed here — the DB function
+ * itself always writes; a dry run is done by wrapping the raw SQL call in
+ * begin/rollback directly in SQL Editor, not by this service layer.
+ */
+export async function runProgrammePromotion(
+  sessionId: string,
+  decidedByStaffId: string,
+): Promise<{ data: PromotionRunResultRow[]; error: string | null }> {
+  const { data, error } = await supabase.rpc('run_programme_promotion', {
+    p_session_id: sessionId,
+    p_decided_by: decidedByStaffId,
+  })
+  if (error) return { data: [], error: error.message }
+  return {
+    data: (data ?? []).map((r: any) => ({
+      student_id: r.student_id,
+      student_full_name: r.student_full_name,
+      from_programme_level_id: r.from_programme_level_id,
+      to_programme_level_id: r.to_programme_level_id,
+      cgpa: r.cgpa === null ? null : Number(r.cgpa),
+      min_cgpa: r.min_cgpa === null ? null : Number(r.min_cgpa),
+      outcome: r.outcome,
+    })),
+    error: null,
+  }
+}
+
+/**
+ * Records one manual review decision for a single student in the
+ * needs_review bucket — calls record_manual_promotion_decision(), which
+ * writes its own placement flip and its own programme_promotion_history
+ * row, same audit discipline as the bulk function.
+ *
+ * FIX (session69, post-4c): 'manual_override' was previously treated like
+ * 'repeated' at this layer — toProgrammeLevelId was silently forced to
+ * null for anything other than 'promoted', which meant an admin picking a
+ * destination level and clicking "Manual override" had that choice
+ * discarded, and the DB function (before its own fix5) wrote an
+ * audit-only row that never moved the student. Owner-confirmed semantics:
+ * 'manual_override' behaves exactly like 'promoted' (flip placement,
+ * insert new one at the chosen level) — it exists only to let an admin
+ * bypass the normal CGPA cutoff, distinguished from 'promoted' only in
+ * the audit trail's decision column, never in the real effect. This must
+ * stay in sync with record_manual_promotion_decision's own
+ * p_decision in ('promoted', 'manual_override', 'graduated') branch
+ * (session69_promotion_run_fix5.sql) — a destination level is required
+ * for both 'promoted' and 'manual_override', and null only for
+ * 'repeated'/'graduated'.
+ */
+export async function recordManualPromotionDecision(params: {
+  studentId: string
+  sessionId: string
+  decision: 'promoted' | 'repeated' | 'manual_override' | 'graduated'
+  toProgrammeLevelId: string | null
+  decidedByStaffId: string
+  reason: string
+}): Promise<{ error: string | null }> {
+  const requiresDestination = params.decision === 'promoted' || params.decision === 'manual_override'
+  if (requiresDestination && !params.toProgrammeLevelId) {
+    return { error: `Choose a destination level for a "${params.decision}" decision.` }
+  }
+  const { error } = await supabase.rpc('record_manual_promotion_decision', {
+    p_student_id: params.studentId,
+    p_session_id: params.sessionId,
+    p_decision: params.decision,
+    p_to_programme_level_id: requiresDestination ? params.toProgrammeLevelId : null,
+    p_decided_by: params.decidedByStaffId,
+    p_reason: params.reason,
+  })
+  return { error: error?.message ?? null }
+}
+
 
 // before SESSION 60, closing the gap SESSION 58's close-out surfaced: "no
 // course_offerings creation UI exists anywhere ... every test in this
