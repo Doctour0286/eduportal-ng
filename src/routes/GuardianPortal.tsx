@@ -49,6 +49,8 @@ import {
 } from '../services/courseResultsService'
 import { downloadTranscriptPdf } from '../services/transcriptPdf'
 import { initiateFeesPayment, checkPaymentStatus } from '../services/remitaPortalService'
+import { downloadReceiptPdf } from '../services/receiptPdf'
+import { loadStudentCourseAttendance, type StudentCourseAttendanceRow } from '../services/courseAttendanceService'
 import {
   loadTimetableData,
   loadCurrentSession as loadTimetableCurrentSession,
@@ -468,11 +470,15 @@ function ChildDetail({
               ) : t === 'registration' ? (
                 <RegistrationTab schoolId={schoolId} child={child} />
               ) : t === 'attendance' ? (
-                <AttendanceTab schoolId={schoolId} child={child} session={session} />
+                isHigherEd ? (
+                  <CourseAttendanceTab child={child} session={session} />
+                ) : (
+                  <AttendanceTab schoolId={schoolId} child={child} session={session} />
+                )
               ) : t === 'schedule' ? (
                 <ScheduleTab child={child} />
               ) : t === 'fees' ? (
-                <FeesTab schoolId={schoolId} child={child} session={session} isStudentSelf={isStudentSelf} isHigherEd={isHigherEd} />
+                <FeesTab schoolId={schoolId} schoolName={schoolName} child={child} session={session} isStudentSelf={isStudentSelf} isHigherEd={isHigherEd} />
               ) : (
                 <AnnouncementsTab schoolId={schoolId} />
               )}
@@ -1051,6 +1057,100 @@ function AttendanceTab({
   )
 }
 
+function CourseAttendanceTab({
+  child,
+  session,
+}: {
+  child: PortalChild
+  session: PortalSession | null
+}) {
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [rows, setRows] = useState<StudentCourseAttendanceRow[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      if (!session) {
+        setLoadState('ready')
+        return
+      }
+      setLoadState('loading')
+      const { ok, data, error } = await loadStudentCourseAttendance({
+        studentId: child.id,
+        sessionId: session.id,
+      })
+      if (cancelled) return
+      if (!ok) {
+        console.error('loadStudentCourseAttendance failed:', error)
+        setLoadState('error')
+        return
+      }
+      setRows(data)
+      setLoadState('ready')
+    }
+    run()
+    return () => { cancelled = true }
+  }, [child.id, session])
+
+  if (!session) {
+    return <p className="port-empty-inline">No active session yet.</p>
+  }
+
+  if (loadState === 'loading') {
+    return (
+      <>
+        <div className="port-skel-card" />
+        <div className="port-skel-card" />
+      </>
+    )
+  }
+
+  if (loadState === 'error') {
+    return <p className="port-form-error">Couldn't load attendance — check your connection and try again.</p>
+  }
+
+  if (rows.length === 0) {
+    return <p className="port-empty-inline">No courses registered for the current session yet.</p>
+  }
+
+  return (
+    <div className="port-course-attendance">
+      <p className="port-fee-section-title">This session's courses</p>
+      <div className="port-course-attendance-list">
+        {rows.map((r) => (
+          <div key={r.courseOfferingId} className="port-course-attendance-row">
+            <div className="port-course-attendance-info">
+              <p className="port-course-attendance-title">
+                {r.courseCode} · {r.courseTitle}
+              </p>
+              <p className="port-course-attendance-lecturer">
+                {r.lecturerName ?? 'Lecturer not yet assigned'}
+              </p>
+              <p className="port-course-attendance-meta">
+                {r.totalSessions === 0
+                  ? 'No sessions held yet'
+                  : `${r.presentCount} of ${r.totalSessions} sessions attended`}
+                {r.thresholdPct !== null && r.percent !== null && (
+                  <> · Threshold {r.thresholdPct}%</>
+                )}
+              </p>
+            </div>
+            <div
+              className={[
+                'port-course-attendance-percent',
+                r.meetsThreshold === false ? 'port-course-attendance-percent--warn' : '',
+                r.meetsThreshold === true ? 'port-course-attendance-percent--ok' : '',
+              ].join(' ').trim()}
+            >
+              {r.percent === null ? '—' : `${r.percent}%`}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function stripDotTitle(status: AttendanceDay['status']): string {
   if (status === 'no_school') return 'no school that day'
   if (status === 'unmarked') return 'not marked yet'
@@ -1242,12 +1342,14 @@ function formatTime(hhmmss: string): string {
 
 function FeesTab({
   schoolId,
+  schoolName,
   child,
   session,
   isStudentSelf,
   isHigherEd,
 }: {
   schoolId: string
+  schoolName: string
   child: PortalChild
   session: PortalSession | null
   isStudentSelf: boolean
@@ -1461,6 +1563,18 @@ function FeesTab({
                 </p>
                 {p.notes && <p className="port-fee-history-notes">{p.notes}</p>}
               </div>
+              <button
+                className="port-fee-receipt-btn"
+                onClick={() =>
+                  downloadReceiptPdf({
+                    schoolName,
+                    studentName: child.full_name,
+                    payment: p,
+                  })
+                }
+              >
+                Receipt
+              </button>
             </div>
           ))}
         </div>

@@ -146,6 +146,7 @@ export interface PaymentHistoryRow {
   id: string
   amount: number
   method: string
+  provider_reference: string | null // Remita RRR for a gateway payment, null for manually-recorded cash/bank-transfer — added for receipt generation (session 72)
   paid_at: string | null // null for a payment that failed before ever settling
   notes: string | null
   fee_head_name: string | null
@@ -972,7 +973,7 @@ export async function loadPaymentHistory(
 ): Promise<PaymentHistoryRow[]> {
   const { data } = await supabase
     .from('payments')
-    .select('id, amount, method, paid_at, notes, fee_assignments ( fee_heads ( name ) )')
+    .select('id, amount, method, provider_reference, paid_at, notes, fee_assignments ( fee_heads ( name ) )')
     .eq('school_id', schoolId)
     .eq('student_id', studentId)
     .eq('status', 'completed')
@@ -985,6 +986,7 @@ export async function loadPaymentHistory(
       id: p.id,
       amount: p.amount,
       method: p.method,
+      provider_reference: p.provider_reference,
       paid_at: p.paid_at,
       notes: p.notes,
       fee_head_name: headRel?.name ?? null,
