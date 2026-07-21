@@ -180,7 +180,7 @@ function drawReceiptTitle(
   doc: jsPDF,
   pageWidth: number,
   y: number,
-  payment: ReceiptPaymentInput,
+  _payment: ReceiptPaymentInput,
   colors: ResolvedBrandColors,
 ): number {
   doc.setFont('helvetica', 'bold')

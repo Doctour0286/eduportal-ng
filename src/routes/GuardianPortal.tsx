@@ -1075,17 +1075,17 @@ function CourseAttendanceTab({
         return
       }
       setLoadState('loading')
-      const { ok, data, error } = await loadStudentCourseAttendance({
+      const result = await loadStudentCourseAttendance({
         studentId: child.id,
         sessionId: session.id,
       })
       if (cancelled) return
-      if (!ok) {
-        console.error('loadStudentCourseAttendance failed:', error)
+      if (!result.ok) {
+        console.error('loadStudentCourseAttendance failed:', result.error)
         setLoadState('error')
         return
       }
-      setRows(data)
+      setRows(result.data)
       setLoadState('ready')
     }
     run()
