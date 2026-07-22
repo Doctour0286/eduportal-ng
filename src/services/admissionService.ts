@@ -115,6 +115,86 @@ export async function hasAnyMatricAdmissions(
   return { data: (data ?? []).length > 0, error: null }
 }
 
+// ─── Matric sequence scope (schema follow-up, owner request) ──────────────
+// CORRECTED (post-42P10 investigation, see fix_admit_student_42P10_v2.sql):
+// scope resolution does NOT live in build_matric_number() — that function
+// is, and always was, a pure assembly function given an already-resolved
+// sequence number (build_matric_number(school_id, programme_id, year, seq),
+// 4 args). The counter itself is owned and incremented independently by
+// admit_student() (real admissions) and set_matric_number_manual() (manual
+// entry) — both resolve scope themselves before touching
+// matric_sequence_counters. An earlier migration incorrectly added a
+// second, 3-arg build_matric_number() overload that duplicated the
+// increment internally; it had zero real callers (admit_student() always
+// used, and still uses, the 4-arg form) and has been dropped.
+//
+// What scope resolution actually reads, wherever it happens:
+//   schools.matric_sequence_scope_default — the school-wide fallback
+//   programmes.matric_sequence_scope — a nullable per-programme override
+//     (null = inherit the school default)
+// 'programme' = sequence resets per programme per admission year (the
+// original, only, SESSION 65 behavior). 'school' = one shared sequence
+// across the whole school, still resetting per admission year (owner
+// decision: yearly reset either way, never a forever-running total).
+//
+// Matric numbers are permanent once generated (owner decision) — changing
+// either the school default or a programme's override never touches an
+// already-issued number or rewrites an existing counter row; it only
+// changes which counter key future admissions read. There is deliberately
+// no "migrate old counters to the new scope" step anywhere in this file,
+// matching matric_number_formats' own append-only discipline above.
+export type MatricSequenceScope = 'programme' | 'school'
+
+// hasAnyMatricAdmissions() above answers "has this school admitted anyone
+// under the current format" (format-level soft-lock). This answers the
+// narrower, scope-specific question for one programme: "would changing
+// *this programme's* scope override be changing something already in use."
+// A programme with zero admissions of its own can still have contributed to
+// a shared school-wide counter another programme also uses — that's a real,
+// intentional cross-programme fact, not a bug, so this checks the counter
+// row(s) this programme's *current* effective scope would actually read,
+// not just rows where programme_id equals this programme's id.
+export async function hasAnyMatricAdmissionsForProgramme(
+  schoolId: string,
+  programmeId: string,
+): Promise<{ data: boolean; error: string | null }> {
+  const { data, error } = await supabase
+    .from('matric_sequence_counters')
+    .select('id, programme_id')
+    .eq('school_id', schoolId)
+    .gt('current_value', 0)
+    .or(`programme_id.eq.${programmeId},programme_id.is.null`)
+    .limit(1)
+  if (error) return { data: false, error: error.message }
+  return { data: (data ?? []).length > 0, error: null }
+}
+
+export async function setMatricSequenceScopeDefault(
+  schoolId: string,
+  scope: MatricSequenceScope,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('schools')
+    .update({ matric_sequence_scope_default: scope })
+    .eq('id', schoolId)
+  return { error: error?.message ?? null }
+}
+
+// Per-programme override setter. null clears the override back to "inherit
+// the school default" — a real, distinct, and common choice (most
+// programmes are expected to just track the school default), not merely
+// the absence of a choice, so this is a real third state, not two booleans.
+export async function setProgrammeMatricSequenceScope(
+  programmeId: string,
+  scope: MatricSequenceScope | null,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('programmes')
+    .update({ matric_sequence_scope: scope })
+    .eq('id', programmeId)
+  return { error: error?.message ?? null }
+}
+
 // Always inserts a new version — never updates a row in place. The caller
 // (the admission UI's format editor) is responsible for surfacing the
 // soft-lock warning via hasAnyMatricAdmissions() *before* calling this, since
@@ -221,8 +301,17 @@ function friendlyAdmitError(message: string): string {
   if (message.includes('Programme level not found')) {
     return 'That programme level could not be found. Refresh and try again.'
   }
+  if (message.includes('Programme not found')) {
+    return 'That programme could not be found. Refresh and try again.'
+  }
   if (message.includes('Student not found')) {
     return 'That student could not be found for this school. Refresh and try again.'
+  }
+  if (message.includes('Sequence number must be a positive whole number')) {
+    return 'Enter a whole number of 1 or more for the sequence.'
+  }
+  if (message.includes('already assigned to another student')) {
+    return 'This matric number is already assigned to another student — check the sequence number and try again.'
   }
   return message
 }
@@ -768,6 +857,11 @@ export async function saveFieldSettings(
 export interface AdmissionMasterSettings {
   admission_pipeline_enabled: boolean
   rejection_retention_days: number
+  // Matric sequence scope follow-up (owner request) — same "plain column on
+  // schools" treatment as the two fields above; per-programme overrides live
+  // on programmes.matric_sequence_scope instead (see
+  // setProgrammeMatricSequenceScope() above), not here.
+  matric_sequence_scope_default: MatricSequenceScope
 }
 
 export async function loadAdmissionMasterSettings(
@@ -775,7 +869,7 @@ export async function loadAdmissionMasterSettings(
 ): Promise<{ data: AdmissionMasterSettings | null; error: string | null }> {
   const { data, error } = await supabase
     .from('schools')
-    .select('admission_pipeline_enabled, rejection_retention_days')
+    .select('admission_pipeline_enabled, rejection_retention_days, matric_sequence_scope_default')
     .eq('id', schoolId)
     .single()
   if (error) return { data: null, error: error.message }
@@ -809,4 +903,70 @@ export async function setRejectionRetentionDays(
     .update({ rejection_retention_days: days })
     .eq('id', schoolId)
   return { error: error?.message ?? null }
+}
+
+// ─── Manual matric number entry (owner request, 2026-07-2x) ───────────────
+// Covers two real cases: legacy students who existed before this system
+// (their real matric number was issued years ago and must be entered
+// as-is, not generated), and correcting a mistake on an already-admitted
+// student. set_matric_number_manual() (migration_session_manual_matric_
+// number.sql) does the actual counter-fast-forward + assembly server-side,
+// atomically, for the same concurrency reason admit_student() already is
+// (§12 decision) — this file never assembles or reserves a sequence number
+// client-side.
+
+export interface ManualMatricResult {
+  matric_number: string
+  format_id: string
+}
+
+export async function setMatricNumberManual(params: {
+  schoolId: string
+  studentId: string
+  programmeId: string
+  admissionYear: number
+  sequenceNumber: number
+}): Promise<{ data: ManualMatricResult | null; error: string | null }> {
+  const { data, error } = await supabase.rpc('set_matric_number_manual', {
+    p_school_id: params.schoolId,
+    p_student_id: params.studentId,
+    p_programme_id: params.programmeId,
+    p_admission_year: params.admissionYear,
+    p_sequence_number: params.sequenceNumber,
+  })
+  if (error) return { data: null, error: friendlyAdmitError(error.message) }
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) return { data: null, error: 'Assigning the matric number did not return a result.' }
+  return { data: { matric_number: row.matric_number, format_id: row.format_id }, error: null }
+}
+
+// Students with no matric_number yet — the pool the manual-entry window
+// picks from. Deliberately does NOT filter by placement status: a student
+// can legitimately need a manual number whether or not they've been placed
+// into a programme level yet (the owner's own description covers both a
+// genuinely new, unplaced student and a legacy student who may already have
+// years of placement history but never got a real number recorded). Search
+// mirrors settingsService.ts's own searchStudents() shape (same debounced
+// type-to-search pattern) rather than a full unfiltered load, since a
+// school correcting old records may have hundreds of legacy students.
+export interface StudentMissingMatric {
+  id: string
+  full_name: string
+  student_code: string | null
+}
+
+export async function searchStudentsMissingMatric(
+  schoolId: string,
+  query: string,
+): Promise<{ data: StudentMissingMatric[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('students')
+    .select('id, full_name, student_code')
+    .eq('school_id', schoolId)
+    .is('matric_number', null)
+    .ilike('full_name', `%${query}%`)
+    .order('full_name', { ascending: true })
+    .limit(20)
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as StudentMissingMatric[], error: null }
 }

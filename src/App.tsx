@@ -102,6 +102,18 @@ interface SchoolData {
 
 // ─── Subdomain detection ──────────────────────────────────────────────────
 
+// Reserved first-path-segments that must NEVER be treated as a school slug
+// by the path-based fallback below — marketing/legal/product pages and
+// auth entry points planned for the bare domain (eduskola.com/pricing,
+// /about, etc.), plus a couple of technical reservations. Single source of
+// truth: also worth enforcing at school-creation/slug-validation time so a
+// new school can never be given a slug that collides with one of these.
+const RESERVED_PATHS = new Set([
+  'pricing', 'about', 'contact', 'blog', 'privacy', 'terms',
+  'features', 'demo', 'request-demo', 'faq', 'support',
+  'login', 'signup', 'get-started', 'admin',
+])
+
 function getSlugFromHostname(hostname: string): string | null {
   // Local dev: {slug}.localhost — 2 labels, first is the slug
   if (hostname.endsWith('.localhost')) {
@@ -114,6 +126,17 @@ function getSlugFromHostname(hostname: string): string | null {
     const parts = hostname.split('.')
     if (parts.length >= 3 && parts[0] !== 'www') {
       return parts[0]
+    }
+  }
+  // Path-based fallback — only reached when no subdomain was detected above
+  // (bare apex or www). Lets a school be reached at eduskola.com/{slug}
+  // when its own subdomain isn't cert-ready yet (per-tenant wildcard SSL
+  // still pending as of this change). RESERVED_PATHS is checked first so a
+  // marketing/legal page never gets misread as a school lookup.
+  if (typeof window !== 'undefined' && window.location.pathname) {
+    const pathParts = window.location.pathname.split('/').filter(Boolean)
+    if (pathParts.length > 0 && !RESERVED_PATHS.has(pathParts[0])) {
+      return pathParts[0]
     }
   }
   // Dev fallback: ?slug=dilimi in URL params

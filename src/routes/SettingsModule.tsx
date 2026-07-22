@@ -57,6 +57,7 @@ import {
   loadProgrammeLevels,      upsertProgrammeLevel,
   loadCurrentSession,
   loadPlacementsForProgramme,
+  upsertPlacement,
   loadCourses,              upsertCourse,
   loadCurriculum,           addCurriculumEntry, removeCurriculumEntry,
   loadHigherEdGradeScale,   upsertHigherEdGradeBand, deleteHigherEdGradeBand,
@@ -117,11 +118,15 @@ import {
   loadAdmissionMasterSettings,
   setAdmissionPipelineEnabled, setRejectionRetentionDays,
   loadMatricNumberFormat,  saveMatricNumberFormat, hasAnyMatricAdmissions,
+  setMatricSequenceScopeDefault, hasAnyMatricAdmissionsForProgramme,
+  setMatricNumberManual, searchStudentsMissingMatric,
+  type ManualMatricResult, type StudentMissingMatric,
   FIELD_CONFIG_KEYS,
   type AdmissionPipeline,  type PipelineStageType,
   type EntryMode,
   type ConfigurableField,  type AdmissionFieldSettings, type AdmissionCustomField,
   type MatricNumberFormat, type MatricNumberComponent,   type MatricNumberComponentType,
+  type MatricSequenceScope,
 } from '../services/admissionService'
 import {
   // SESSION 60a: course_result_components' CRUD lives in
@@ -277,7 +282,18 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolType, actorRecordId, onNavigate }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode; schoolType?: string | null; actorRecordId?: string | null; onNavigate: (tab: 'admission') => void }) {
+// onNavigate: kept in the accepted-props signature (App.tsx still passes it)
+// even though nothing inside this module calls it anymore — the last
+// caller was InstitutionTab's "+ Admit student" button, removed as dead
+// code (it navigated to a generic 'admission' tab with no level context,
+// a leftover from before admission was relocated to its own top-level
+// AdmissionModule.tsx). Prefixed with `_` rather than deleted from the
+// destructure, since dropping it here would still leave App.tsx passing a
+// prop this component's type no longer declares — a caller-side change
+// this file can't safely make blind. If App.tsx's own onNavigate prop is
+// also now dead everywhere else, that's a follow-up for whoever owns that
+// file, not this one.
+export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolType, actorRecordId, onNavigate: _onNavigate }: { schoolId: string; isAdmin: boolean; themeMode: ThemeMode; schoolType?: string | null; actorRecordId?: string | null; onNavigate: (tab: 'admission') => void }) {
   // themeMode is only consumed by SchoolTab (the brand-color picker), but
   // is accepted here and passed down since this is the module's entry
   // point — matches the pattern App.tsx already uses for other props
@@ -334,7 +350,7 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
         {safeActiveTab === 'calendar'    && <CalendarTab    schoolId={schoolId} schoolType={schoolType} />}
         {safeActiveTab === 'schedule'    && <ScheduleTab    schoolId={schoolId} schoolType={schoolType} />}
         {safeActiveTab === 'classes'     && <ClassesTab     schoolId={schoolId} />}
-        {safeActiveTab === 'institution' && <InstitutionTab schoolId={schoolId} onNavigate={onNavigate} />}
+        {safeActiveTab === 'institution' && <InstitutionTab schoolId={schoolId} />}
         {safeActiveTab === 'curriculum'  && <CurriculumTab  schoolId={schoolId} />}
         {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
         {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
@@ -2175,7 +2191,7 @@ function ClassesTab({ schoolId }: { schoolId: string }) {
 // (§7.27.1's own note — programme_levels is administrative metadata, not a
 // live daily container the way class_nodes is).
 
-function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate: (tab: 'admission') => void }) {
+function InstitutionTab({ schoolId }: { schoolId: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [faculties, setFaculties] = useState<Faculty[]>([])
@@ -2215,8 +2231,15 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
   const [pDuration, setPDuration] = useState(4)
   const [pMinCredit, setPMinCredit] = useState('')
   const [pMaxCredit, setPMaxCredit] = useState('')
+  // Matric sequence scope follow-up (owner request) — null = "use school
+  // default"; the school's actual current default is fetched separately
+  // (loadAdmissionMasterSettings) only to render the inherited-value hint
+  // below, never to silently coerce this field away from null.
+  const [pMatricScope, setPMatricScope] = useState<'programme' | 'school' | null>(null)
   const [pSaving, setPSaving] = useState(false)
   const [pError, setPError] = useState<string | null>(null)
+  const [schoolMatricScopeDefault, setSchoolMatricScopeDefault] = useState<'programme' | 'school'>('programme')
+  const [hasMatricAdmissionsForProg, setHasMatricAdmissionsForProg] = useState(false)
 
   // Course form (§7.27.2 courses — school-wide catalogue, not per-programme;
   // lives here rather than in CurriculumTab since a course is definitional
@@ -2327,7 +2350,7 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
     setDSaving(false)
   }
 
-  function openProgForm(p?: Programme, deptId?: string) {
+  async function openProgForm(p?: Programme, deptId?: string) {
     setEditingProg(p ?? null)
     setPName(p?.name ?? '')
     setPCode(p?.code ?? '')
@@ -2336,13 +2359,38 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
     setPDuration(p?.duration_sessions ?? 4)
     setPMinCredit(p?.min_credit_load != null ? String(p.min_credit_load) : '')
     setPMaxCredit(p?.max_credit_load != null ? String(p.max_credit_load) : '')
+    setPMatricScope(p?.matric_sequence_scope ?? null)
     setPError(null)
     setShowProgForm(true)
+    // Fetched on open, not kept live for the whole tab, since this only
+    // needs to be right at the moment the form is shown — the inherited-
+    // value hint and the soft-lock check below both read it.
+    const masterRes = await loadAdmissionMasterSettings(schoolId)
+    if (!masterRes.error && masterRes.data) {
+      setSchoolMatricScopeDefault(masterRes.data.matric_sequence_scope_default)
+    }
+    if (p?.id) {
+      const lockRes = await hasAnyMatricAdmissionsForProgramme(schoolId, p.id)
+      setHasMatricAdmissionsForProg(!lockRes.error && lockRes.data)
+    } else {
+      setHasMatricAdmissionsForProg(false)
+    }
   }
 
   async function handleSaveProg() {
     if (!pName) { setPError('Name is required.'); return }
     if (!pDeptId) { setPError('Choose a department.'); return }
+    // Soft-lock, same pattern as the matric-format section (§12) — warn,
+    // don't block, and only when the scope is actually changing from what
+    // this programme is already admitting under.
+    const scopeChanged = editingProg && (editingProg.matric_sequence_scope ?? null) !== pMatricScope
+    if (scopeChanged && hasMatricAdmissionsForProg) {
+      const ok = confirm(
+        'Students have already been admitted under this programme\'s current matric-numbering scope. ' +
+        'Changing it won\'t affect any matric number already issued — only admissions from now on will use the new scope. Continue?'
+      )
+      if (!ok) return
+    }
     setPSaving(true)
     const res = await upsertProgramme(schoolId, {
       id: editingProg?.id,
@@ -2353,6 +2401,7 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
       duration_sessions: pDuration,
       min_credit_load: pMinCredit ? Number(pMinCredit) : null,
       max_credit_load: pMaxCredit ? Number(pMaxCredit) : null,
+      matric_sequence_scope: pMatricScope,
     })
     if (res.error) { setPError(res.error); setPSaving(false); return }
     setShowProgForm(false)
@@ -2496,7 +2545,6 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
                 </div>
                 <div className="set-list-row-actions">
                   <button className="set-edit-btn" onClick={() => openLevelForm(p.id, l)}>Edit</button>
-                  <button className="set-add-sub-btn" onClick={() => onNavigate('admission')}>+ Admit student</button>
                 </div>
               </div>
               {(placementsByLevel[l.id] ?? []).length > 0 && (
@@ -2593,6 +2641,22 @@ function InstitutionTab({ schoolId, onNavigate }: { schoolId: string; onNavigate
             <FieldRow label="Duration (sessions)"><Input value={String(pDuration)} onChange={v => setPDuration(Number(v) || 1)} type="number" /></FieldRow>
             <FieldRow label="Min credit load (optional)"><Input value={pMinCredit} onChange={setPMinCredit} type="number" /></FieldRow>
             <FieldRow label="Max credit load (optional)"><Input value={pMaxCredit} onChange={setPMaxCredit} type="number" /></FieldRow>
+            <FieldRow label="Matric numbering">
+              <select
+                className="set-select"
+                value={pMatricScope ?? ''}
+                onChange={e => setPMatricScope(e.target.value === '' ? null : e.target.value as 'programme' | 'school')}
+              >
+                <option value="">Use school default ({schoolMatricScopeDefault === 'school' ? 'shared school-wide' : 'per-programme'})</option>
+                <option value="programme">Sequence resets for this programme only</option>
+                <option value="school">Share the school-wide sequence</option>
+              </select>
+            </FieldRow>
+            {hasMatricAdmissionsForProg && (
+              <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+                Students have already been admitted under this programme's current scope. You can still change it — existing matric numbers won't be affected, only new admissions will use the updated scope.
+              </p>
+            )}
             {pError && <p className="set-form-error">{pError}</p>}
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowProgForm(false)}>Cancel</button>
@@ -5046,6 +5110,8 @@ function AdmissionSettingsTab({ schoolId }: { schoolId: string }) {
         hasAdmissions={hasMatricAdmissions}
         onReload={load}
       />
+      <AdmissionMatricScopeSection schoolId={schoolId} master={master} onChange={setMaster} programmes={programmes} />
+      <AdmissionManualMatricSection schoolId={schoolId} />
       <AdmissionRetentionSection schoolId={schoolId} master={master} onChange={setMaster} />
     </div>
   )
@@ -5054,7 +5120,11 @@ function AdmissionSettingsTab({ schoolId }: { schoolId: string }) {
 // Local alias, not re-exported from admissionService.ts as a name change —
 // just avoids the section components below each re-declaring the same
 // inline shape.
-type AdmissionMasterSettingsLocal = { admission_pipeline_enabled: boolean; rejection_retention_days: number }
+type AdmissionMasterSettingsLocal = {
+  admission_pipeline_enabled: boolean
+  rejection_retention_days: number
+  matric_sequence_scope_default: MatricSequenceScope
+}
 
 // ─── Admission: master switch ───────────────────────────────────────────────
 //
@@ -5655,6 +5725,312 @@ function AdmissionMatricFormatSection({
       <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
         <button className="set-save-btn" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save format'}</button>
       </div>
+    </div>
+  )
+}
+
+// ─── Admission: matric sequence scope (school-wide default) ────────────────
+//
+// Owner request, follow-up to SESSION 65's original per-programme-per-year-
+// only counter design. This is the school-wide fallback; the actual
+// per-programme override lives in the Programme form itself (InstitutionTab,
+// "Matric numbering" field) since that's where an admin is already thinking
+// about one specific programme — not duplicated here as a second place to
+// set the same thing. What this section *does* show is a live read-only
+// count of how many programmes currently override the default, computed
+// from the programmes array AdmissionSettingsTab already loaded (no extra
+// fetch) — enough for an admin auditing configuration to sanity-check
+// themselves without hunting through every programme individually.
+
+function AdmissionMatricScopeSection({
+  schoolId, master, onChange, programmes,
+}: {
+  schoolId: string
+  master: AdmissionMasterSettingsLocal | null
+  onChange: (m: AdmissionMasterSettingsLocal) => void
+  programmes: Programme[]
+}) {
+  const [scope, setScope] = useState<MatricSequenceScope>(master?.matric_sequence_scope_default ?? 'programme')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => { setScope(master?.matric_sequence_scope_default ?? 'programme') }, [master?.matric_sequence_scope_default])
+
+  const overrideCount = programmes.filter(p => p.matric_sequence_scope != null).length
+
+  async function handleSave() {
+    if (scope === (master?.matric_sequence_scope_default ?? 'programme')) return
+    setSaving(true)
+    setErr(null)
+    const res = await setMatricSequenceScopeDefault(schoolId, scope)
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    if (master) onChange({ ...master, matric_sequence_scope_default: scope })
+    setSaving(false)
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Matric sequence scope</SectionLabel>
+      </div>
+      <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+        Controls whether a programme's matric sequence resets on its own each admission year, or shares one running sequence with the rest of the school (still resetting yearly). Applies to any programme that hasn't set its own override — set per-programme overrides from that programme's own edit form under Institution.
+      </p>
+      <FieldRow label="School default">
+        <select className="set-select" value={scope} onChange={e => setScope(e.target.value as MatricSequenceScope)}>
+          <option value="programme">Sequence resets per programme</option>
+          <option value="school">One shared sequence school-wide</option>
+        </select>
+      </FieldRow>
+      {overrideCount > 0 && (
+        <p className="set-list-row-meta">
+          {overrideCount} programme{overrideCount === 1 ? '' : 's'} currently override this default.
+        </p>
+      )}
+      {err && <p className="set-form-error">{err}</p>}
+      <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+        <button className="set-save-btn" onClick={handleSave} disabled={saving || scope === (master?.matric_sequence_scope_default ?? 'programme')}>
+          {saving ? 'Saving…' : 'Save default'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Admission: manual matric number entry ──────────────────────────────────
+//
+// Owner request, 2026-07-2x. Two real needs: entering the real matric
+// number of a student who existed before this system (legacy records), and
+// correcting a mistake on an already-admitted student. Deliberately NOT the
+// same form as a real admission — no pipeline, no application, just: pick a
+// student who has no number yet, pick their programme (the format's other
+// components — faculty/department/programme code — are derived from that,
+// never typed by hand, per the owner's explicit description), type the
+// sequence number, done. set_matric_number_manual() (migration_session_
+// manual_matric_number.sql) fast-forwards matric_sequence_counters so real
+// future admissions never collide with a manually-entered number — the
+// engine "stays aware," per the owner's own framing.
+//
+// Placement (student -> programme level -> session) is a separate,
+// composable step below this one, not folded in automatically: a student
+// needing a manual number might already be placed (just missing a number —
+// nothing to do here beyond the number itself) or might genuinely need both.
+// Finishes searchStudents()/upsertPlacement() (settingsService.ts) — both
+// were already fully implemented but had no working caller anywhere in this
+// module; their only previous caller was InstitutionTab's dead "+ Admit
+// student" button, which navigated away instead of using them.
+//
+// Bulk/CSV import is a deliberate non-goal here — flagged, not silently
+// skipped: malformed rows silently corrupting the sequence counter is a
+// materially higher-risk failure mode than a single bad manual entry, and
+// shouldn't ship in the same pass as the core mechanism.
+
+function AdmissionManualMatricSection({ schoolId }: { schoolId: string }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<StudentMissingMatric[]>([])
+  const [searching, setSearching] = useState(false)
+  const [selectedStudent, setSelectedStudent] = useState<StudentMissingMatric | null>(null)
+
+  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [programmeId, setProgrammeId] = useState<string | null>(null)
+  const [admissionYear, setAdmissionYear] = useState(String(new Date().getFullYear()))
+  const [sequenceNumber, setSequenceNumber] = useState('')
+
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [result, setResult] = useState<ManualMatricResult | null>(null)
+
+  // Placement (optional second step, only shown once a number has just been
+  // assigned to a student who has no current placement — a legacy student
+  // with real placement history already recorded elsewhere doesn't need
+  // this, so it's offered, not forced).
+  const [levels, setLevels] = useState<ProgrammeLevel[]>([])
+  const [levelId, setLevelId] = useState<string | null>(null)
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [placing, setPlacing] = useState(false)
+  const [placementDone, setPlacementDone] = useState(false)
+  const [placementErr, setPlacementErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    loadProgrammes(schoolId).then(res => { if (!res.error) setProgrammes(res.data) })
+    loadCurrentSession(schoolId).then(res => { if (!res.error && res.data) setCurrentSessionId(res.data.id) })
+  }, [schoolId])
+
+  useEffect(() => {
+    if (query.trim().length < 2) { setResults([]); return }
+    setSearching(true)
+    const handle = setTimeout(async () => {
+      const res = await searchStudentsMissingMatric(schoolId, query.trim())
+      if (!res.error) setResults(res.data)
+      setSearching(false)
+    }, 300)
+    return () => clearTimeout(handle)
+  }, [query, schoolId])
+
+  useEffect(() => {
+    if (!programmeId) { setLevels([]); setLevelId(null); return }
+    loadProgrammeLevels(programmeId).then(res => { if (!res.error) setLevels(res.data) })
+  }, [programmeId])
+
+  function pickStudent(s: StudentMissingMatric) {
+    setSelectedStudent(s)
+    setQuery('')
+    setResults([])
+    setResult(null)
+    setErr(null)
+    setPlacementDone(false)
+    setPlacementErr(null)
+  }
+
+  function reset() {
+    setSelectedStudent(null)
+    setProgrammeId(null)
+    setSequenceNumber('')
+    setResult(null)
+    setErr(null)
+    setLevelId(null)
+    setPlacementDone(false)
+    setPlacementErr(null)
+  }
+
+  async function handleAssign() {
+    if (!selectedStudent) { setErr('Select a student first.'); return }
+    if (!programmeId) { setErr('Choose the student\'s programme.'); return }
+    const year = Number(admissionYear)
+    if (!Number.isInteger(year) || year < 1900) { setErr('Enter a valid admission year.'); return }
+    const seq = Number(sequenceNumber)
+    if (!Number.isInteger(seq) || seq < 1) { setErr('Enter a whole number of 1 or more for the sequence.'); return }
+
+    setSaving(true)
+    setErr(null)
+    const res = await setMatricNumberManual({
+      schoolId,
+      studentId: selectedStudent.id,
+      programmeId,
+      admissionYear: year,
+      sequenceNumber: seq,
+    })
+    if (res.error) { setErr(res.error); setSaving(false); return }
+    setResult(res.data)
+    setSaving(false)
+  }
+
+  async function handlePlace() {
+    if (!selectedStudent || !levelId || !currentSessionId) return
+    setPlacing(true)
+    setPlacementErr(null)
+    const res = await upsertPlacement({
+      school_id: schoolId,
+      student_id: selectedStudent.id,
+      programme_level_id: levelId,
+      session_id: currentSessionId,
+    })
+    if (res.error) { setPlacementErr(res.error); setPlacing(false); return }
+    setPlacementDone(true)
+    setPlacing(false)
+  }
+
+  return (
+    <div className="set-tab-content" style={{ paddingTop: 24 }}>
+      <div className="set-section-header">
+        <SectionLabel>Manual matric number entry</SectionLabel>
+      </div>
+      <p className="set-empty-hint" style={{ margin: '0 0 8px' }}>
+        For students who already existed before this system, or to correct a mistake. Only students without a matric number are shown — add the student first from Students if they don't exist yet.
+      </p>
+
+      {!selectedStudent ? (
+        <>
+          <FieldRow label="Find student">
+            <Input value={query} onChange={setQuery} placeholder="Search by name…" />
+          </FieldRow>
+          {searching && <p className="set-list-row-meta">Searching…</p>}
+          {results.map(s => (
+            <div key={s.id} className="set-list-row" style={{ cursor: 'pointer' }} onClick={() => pickStudent(s)}>
+              <div className="set-list-row-info">
+                <p className="set-list-row-name">{s.full_name}</p>
+                {s.student_code && <p className="set-list-row-meta">{s.student_code}</p>}
+              </div>
+              <button className="set-edit-btn">Select</button>
+            </div>
+          ))}
+          {query.trim().length >= 2 && !searching && results.length === 0 && (
+            <p className="set-empty-hint">No matching students without a matric number found.</p>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="set-list-row" style={{ border: 'none', padding: '0 0 12px' }}>
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{selectedStudent.full_name}</p>
+              <p className="set-list-row-meta">No matric number on record</p>
+            </div>
+            <button className="set-cancel-btn" onClick={reset}>Change student</button>
+          </div>
+
+          {!result ? (
+            <>
+              <FieldRow label="Programme">
+                <select className="set-select" value={programmeId ?? ''} onChange={e => setProgrammeId(e.target.value || null)}>
+                  <option value="">Choose a programme</option>
+                  {programmes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </FieldRow>
+              <FieldRow label="Admission year">
+                <Input value={admissionYear} onChange={setAdmissionYear} type="number" />
+              </FieldRow>
+              <FieldRow label="Sequence number">
+                <Input value={sequenceNumber} onChange={v => setSequenceNumber(v.replace(/[^0-9]/g, ''))} placeholder="e.g. 1" />
+              </FieldRow>
+              <p className="set-list-row-meta">
+                The rest of the number (programme/faculty/department code, session year, separators) is filled in automatically from the active matric number format above — only the sequence itself is entered here.
+              </p>
+              {err && <p className="set-form-error">{err}</p>}
+              <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+                <button className="set-save-btn" onClick={handleAssign} disabled={saving}>
+                  {saving ? 'Assigning…' : 'Assign matric number'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="set-list-row-meta">
+                Assigned: <strong>{result.matric_number}</strong>
+              </p>
+
+              {!placementDone ? (
+                <>
+                  <p className="set-empty-hint" style={{ margin: '12px 0 8px' }}>
+                    Optional — place this student into a programme level now. Skip this if they already have placement history recorded.
+                  </p>
+                  <FieldRow label="Level">
+                    <select className="set-select" value={levelId ?? ''} onChange={e => setLevelId(e.target.value || null)} disabled={levels.length === 0}>
+                      <option value="">{levels.length === 0 ? 'No levels for this programme' : 'Choose a level'}</option>
+                      {levels.map(l => <option key={l.id} value={l.id}>{l.level_label}</option>)}
+                    </select>
+                  </FieldRow>
+                  {placementErr && <p className="set-form-error">{placementErr}</p>}
+                  <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+                    <button className="set-cancel-btn" onClick={reset}>Skip</button>
+                    <button className="set-save-btn" onClick={handlePlace} disabled={placing || !levelId || !currentSessionId}>
+                      {placing ? 'Placing…' : 'Place student'}
+                    </button>
+                  </div>
+                  {!currentSessionId && (
+                    <p className="set-form-error">No current session is set for this school — placement needs one. Set a current session under Calendar first.</p>
+                  )}
+                </>
+              ) : (
+                <p className="set-list-row-meta">Placed into {levels.find(l => l.id === levelId)?.level_label}.</p>
+              )}
+
+              <div className="set-sheet-footer" style={{ padding: '12px 0', borderTop: 'none' }}>
+                <button className="set-cancel-btn" onClick={reset}>Done — enter another</button>
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   )
 }

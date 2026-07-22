@@ -221,6 +221,17 @@ export interface Programme {
   duration_sessions: number
   min_credit_load: number | null
   max_credit_load: number | null
+  // Matric sequence scope follow-up (owner request) — nullable override of
+  // the school's matric_sequence_scope_default (schools table, read via
+  // admissionService.ts's loadAdmissionMasterSettings()). Null = inherit the
+  // school default; this column deliberately never defaults to 'programme'
+  // at the DB level so a programme with no explicit choice keeps tracking
+  // whatever the school's default becomes later, rather than freezing.
+  // Typed as the raw string union here rather than importing
+  // MatricSequenceScope from admissionService.ts, to avoid a cross-module
+  // type dependency for one field — kept in sync manually, same as
+  // award_type's own free-string treatment above.
+  matric_sequence_scope: 'programme' | 'school' | null
 }
 
 export interface ProgrammeLevel {
@@ -1201,7 +1212,7 @@ export async function upsertDepartment(
 export async function loadProgrammes(schoolId: string): Promise<{ data: Programme[]; error: string | null }> {
   const { data, error } = await supabase
     .from('programmes')
-    .select('id, name, code, award_type, department_id, duration_sessions, min_credit_load, max_credit_load')
+    .select('id, name, code, award_type, department_id, duration_sessions, min_credit_load, max_credit_load, matric_sequence_scope')
     .eq('school_id', schoolId)
     .order('name', { ascending: true })
   if (error) return { data: [], error: error.message }
@@ -1219,9 +1230,15 @@ export async function upsertProgramme(
     duration_sessions: number
     min_credit_load?: number | null
     max_credit_load?: number | null
+    // Optional, and deliberately left out of payload when omitted (see
+    // below) rather than coalesced to null — callers that don't pass this
+    // key (e.g. any pre-existing call site not yet updated for this field)
+    // must not accidentally clear a programme's existing override on every
+    // unrelated save.
+    matric_sequence_scope?: 'programme' | 'school' | null
   },
 ): Promise<{ error: string | null }> {
-  const payload = {
+  const payload: Record<string, unknown> = {
     name: programme.name,
     code: programme.code ?? null,
     award_type: programme.award_type,
@@ -1229,6 +1246,9 @@ export async function upsertProgramme(
     duration_sessions: programme.duration_sessions,
     min_credit_load: programme.min_credit_load ?? null,
     max_credit_load: programme.max_credit_load ?? null,
+  }
+  if ('matric_sequence_scope' in programme) {
+    payload.matric_sequence_scope = programme.matric_sequence_scope ?? null
   }
   if (programme.id) {
     const { error } = await supabase
