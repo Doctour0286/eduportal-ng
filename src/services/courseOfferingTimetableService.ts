@@ -243,35 +243,96 @@ export async function loadOfferingsForLecturer(params: {
 export async function loadOfferingsForStudent(params: {
   studentId: string
   sessionId: string
-  termId?: string | null
 }): Promise<Result<CourseOffering[]>> {
   try {
-    let query = supabase
+    // FIX (confirmed on-device, 2026-07-23): the previous version of this
+    // query embedded course_offerings directly off course_registrations
+    // via `course_offerings!inner (...)`. PostgREST's `!inner`/`!left` embed
+    // syntax can only auto-join across a REAL declared foreign key -- and
+    // per this schema's own DDL (master plan §7.27.2), course_registrations
+    // has no such column at all: its only FKs are student_id, course_id,
+    // session_id, term_id, and a self-FK (original_registration_id). The
+    // real relationship to course_offerings is via course_id (+
+    // session_id/term_id), a composite match, which PostgREST cannot
+    // auto-detect for an embed -- confirmed live via the "Could not find a
+    // relationship between 'course_registrations' and 'course_offerings' in
+    // the schema cache" error, surfaced for the first time once
+    // GuardianPortal.tsx's Schedule tab was wired to actually call this
+    // function.
+    //
+    // SECOND FIX, same day, found via real on-device data (a real school
+    // whose real students have registrations under a real term_id, not
+    // null): the version right after the first fix above accepted an
+    // optional `termId` param and used ONE assumed term for the whole
+    // call -- when no termId was passed (HigherEd­ScheduleTab's own call
+    // shape, matching TimetableModuleHigherEd's existing student-path
+    // convention), both the registrations query and the offerings query
+    // silently fell to `.is('term_id', null)`, filtering OUT every real,
+    // non-null-term registration entirely and matching only stray
+    // null-term "ghost" offerings for the same course -- confirmed via a
+    // real pg diagnostic query: every course_id in this school's real data
+    // had TWO course_offerings rows in the same session, one per term, and
+    // the wrong (null-term, unstaffed, no-venue) one was the only one this
+    // function could ever return once no termId was supplied. There is no
+    // single "current term" concept safe to assume here, and building one
+    // (e.g. a term picker) is more scope than this bug needs -- a
+    // student's real registrations are the ground truth for which
+    // term(s) apply, per course, not a guess by the caller. Fixed by
+    // reading each registration's OWN term_id and matching its offering
+    // using that exact value (including genuinely null, for a school/way
+    // registrations that predate real terms) -- never one assumed term
+    // applied to every registration alike.
+
+    const { data: regRows, error: regErr } = await supabase
       .from('course_registrations')
-      .select(`
-        course_id,
-        course_offerings!inner (
-          id, course_id, session_id, term_id, staff_id,
-          programme_id, programme_level_id,
-          attendance_eligibility_threshold_pct,
-          courses ( code, title ),
-          staff ( full_name )
-        )
-      `)
+      .select('course_id, term_id')
       .eq('student_id', params.studentId)
       .eq('session_id', params.sessionId)
       .neq('status', 'withdrawn')
 
-    query = params.termId
-      ? query.eq('term_id', params.termId)
-      : query.is('term_id', null)
+    if (regErr) return { ok: false, error: regErr.message }
+    if (!regRows || regRows.length === 0) return { ok: true, data: [] }
 
-    const { data, error } = await query
+    // Map course_id -> the exact set of term_ids (including null) this
+    // student is really registered under for that course. Almost always
+    // one term per course, but built as a Set rather than assuming
+    // exactly one, since nothing in the schema forbids more than one
+    // registration for the same course across terms (e.g. a genuine
+    // carryover/retake in a later term).
+    const termIdsByCourse = new Map<string, Set<string | null>>()
+    const courseIds = new Set<string>()
+    for (const r of regRows as { course_id: string; term_id: string | null }[]) {
+      courseIds.add(r.course_id)
+      const set = termIdsByCourse.get(r.course_id) ?? new Set<string | null>()
+      set.add(r.term_id)
+      termIdsByCourse.set(r.course_id, set)
+    }
+
+    const { data, error } = await supabase
+      .from('course_offerings')
+      .select(`
+        id, course_id, session_id, term_id, staff_id,
+        programme_id, programme_level_id,
+        attendance_eligibility_threshold_pct,
+        courses ( code, title ),
+        staff ( full_name )
+      `)
+      .in('course_id', Array.from(courseIds))
+      .eq('session_id', params.sessionId)
+
     if (error) return { ok: false, error: error.message }
 
     const offerings: CourseOffering[] = (data ?? [])
-      .map((row: any): CourseOffering | null => {
-        const offering = Array.isArray(row.course_offerings) ? row.course_offerings[0] : row.course_offerings
+      .filter((offering: any) => {
+        // Only keep an offering whose term_id matches one of THIS
+        // student's own real registration term_ids for THIS course --
+        // not every offering that merely shares the course_id/session_id,
+        // which is what let a stray null-term offering slip through
+        // before this fix.
+        const allowedTerms = termIdsByCourse.get(offering.course_id)
+        return !!allowedTerms && allowedTerms.has(offering.term_id ?? null)
+      })
+      .map((offering: any): CourseOffering | null => {
         if (!offering) return null
         const course = Array.isArray(offering.courses) ? offering.courses[0] : offering.courses
         const staff = Array.isArray(offering.staff) ? offering.staff[0] : offering.staff
@@ -298,6 +359,71 @@ export async function loadOfferingsForStudent(params: {
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load your timetable' }
   }
+}
+
+// ─── Student's own weekly schedule, read-only, list-shaped ─────────────────
+//
+// Owner request (2026-07-23): rather than reuse TimetableModuleHigherEd's
+// full grid+edit+Modal component tree inside GuardianPortal.tsx (which is
+// what surfaced the stuck-tab/stray-modal bug fixed this session — see
+// App.tsx's own key= fix note on its four GuardianPortal call sites), fetch
+// only the fields a read-only student view actually needs (day, course,
+// time, lecturer, venue) and let GuardianPortal render its own dedicated
+// UI. This function composes the two already-correct, already-shipped
+// pieces above rather than introducing a third query shape:
+//   1. loadOfferingsForStudent() — resolves which course_offering_ids this
+//      student is (non-withdrawn) registered for this session/term.
+//   2. loadOfferingTimetable() — the same generic, view-agnostic entries
+//      loader TimetableModuleHigherEd itself calls internally, joined on
+//      the real course_offering_id FK (not the broken embed this session
+//      already found and fixed in loadOfferingsForStudent()).
+// No Modal, no admin/lecturer/edit state, no dependency on
+// TimetableModuleHigherEd at all — a genuinely separate, minimal read path.
+
+export interface StudentScheduleEntry {
+  id: string
+  day_of_week: number
+  start_time: string
+  end_time: string
+  course_code: string
+  course_title: string
+  staff_name: string | null
+  venue: string | null
+}
+
+export async function loadStudentSchedule(params: {
+  studentId: string
+  sessionId: string
+}): Promise<Result<StudentScheduleEntry[]>> {
+  // termId removed 2026-07-23, same fix as loadOfferingsForStudent() above —
+  // see that function's own header note for the full account. This function
+  // never used termId itself beyond passing it straight through.
+  const offeringsResult = await loadOfferingsForStudent(params)
+  if (!offeringsResult.ok) return offeringsResult
+
+  const offeringIds = offeringsResult.data.map(o => o.id)
+  if (offeringIds.length === 0) return { ok: true, data: [] }
+
+  const entriesResult = await loadOfferingTimetable(offeringIds)
+  if (!entriesResult.ok) return entriesResult
+
+  // Already ordered by day_of_week, start_time via loadOfferingTimetable()'s
+  // own query — re-shaped here to the minimal display fields only, per the
+  // owner's explicit request, rather than handing the full
+  // OfferingTimetableEntry (which also carries ids/term/programme fields a
+  // read-only student list has no use for).
+  const schedule: StudentScheduleEntry[] = entriesResult.data.map(e => ({
+    id: e.id,
+    day_of_week: e.day_of_week,
+    start_time: e.start_time,
+    end_time: e.end_time,
+    course_code: e.course_code,
+    course_title: e.course_title,
+    staff_name: e.staff_name,
+    venue: e.venue,
+  }))
+
+  return { ok: true, data: schedule }
 }
 
 // ─── Write: one slot ───────────────────────────────────────────────────────

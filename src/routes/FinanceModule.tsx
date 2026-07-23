@@ -191,6 +191,60 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   const canManageFees     = useAuthStore(s => s.can('finance.fees.manage'))
   const canRecordPayments = useAuthStore(s => s.can('finance.payments.record'))
   const canApplyDiscounts = useAuthStore(s => s.can('finance.discounts.apply'))
+  // PRD Tier 9 / Problem 9.2 — brand-new key, deliberately NOT one of the
+  // three above. Per owner clarification (2026-07-23): gates the school-wide
+  // balance-summary aggregate only (.fin-balance-summary in renderBalances()
+  // below); independent of canManageFees/canRecordPayments/canApplyDiscounts
+  // by design — a bursar holding all three write keys must NOT see this card
+  // unless finance.analytics.view is separately granted. can() already
+  // folds in the isAdminRole bypass internally (permissionsService.ts), so
+  // no separate `|| isAdmin` here, matching this file's other three keys'
+  // own precedent exactly (none of them OR with isAdmin either).
+  const canViewAnalytics  = useAuthStore(s => s.can('finance.analytics.view'))
+
+  // PRD Tier 9 / Problem 9.2 FOLLOW-UP (owner-reported, 2026-07-23, on-device):
+  // real bug, confirmed via screenshot — a staff member holding ONLY
+  // finance.analytics.view (the narrowest key in the whole catalog) could
+  // see the full Balances/Assignments/Fee heads tab CONTENT, not just the
+  // summary card. Root cause: Problem 9.1's module-entry gate ("any
+  // finance.* key gets you in the door") was correctly built, but nothing
+  // downstream of entry ever gated the tabs' actual data — renderBalances/
+  // renderAssignments/renderFeeHeads dispatch purely on moduleTab, with no
+  // read-check of their own. Entry != read access to every tab; that gap is
+  // fixed here, three tabs at once, since they share one underlying data
+  // sensitivity level (per-student fee/balance/assignment records) and one
+  // correct rule.
+  //
+  // Least-privilege model, reasoned in-session against each of the 11 live
+  // finance.* keys' actual label/workflow rather than assumed: every key
+  // that has a genuine, current functional reason to see this tab content
+  // (fees.view — literal match; fees.manage/payments.record/discounts.apply/
+  // discounts.approve — each of these write actions requires seeing the
+  // student's existing balance first, via openDetail(b), before acting on
+  // it; payments.view_all — literal superset of fees.view; installments.manage
+  // — same "see balance before acting" need) qualifies. Two keys are
+  // deliberately excluded because they are NOT about this data at all:
+  // finance.ledger.view/finance.ledger.post are the general ledger (chart of
+  // accounts, journal entries) — a different data domain entirely, no
+  // student-fee overlap. finance.reports.view is left OUT rather than
+  // included — its own label ("financial summary reports") describes a
+  // still-unbuilt aggregate-reports surface, not raw per-student records;
+  // granting it here would be reading scope into a key narrower than its
+  // own name implies. finance.analytics.view is excluded — confirmed by
+  // this exact bug report — it must gate ONLY the aggregate card above, per
+  // Problem 9.2's original scoping, never tab content.
+  const canViewFeesData        = useAuthStore(s => s.can('finance.fees.view'))
+  const canViewAllPayments     = useAuthStore(s => s.can('finance.payments.view_all'))
+  const canApproveDiscounts    = useAuthStore(s => s.can('finance.discounts.approve'))
+  const canManageInstallments  = useAuthStore(s => s.can('finance.installments.manage'))
+  const canViewFinanceData =
+    canManageFees ||
+    canRecordPayments ||
+    canApplyDiscounts ||
+    canViewFeesData ||
+    canViewAllPayments ||
+    canApproveDiscounts ||
+    canManageInstallments
 
   // ── Boot data ─────────────────────────────────────────────────────────────
   const [classes,        setClasses]        = useState<ClassNode[]>([])
@@ -709,23 +763,30 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           )}
         </div>
 
-        {/* Module-level tab bar */}
-        <div className="fin-module-tabs">
-          {(['balances', 'assignments', 'feeheads'] as ModuleTab[]).map(tab => (
-            <button
-              key={tab}
-              className={`fin-module-tab${moduleTab === tab ? ' fin-module-tab--active' : ''}`}
-              onClick={() => setModuleTab(tab)}
-            >
-              {tab === 'balances'    ? 'Balances'
-               : tab === 'assignments' ? 'Assignments'
-               : 'Fee heads'}
-            </button>
-          ))}
-        </div>
+        {/* Module-level tab bar — hidden entirely (not shown-then-denied)
+            for a viewer who can't read any of the three tabs' content, e.g.
+            a holder of finance.analytics.view alone. Matches the
+            nav-hiding convention BottomNav.tsx already uses for the whole
+            Finance entry (Problem 9.1) rather than showing clickable tabs
+            that only ever lead to renderBody()'s denial message. */}
+        {canViewFinanceData && (
+          <div className="fin-module-tabs">
+            {(['balances', 'assignments', 'feeheads'] as ModuleTab[]).map(tab => (
+              <button
+                key={tab}
+                className={`fin-module-tab${moduleTab === tab ? ' fin-module-tab--active' : ''}`}
+                onClick={() => setModuleTab(tab)}
+              >
+                {tab === 'balances'    ? 'Balances'
+                 : tab === 'assignments' ? 'Assignments'
+                 : 'Fee heads'}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Term selector — only if school uses terms and we're on assignments tab */}
-        {terms.length > 0 && moduleTab === 'assignments' && (
+        {canViewFinanceData && terms.length > 0 && moduleTab === 'assignments' && (
           <div className="fin-term-bar">
             <select
               className="fin-term-select"
@@ -741,7 +802,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
         )}
 
         {/* Class/programme-level filter + search — only on balances tab */}
-        {moduleTab === 'balances' && bootState === 'ready' && (
+        {canViewFinanceData && moduleTab === 'balances' && bootState === 'ready' && (
           <div className="fin-filter-bar">
             {isHigherEd ? (
               <select
@@ -797,6 +858,22 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
       )
     }
 
+    // PRD Tier 9 / Problem 9.2 follow-up — real bug fix, confirmed via
+    // on-device screenshot: a staff member holding ONLY finance.analytics.view
+    // could see this tab's content, defeating that key's entire purpose.
+    // Single gate here (not duplicated inside each of the three render
+    // functions) since all three tabs share the same underlying data
+    // sensitivity and the same correct rule — see canViewFinanceData's own
+    // definition above for the full reasoning on which keys qualify.
+    if (!canViewFinanceData) {
+      return (
+        <div className="fin-empty-state">
+          <span className="fin-empty-icon"><Icon name="lock" size={40} /></span>
+          <p className="fin-empty-msg">You don't have permission to view this section. Contact your admin if you think this is wrong.</p>
+        </div>
+      )
+    }
+
     if (moduleTab === 'balances')   return renderBalances()
     if (moduleTab === 'assignments') return renderAssignments()
     if (moduleTab === 'feeheads')   return renderFeeHeads()
@@ -848,6 +925,18 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     }
 
     // Summary bar
+    // PRD Tier 9 / Problem 9.2 — these four aggregates are computed
+    // regardless of canViewAnalytics; only the RENDERED card below is
+    // gated. Deliberate, not an oversight: filteredBalances is already
+    // fetched in full to build the student list every caller who reaches
+    // this function is permitted to see, so computing four reduce() calls
+    // over already-in-memory data exposes nothing beyond what's already
+    // implicitly derivable by eyeballing/summing that same visible list by
+    // hand. Flagged per this problem's own Goal 2 rather than silently
+    // ignored: a sufficiently large unpermitted list could still let
+    // someone manually reconstruct the same totals this card would have
+    // shown — a real but low-severity residual gap, logged here, not
+    // treated as blocking for this fix.
     const totalBalance  = filteredBalances.reduce((s, b) => s + b.balance, 0)
     const totalPaid     = filteredBalances.reduce((s, b) => s + b.paid_total, 0)
     const totalAssigned = filteredBalances.reduce((s, b) => s + b.assigned_total, 0)
@@ -855,28 +944,36 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
 
     return (
       <>
-        <div className="fin-balance-summary">
-          <div className="fin-balance-stat">
-            <span className="fin-balance-stat-label">Total billed</span>
-            <span className="fin-balance-stat-value">{formatNaira(totalAssigned)}</span>
+        {/* PRD Tier 9 / Problem 9.2 — school-wide aggregate, gated on its own
+            dedicated key (finance.analytics.view), independent of the write
+            keys above. Hidden completely (not shown reduced) when absent,
+            per the owner's explicit clarification. fin-count and the
+            student list below are UNAFFECTED — this problem is scoped to
+            the aggregate card only. */}
+        {canViewAnalytics && (
+          <div className="fin-balance-summary">
+            <div className="fin-balance-stat">
+              <span className="fin-balance-stat-label">Total billed</span>
+              <span className="fin-balance-stat-value">{formatNaira(totalAssigned)}</span>
+            </div>
+            <div className="fin-balance-stat">
+              <span className="fin-balance-stat-label">Collected</span>
+              <span className="fin-balance-stat-value fin-balance-stat-value--ok">{formatNaira(totalPaid)}</span>
+            </div>
+            <div className="fin-balance-stat">
+              <span className="fin-balance-stat-label">Outstanding</span>
+              <span className={`fin-balance-stat-value${totalBalance > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
+                {formatNaira(totalBalance)}
+              </span>
+            </div>
+            <div className="fin-balance-stat">
+              <span className="fin-balance-stat-label">Owing</span>
+              <span className={`fin-balance-stat-value${outstanding > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
+                {outstanding} student{outstanding !== 1 ? 's' : ''}
+              </span>
+            </div>
           </div>
-          <div className="fin-balance-stat">
-            <span className="fin-balance-stat-label">Collected</span>
-            <span className="fin-balance-stat-value fin-balance-stat-value--ok">{formatNaira(totalPaid)}</span>
-          </div>
-          <div className="fin-balance-stat">
-            <span className="fin-balance-stat-label">Outstanding</span>
-            <span className={`fin-balance-stat-value${totalBalance > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
-              {formatNaira(totalBalance)}
-            </span>
-          </div>
-          <div className="fin-balance-stat">
-            <span className="fin-balance-stat-label">Owing</span>
-            <span className={`fin-balance-stat-value${outstanding > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
-              {outstanding} student{outstanding !== 1 ? 's' : ''}
-            </span>
-          </div>
-        </div>
+        )}
 
         <p className="fin-count">
           {filteredBalances.length} student{filteredBalances.length !== 1 ? 's' : ''}
@@ -1826,3 +1923,4 @@ function formatDate(iso: string): string {
     return iso
   }
 }
+

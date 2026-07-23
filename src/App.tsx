@@ -102,18 +102,6 @@ interface SchoolData {
 
 // ─── Subdomain detection ──────────────────────────────────────────────────
 
-// Reserved first-path-segments that must NEVER be treated as a school slug
-// by the path-based fallback below — marketing/legal/product pages and
-// auth entry points planned for the bare domain (eduskola.com/pricing,
-// /about, etc.), plus a couple of technical reservations. Single source of
-// truth: also worth enforcing at school-creation/slug-validation time so a
-// new school can never be given a slug that collides with one of these.
-const RESERVED_PATHS = new Set([
-  'pricing', 'about', 'contact', 'blog', 'privacy', 'terms',
-  'features', 'demo', 'request-demo', 'faq', 'support',
-  'login', 'signup', 'get-started', 'admin',
-])
-
 function getSlugFromHostname(hostname: string): string | null {
   // Local dev: {slug}.localhost — 2 labels, first is the slug
   if (hostname.endsWith('.localhost')) {
@@ -126,17 +114,6 @@ function getSlugFromHostname(hostname: string): string | null {
     const parts = hostname.split('.')
     if (parts.length >= 3 && parts[0] !== 'www') {
       return parts[0]
-    }
-  }
-  // Path-based fallback — only reached when no subdomain was detected above
-  // (bare apex or www). Lets a school be reached at eduskola.com/{slug}
-  // when its own subdomain isn't cert-ready yet (per-tenant wildcard SSL
-  // still pending as of this change). RESERVED_PATHS is checked first so a
-  // marketing/legal page never gets misread as a school lookup.
-  if (typeof window !== 'undefined' && window.location.pathname) {
-    const pathParts = window.location.pathname.split('/').filter(Boolean)
-    if (pathParts.length > 0 && !RESERVED_PATHS.has(pathParts[0])) {
-      return pathParts[0]
     }
   }
   // Dev fallback: ?slug=dilimi in URL params
@@ -235,7 +212,7 @@ export default function App() {
     sheetTouchDeltaY.current = 0
   }
 
-  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize, can } = useAuthStore()
+  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize, can, canViewFinance: canViewFinanceStore } = useAuthStore()
 
   // Initialize auth once on mount
   useEffect(() => {
@@ -686,6 +663,12 @@ export default function App() {
   }
 
   const canViewStudentsForSidebar = can('students.records.view') || actorType === 'platform_admin'
+  // PRD Tier 9 / Problem 9.1 — same platform_admin edge case as
+  // canViewStudentsForSidebar above and BottomNav.tsx's own identical
+  // derivation: canViewFinance() alone returns false for platform_admin
+  // (isAdminRole/permissionScopes are both hard-coded false/empty for that
+  // actor type in authStore.ts), so the explicit OR is required here too.
+  const canViewFinanceForSidebar = canViewFinanceStore() || actorType === 'platform_admin'
 
   return (
     <div className="app-shell">
@@ -697,6 +680,7 @@ export default function App() {
         onNavigate={(tab) => onNavigate(tab as NavTab)}
         actorType={actorType}
         canViewStudents={canViewStudentsForSidebar}
+        canViewFinance={canViewFinanceForSidebar}
         schoolName={school.name}
         logoUrl={school.logo_url}
         moreContent={
@@ -989,6 +973,10 @@ function TabContent({
   // A plain teacher (staff + is_admin_role = false) is NOT admin — see PRD Tier 1 / Problem 1.1.
   // isAdminRole comes from authStore (resolved via staff_roles → roles.is_admin_role in SESSION 2).
   const isAdmin = isAdminRole || actorType === 'platform_admin'
+  // PRD Tier 9 / Problem 9.1 — read in-component via useAuthStore, matching
+  // MoreSheetContent's own established pattern (no props threading) rather
+  // than adding yet another prop to this already-large signature.
+  const canViewFinance = useAuthStore((s) => s.canViewFinance)
 
   // ── Home / Dashboard ──────────────────────────────────────────────────
   if (tab === 'home') {
@@ -1038,6 +1026,28 @@ function TabContent({
     if (actorType === 'guardian' || actorType === 'student') {
       return (
         <GuardianPortal
+          // FIX (confirmed 2026-07-23, owner-reported: Schedule tab's popup
+          // rendering over the Dashboard, and its close button "redirecting"
+          // to Attendance): GuardianPortal reads initialTab only once, via
+          // useState(initialTab ?? 'summary') -- a mount-time default, not a
+          // synced/controlled value. This file calls <GuardianPortal> from
+          // four separate if(tab === ...) branches (home/timetable/
+          // attendance/finance), all at the same position in this same
+          // render function, with no key -- React's reconciliation treats
+          // that as ONE continuous component instance across bottom-nav
+          // taps, never remounting just because initialTab's value differs
+          // between branches. The real symptom: GuardianPortal's internal
+          // tab state got stuck on whichever section was first visited and
+          // silently stopped tracking which bottom-nav button was actually
+          // tapped -- a modal opened on the (stuck) Schedule tab then
+          // visually sat on top of whatever the (correctly-updated) outer
+          // activeTab/BottomNav highlight was showing instead, and closing
+          // it simply revealed the stuck tab underneath, which looked like
+          // a "redirect." Fixing with a key forces a clean remount (and a
+          // fresh useState(initialTab ?? 'summary') read) every time the
+          // logical destination actually changes, without touching
+          // GuardianPortal.tsx's own internal tab logic at all.
+          key="guardian-portal-summary"
           schoolId={schoolId}
           schoolName={schoolName}
           actorType={actorType}
@@ -1065,6 +1075,11 @@ function TabContent({
     if (actorType === 'guardian' || actorType === 'student') {
       return (
         <GuardianPortal
+          // See the 'home' branch's own GuardianPortal call site above for
+          // the full account of why this key is required -- one distinct
+          // key per logical destination forces the remount initialTab was
+          // always meant to drive.
+          key="guardian-portal-schedule"
           schoolId={schoolId}
           schoolName={schoolName}
           actorType={actorType}
@@ -1113,6 +1128,9 @@ function TabContent({
     if (actorType === 'guardian' || actorType === 'student') {
       return (
         <GuardianPortal
+          // See the 'home' branch's own GuardianPortal call site above for
+          // the full account of why this key is required.
+          key="guardian-portal-attendance"
           schoolId={schoolId}
           schoolName={schoolName}
           actorType={actorType}
@@ -1166,12 +1184,35 @@ function TabContent({
     if (actorType === 'guardian' || actorType === 'student') {
       return (
         <GuardianPortal
+          // See the 'home' branch's own GuardianPortal call site above for
+          // the full account of why this key is required.
+          key="guardian-portal-fees"
           schoolId={schoolId}
           schoolName={schoolName}
           actorType={actorType}
           authUserId={authUserId}
           initialTab="fees"
           schoolType={schoolType}
+        />
+      )
+    }
+    // FIX (PRD Tier 9 / Problem 9.1): BottomNav.tsx/Sidebar.tsx already hide
+    // the Finance tap target from a staff member with zero finance.*
+    // permissions (via authStore.ts's canViewFinance()), but this routing
+    // layer previously had no check of its own at all — a stale deep link
+    // or handler dispatching onNavigate('finance') would still mount
+    // FinanceModule directly, bypassing the nav-level gate entirely. Same
+    // OR-with-platform_admin edge case as the nav-level gate: canViewFinance()
+    // alone returns false for platform_admin (isAdminRole/permissionScopes
+    // both hard-coded false/empty for that actor type), so isAdmin (already
+    // isAdminRole || platform_admin) covers it on its own — no separate OR
+    // needed here since isAdmin is already the wider of the two checks.
+    if (!isAdmin && !canViewFinance()) {
+      return (
+        <PlaceholderModule
+          icon={<Icon name="wallet" size={32} />}
+          title="Finance"
+          description="You don't have permission to view this section. Contact your admin if you think this is wrong."
         />
       )
     }

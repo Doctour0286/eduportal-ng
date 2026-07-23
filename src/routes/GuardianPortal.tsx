@@ -64,7 +64,27 @@ import { TermProgressCard } from '../components/TermProgressCard'
 // SESSION 69: reused byte-for-byte from the admin flow, not reimplemented --
 // see RegistrationTab below for why reuse (not a leaner rebuild) is required.
 import { RegistrationStep } from './CourseRegistrationModule'
-import { type StudentSearchResult } from '../services/settingsService'
+import { type StudentSearchResult, loadCurrentSession as loadSettingsCurrentSession } from '../services/settingsService'
+// FIX (higher-ed Schedule tab routing gap, then owner-revised 2026-07-23):
+// the Schedule tab previously called TimetableModuleHigherEd directly
+// (that component's own student-facing path was already fully built and
+// wired to loadOfferingsForStudent(), but nothing in this file ever
+// rendered it -- ScheduleTab below unconditionally called the
+// SECONDARY-school timetableService.ts and filtered by child.class_node_id,
+// which is always null for a higher-ed student, SESSION 64 -- so every
+// higher-ed student/guardian permanently saw "isn't assigned to a class
+// yet"). Reusing TimetableModuleHigherEd's full grid+edit+Modal component
+// tree here is what then surfaced a real, separate bug (App.tsx's
+// GuardianPortal call sites had no key prop, so React never remounted
+// between bottom-nav taps -- fixed at its own root in App.tsx). Per the
+// owner's explicit direction afterward: rather than keep depending on that
+// whole component tree for a read-only view, fetch only the display fields
+// a student/guardian actually needs (day, course, time, lecturer, venue)
+// via loadStudentSchedule() and render a small dedicated UI here instead --
+// see HigherEdScheduleTab below. TimetableModuleHigherEd itself is
+// untouched and still serves its own real audience (admin/lecturer), just
+// no longer imported into this file.
+import { loadStudentSchedule, type StudentScheduleEntry } from '../services/courseOfferingTimetableService'
 
 // SESSION 60b: 'results' is the secondary-school subject/CA/exam view
 // (loadStudentResults -> scores/subject_results). 'transcript' is its
@@ -476,7 +496,21 @@ function ChildDetail({
                   <AttendanceTab schoolId={schoolId} child={child} session={session} />
                 )
               ) : t === 'schedule' ? (
-                <ScheduleTab child={child} />
+                isHigherEd ? (
+                  // child.id is students.id for both a guardian and a
+                  // student-self viewer -- safe under migration 002's
+                  // guardian-read RLS policy on course_registrations/
+                  // course_offering_timetable_entries (scoped through
+                  // student_guardians), same as before. No isStudentSelf
+                  // branching needed here at all: HigherEdScheduleTab is a
+                  // plain read-only view with no admin/lecturer concept to
+                  // accidentally fall into (unlike TimetableModuleHigherEd,
+                  // which this replaced -- see this file's own import-block
+                  // note for the full history).
+                  <HigherEdScheduleTab schoolId={schoolId} child={child} />
+                ) : (
+                  <ScheduleTab child={child} />
+                )
               ) : t === 'fees' ? (
                 <FeesTab schoolId={schoolId} schoolName={schoolName} child={child} session={session} isStudentSelf={isStudentSelf} isHigherEd={isHigherEd} />
               ) : (
@@ -1075,17 +1109,25 @@ function CourseAttendanceTab({
         return
       }
       setLoadState('loading')
-      const result = await loadStudentCourseAttendance({
+      // FIX (tsc build error, confirmed pre-existing before this session's
+      // own changes): this previously destructured { ok, data, error } as
+      // a flat object, but Result<T> here is the same discriminated union
+      // every other service in this file uses (Ok<T> | Err) — data only
+      // exists on the ok:true branch, error only on ok:false. Matches the
+      // if (!res.ok) { ...; return } pattern already used correctly a few
+      // dozen lines below in HigherEdScheduleTab, rather than a fresh
+      // pattern invented here.
+      const res = await loadStudentCourseAttendance({
         studentId: child.id,
         sessionId: session.id,
       })
       if (cancelled) return
-      if (!result.ok) {
-        console.error('loadStudentCourseAttendance failed:', result.error)
+      if (!res.ok) {
+        console.error('loadStudentCourseAttendance failed:', res.error)
         setLoadState('error')
         return
       }
-      setRows(result.data)
+      setRows(res.data)
       setLoadState('ready')
     }
     run()
@@ -1336,6 +1378,153 @@ function formatTime(hhmmss: string): string {
   const period = h < 12 ? 'am' : 'pm'
   const h12 = h % 12 === 0 ? 12 : h % 12
   return `${h12}:${String(m).padStart(2, '0')}${period}`
+}
+
+// ─── Higher-ed schedule tab (owner request, 2026-07-23) ────────────────────
+//
+// Deliberately NOT a reuse of TimetableModuleHigherEd here — that component
+// carries the full admin/lecturer grid, edit chrome, conflict-detection
+// state, and its own Modal, none of which a read-only student/guardian view
+// needs. Reusing it inside GuardianPortal's tab tree is what surfaced the
+// stuck-tab/stray-modal bug this session already found and fixed at its
+// real root (App.tsx's GuardianPortal call sites, missing key props) — but
+// per the owner's explicit direction, the simpler, correct long-term shape
+// is to fetch only the display fields a read-only view needs (day, course,
+// time, lecturer, venue) via loadStudentSchedule() (new, composed from two
+// already-correct existing functions — see courseOfferingTimetableService.ts)
+// and render a small dedicated UI here instead, matching the layout/CSS
+// classes ScheduleTab (the secondary-school sibling) already established —
+// port-schedule/port-sched-day/port-sched-row family — plus one new class,
+// port-sched-venue, for the one field ScheduleTab never had a need for.
+//
+// No "current period" live-highlight here (unlike ScheduleTab): a
+// higher-ed school has no fixed shared period grid to compute "the current
+// period" against (§7.27's own schema note — course_offering_timetable_entries
+// stores arbitrary, non-period-aligned start/end times per entry), so
+// "isLive" isn't a coherent concept for this view; each entry's own
+// start/end time is shown directly instead.
+
+function HigherEdScheduleTab({ schoolId, child }: { schoolId: string; child: PortalChild }) {
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [entries, setEntries] = useState<StudentScheduleEntry[]>([])
+  // Owner request (2026-07-23): rows collapsed by default, tap to reveal
+  // lecturer/venue -- a plain Set of expanded entry ids rather than a
+  // single "which one" value, since more than one day's rows can
+  // reasonably be open at once (this is a list, not an accordion where
+  // opening one should close another).
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+
+  function toggleExpanded(entryId: string) {
+    setExpandedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(entryId)) next.delete(entryId)
+      else next.add(entryId)
+      return next
+    })
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      setLoadState('loading')
+      setErrorMsg('')
+
+      const sessionRes = await loadSettingsCurrentSession(schoolId)
+      if (cancelled) return
+      if (sessionRes.error) {
+        setLoadState('error')
+        setErrorMsg(sessionRes.error)
+        return
+      }
+      if (!sessionRes.data) {
+        setLoadState('error')
+        setErrorMsg('No current session found.')
+        return
+      }
+
+      // Matches TimetableModuleHigherEd's own student-path call shape
+      // exactly — sessionId only, no termId — see this file's own note
+      // where HigherEdScheduleTab is wired in for why that isn't silently
+      // changed here.
+      const res = await loadStudentSchedule({
+        studentId: child.id,
+        sessionId: sessionRes.data.id,
+      })
+      if (cancelled) return
+      if (!res.ok) {
+        setLoadState('error')
+        setErrorMsg(res.error)
+        return
+      }
+      setEntries(res.data)
+      setLoadState(res.data.length > 0 ? 'ready' : 'empty')
+    }
+    run()
+    return () => { cancelled = true }
+  }, [schoolId, child.id])
+
+  if (loadState === 'loading') {
+    return <div className="port-skel-card" />
+  }
+
+  if (loadState === 'error') {
+    return <p className="port-form-error">Couldn't load the timetable — {errorMsg || 'check your connection and try again.'}</p>
+  }
+
+  if (loadState === 'empty') {
+    return <p className="port-empty-inline">No timetable has been set up for {child.full_name.split(' ')[0]}'s registered courses yet.</p>
+  }
+
+  const teachingDays = Array.from(new Set(entries.map(e => e.day_of_week))).sort((a, b) => a - b)
+
+  return (
+    <div className="port-schedule">
+      {teachingDays.map((dow) => {
+        const dayEntries = entries
+          .filter((e) => e.day_of_week === dow)
+          .sort((a, b) => a.start_time.localeCompare(b.start_time))
+        if (dayEntries.length === 0) return null
+        return (
+          <div key={dow} className="port-sched-day">
+            <p className="port-sched-day-label">{dayName(dow)}</p>
+            <div className="port-sched-list">
+              {dayEntries.map((entry) => {
+                // Nothing to reveal for an entry with neither field set —
+                // no expand affordance shown at all rather than a chevron
+                // that opens onto an empty panel.
+                const hasDetail = !!entry.staff_name || !!entry.venue
+                const isExpanded = hasDetail && expandedIds.has(entry.id)
+                return (
+                  <div key={entry.id} className={`port-sched-row ${hasDetail ? 'port-sched-row--expandable' : ''} ${isExpanded ? 'port-sched-row--expanded' : ''}`}>
+                    <button
+                      type="button"
+                      className="port-sched-row-summary"
+                      onClick={hasDetail ? () => toggleExpanded(entry.id) : undefined}
+                      aria-expanded={hasDetail ? isExpanded : undefined}
+                      disabled={!hasDetail}
+                    >
+                      <span className="port-sched-time">{formatTime(entry.start_time)} – {formatTime(entry.end_time)}</span>
+                      <p className="port-sched-subject">{entry.course_code} — {entry.course_title}</p>
+                      {hasDetail && (
+                        <span className="port-sched-row-chevron" aria-hidden="true">{isExpanded ? '▾' : '▸'}</span>
+                      )}
+                    </button>
+                    {isExpanded && (
+                      <div className="port-sched-row-detail">
+                        {entry.staff_name && <p className="port-sched-teacher">{entry.staff_name}</p>}
+                        {entry.venue && <p className="port-sched-venue">{entry.venue}</p>}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 // ─── Fees tab (§4.9 — billed, paid, balance, breakdown, payment history) ──

@@ -582,101 +582,6 @@ export async function loadAttendanceEligibility(params: {
   }
 }
 
-// ─── Per-course attendance rows (one student, one row per registered
-// course this session) ──────────────────────────────────────────────────────
-
-/**
- * One registered course's attendance picture for a student — the shape
- * GuardianPortal.tsx's CourseAttendanceTab renders, one row per card.
- * Deliberately distinct from StudentOverallAttendance below (a single
- * rolled-up number across every course) and from CourseAttendanceEligibility
- * (no course/lecturer display fields, since that type is consumed by the
- * lecturer-facing eligibility badge which already has the course in
- * context) — this shape exists because the guardian/student summary card
- * needs both the per-course eligibility numbers AND enough display context
- * (course code/title, lecturer name) to render a standalone list without a
- * second lookup.
- */
-export interface StudentCourseAttendanceRow {
-  courseOfferingId: string
-  courseCode: string
-  courseTitle: string
-  lecturerName: string | null
-  totalSessions: number
-  presentCount: number
-  percent: number | null
-  thresholdPct: number | null
-  meetsThreshold: boolean | null
-}
-
-/**
- * A student's live (non-withdrawn) course registrations for a session,
- * each resolved to its attendance eligibility numbers via
- * loadAttendanceEligibility() — reused rather than re-derived, so this
- * row-list and the lecturer-facing eligibility badge can never silently
- * disagree about what "present" or "meets threshold" means (same discipline
- * as this file's own header note on reusing isSchoolDay()).
- */
-export async function loadStudentCourseAttendance(params: {
-  studentId: string
-  sessionId: string
-}): Promise<Result<StudentCourseAttendanceRow[]>> {
-  try {
-    const { data: registrations, error: regErr } = await supabase
-      .from('course_registrations')
-      .select('course_id')
-      .eq('student_id', params.studentId)
-      .eq('session_id', params.sessionId)
-      .neq('status', 'withdrawn')
-
-    if (regErr) return { ok: false, error: regErr.message }
-
-    const courseIds = Array.from(new Set((registrations ?? []).map((r: any) => r.course_id)))
-    if (courseIds.length === 0) return { ok: true, data: [] }
-
-    const { data: offerings, error: offErr } = await supabase
-      .from('course_offerings')
-      .select(`
-        id, course_id,
-        courses!inner ( code, title ),
-        staff ( full_name )
-      `)
-      .eq('session_id', params.sessionId)
-      .in('course_id', courseIds)
-
-    if (offErr) return { ok: false, error: offErr.message }
-    if (!offerings || offerings.length === 0) return { ok: true, data: [] }
-
-    const rows: StudentCourseAttendanceRow[] = []
-    for (const row of offerings as any[]) {
-      const course = Array.isArray(row.courses) ? row.courses[0] : row.courses
-      const staff = Array.isArray(row.staff) ? row.staff[0] : row.staff
-
-      const eligibility = await loadAttendanceEligibility({
-        courseOfferingId: row.id,
-        studentId: params.studentId,
-      })
-      if (!eligibility.ok) return { ok: false, error: eligibility.error }
-
-      rows.push({
-        courseOfferingId: row.id,
-        courseCode: course?.code ?? '',
-        courseTitle: course?.title ?? '',
-        lecturerName: staff?.full_name ?? null,
-        totalSessions: eligibility.data.totalSessions,
-        presentCount: eligibility.data.presentCount,
-        percent: eligibility.data.percent,
-        thresholdPct: eligibility.data.thresholdPct,
-        meetsThreshold: eligibility.data.meetsThreshold,
-      })
-    }
-
-    return { ok: true, data: rows }
-  } catch (err: any) {
-    return { ok: false, error: err?.message ?? 'Failed to load course attendance' }
-  }
-}
-
 // ─── Cross-course attendance summary (one student, all offerings) ─────────
 
 export interface StudentOverallAttendance {
@@ -786,6 +691,106 @@ export async function loadStudentOverallAttendance(params: {
     }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load overall attendance' }
+  }
+}
+
+// ─── Per-course attendance list (one student, one row per registered course) ─
+//
+// GENUINE GAP FOUND, not a rename (2026-07-23): GuardianPortal.tsx's
+// CourseAttendanceTab was already written expecting a function named
+// loadStudentCourseAttendance() returning one row per registered course
+// (courseOfferingId, courseCode, courseTitle, lecturerName, presentCount,
+// totalSessions, percent, thresholdPct, meetsThreshold) — but no such
+// function existed anywhere in this file. The two closest existing
+// functions are each a real but different shape:
+// loadStudentOverallAttendance() sums across every course into one number
+// (courseCount, not a list); loadAttendanceEligibility() is per-course but
+// takes a single courseOfferingId and returns no course/lecturer display
+// fields at all. Written here as a new, third function rather than forcing
+// either existing one to serve double duty.
+//
+// Deliberately self-contained (its own direct queries, not calling
+// loadOfferingsForStudent() from courseOfferingTimetableService.ts) —
+// that file already imports loadCourseOfferingsForStaff from THIS file, so
+// importing back from it here would create a circular module dependency.
+// The course_registrations -> course_offerings join below uses the same
+// two-step resolution (course_id match, not a direct embed) that this
+// project's own courseOfferingTimetableService.ts fix this session
+// required, for the identical reason: course_registrations has no FK
+// PostgREST can auto-embed course_offerings through.
+
+export interface StudentCourseAttendanceRow {
+  courseOfferingId: string
+  courseCode: string
+  courseTitle: string
+  lecturerName: string | null
+  presentCount: number
+  totalSessions: number
+  percent: number | null
+  thresholdPct: number | null
+  meetsThreshold: boolean | null
+}
+
+export async function loadStudentCourseAttendance(params: {
+  studentId: string
+  sessionId: string
+}): Promise<Result<StudentCourseAttendanceRow[]>> {
+  try {
+    const { data: registrations, error: regErr } = await supabase
+      .from('course_registrations')
+      .select('course_id')
+      .eq('student_id', params.studentId)
+      .eq('session_id', params.sessionId)
+      .neq('status', 'withdrawn')
+
+    if (regErr) return { ok: false, error: regErr.message }
+
+    const courseIds = Array.from(new Set((registrations ?? []).map((r: any) => r.course_id)))
+    if (courseIds.length === 0) return { ok: true, data: [] }
+
+    const { data: offerings, error: offErr } = await supabase
+      .from('course_offerings')
+      .select(`
+        id, course_id,
+        courses ( code, title ),
+        staff ( full_name )
+      `)
+      .eq('session_id', params.sessionId)
+      .in('course_id', courseIds)
+
+    if (offErr) return { ok: false, error: offErr.message }
+    if (!offerings || offerings.length === 0) return { ok: true, data: [] }
+
+    // One eligibility computation per offering, reusing the existing,
+    // already-correct function rather than duplicating its
+    // sessions/records query logic a second time in this file.
+    const rows: StudentCourseAttendanceRow[] = []
+    for (const offering of offerings as any[]) {
+      const course = Array.isArray(offering.courses) ? offering.courses[0] : offering.courses
+      const staff = Array.isArray(offering.staff) ? offering.staff[0] : offering.staff
+
+      const eligibility = await loadAttendanceEligibility({
+        courseOfferingId: offering.id,
+        studentId: params.studentId,
+      })
+      if (!eligibility.ok) return { ok: false, error: eligibility.error }
+
+      rows.push({
+        courseOfferingId: offering.id,
+        courseCode: course?.code ?? '',
+        courseTitle: course?.title ?? '',
+        lecturerName: staff?.full_name ?? null,
+        presentCount: eligibility.data.presentCount,
+        totalSessions: eligibility.data.totalSessions,
+        percent: eligibility.data.percent,
+        thresholdPct: eligibility.data.thresholdPct,
+        meetsThreshold: eligibility.data.meetsThreshold,
+      })
+    }
+
+    return { ok: true, data: rows }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load course attendance' }
   }
 }
 

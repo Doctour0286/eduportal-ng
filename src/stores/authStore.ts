@@ -12,6 +12,50 @@ import type { PermissionScopeMap } from '../services/permissionsService'
 
 export type ActorType = 'staff' | 'guardian' | 'student' | 'platform_admin' | null
 
+/**
+ * Every finance.* permission key relevant to module ENTRY (PRD Tier 9 /
+ * Problem 9.1). CONFIRMED against a real, direct query of the live
+ * `permissions` table (2026-07-23) — 10 keys, independently cross-checked
+ * against the master plan's own Session 8 catalog audit record (identical
+ * list), PLUS finance.analytics.view (11th key, added by Problem 9.2's own
+ * migration, same session). This intentionally includes several keys
+ * FinanceModule.tsx does not wire to any UI action at all (finance.fees.view,
+ * finance.payments.view_all, finance.reports.view, finance.installments.manage,
+ * finance.ledger.view, finance.ledger.post, finance.discounts.approve) —
+ * module ENTRY must be granted to a non-admin holder of ANY of these, per
+ * the owner's 2026-07-23 "union of granted permissions" clarification, not
+ * just the keys the UI happens to gate a write action on today. A bursar
+ * granted only finance.reports.view, say, must still be able to open the
+ * module even though no button in it currently reads that specific key.
+ *
+ * finance.analytics.view is INCLUDED here even though it gates a single,
+ * narrow read-only card (Problem 9.2) rather than any write action — it is
+ * still a real finance.* key, and Problem 9.1's own rule was "any finance.*
+ * key", not "any of the three keys FinanceModule.tsx happens to wire to a
+ * button." A staff member holding only finance.analytics.view can therefore
+ * enter the module (and will see the balance-summary card, but no write
+ * actions) — consistent with the rule as stated, not scope creep.
+ *
+ * PREREQUISITE: this list is only accurate once Problem 9.2's own
+ * migration_tier9_problem_9_2_analytics_key.sql has actually been run and
+ * the key confirmed live via `select key from permissions where key like
+ * 'finance.%'` — do not trust this comment's count over that query's
+ * result if they ever disagree.
+ */
+const FINANCE_PERMISSION_KEYS = [
+  'finance.analytics.view',
+  'finance.discounts.apply',
+  'finance.discounts.approve',
+  'finance.fees.manage',
+  'finance.fees.view',
+  'finance.installments.manage',
+  'finance.ledger.post',
+  'finance.ledger.view',
+  'finance.payments.record',
+  'finance.payments.view_all',
+  'finance.reports.view',
+] as const
+
 interface AuthState {
   session: Session | null
   user: User | null
@@ -54,6 +98,21 @@ interface AuthState {
   can: (key: string) => boolean
   /** True if the key is granted AND either unrestricted or the given classId is in the granted scope — or the staff member holds an admin role. */
   canForClass: (key: string, classId: string) => boolean
+  /**
+   * True if the signed-in actor may enter the Finance module at all —
+   * PRD Tier 9 / Problem 9.1. Admin (isAdminRole) OR the union of every
+   * live finance.* permission key, per the owner's 2026-07-23 clarification:
+   * entry is gated on admin-OR-any-finance-permission, never admin-only,
+   * so a non-admin bursar/accountant role can still open the module.
+   * Computed once here (not independently in BottomNav.tsx and App.tsx)
+   * so the two call sites can never drift apart — same discipline already
+   * applied to nowColState in Session 26.
+   *
+   * NOTE: keep this key list in sync with the live `permissions` catalog —
+   * confirm via `select key from permissions where key like 'finance.%'`
+   * before trusting this list from memory (master plan §11 precedent).
+   */
+  canViewFinance: () => boolean
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -114,6 +173,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   can: (key) => canCheck(get().permissionScopes, key, get().isAdminRole),
   canForClass: (key, classId) => canForClassCheck(get().permissionScopes, key, classId, get().isAdminRole),
+  canViewFinance: () => {
+    const { isAdminRole, permissionScopes } = get()
+    return FINANCE_PERMISSION_KEYS.some((key) => canCheck(permissionScopes, key, isAdminRole))
+  },
 }))
 
 // ---------------------------------------------------------------------------

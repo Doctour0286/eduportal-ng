@@ -14806,6 +14806,61 @@ body {
   .port-sched-live-dot { animation: none; }
 }
 
+/* Higher-ed schedule tab additions (owner request, 2026-07-23):
+   venue field, plus tap-to-expand for lecturer/venue detail. Matches the
+   secondary-school port-sched-* block above exactly — same tokens, same
+   row rhythm — this is one continuous family, not a second convention. */
+.port-sched-venue {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.port-sched-row--expandable {
+  flex-direction: column;
+  align-items: stretch;
+}
+.port-sched-row-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.port-sched-row-summary:disabled {
+  cursor: default;
+}
+.port-sched-row--expanded {
+  background: var(--color-bg);
+  border-radius: var(--radius-sm);
+  margin: 0 calc(var(--space-2) * -1);
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+.port-sched-row-summary .port-sched-subject {
+  flex: 1;
+  min-width: 0;
+}
+.port-sched-row-chevron {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.port-sched-row-detail {
+  padding: var(--space-2) 0 0 calc(4.5rem + var(--space-3));
+}
+.port-sched-row-detail .port-sched-teacher,
+.port-sched-row-detail .port-sched-venue {
+  margin-top: 0;
+}
+.port-sched-row-detail .port-sched-teacher + .port-sched-venue {
+  margin-top: 2px;
+}
+
 .port-strip-legend {
   display: flex;
   flex-wrap: wrap;
@@ -14971,6 +15026,53 @@ body {
   opacity: 0.6;
   cursor: default;
 }
+
+/* Higher-ed course-attendance tab (owner-reported gap, 2026-07-23): the
+   component's own JSX already used these class names, but no rule for any
+   of them was ever written — every row rendered as plain unstyled block
+   text with no card, no spacing, no warn/ok color on the percentage.
+   Matches port-fee-row's own layout convention exactly (bordered card,
+   space-between, left info block / right-aligned value) since both are
+   the same shape: one important number, right-aligned, next to a couple
+   lines of context on the left. */
+.port-course-attendance-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.port-course-attendance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+.port-course-attendance-info { flex: 1; min-width: 0; }
+.port-course-attendance-title {
+  font-weight: 600;
+  color: var(--color-text);
+  font-size: var(--text-sm);
+}
+.port-course-attendance-lecturer {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.port-course-attendance-meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.port-course-attendance-percent {
+  font-weight: 700;
+  font-size: var(--text-lg);
+  flex-shrink: 0;
+  margin-left: var(--space-3);
+}
+.port-course-attendance-percent--warn { color: var(--color-danger-600); }
+.port-course-attendance-percent--ok { color: var(--color-success-600); }
 
 /* SESSION 72 note: port-fee-pay-now-btn, port-fee-pending-*, and
    port-fee-check-status-btn below were introduced by SESSION 70's Remita

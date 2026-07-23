@@ -45,6 +45,12 @@ interface SidebarProps {
   onNavigate: (tab: BottomNavTab) => void
   actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null
   canViewStudents: boolean
+  /** PRD Tier 9 / Problem 9.1 — same pattern as canViewStudents above:
+   *  computed once by the caller (App.tsx, via authStore.ts's
+   *  canViewFinance() OR'd with the platform_admin edge case) and passed
+   *  down, never re-derived here, so this sidebar and BottomNav.tsx can
+   *  never disagree about who sees the Finance tab. */
+  canViewFinance: boolean
   schoolName: string
   logoUrl?: string | null
   /** Rendered inside the sidebar's own "More" section — pass the same
@@ -55,10 +61,10 @@ interface SidebarProps {
   moreContent: ReactNode
 }
 
-export function Sidebar({ activeTab, onNavigate, actorType, canViewStudents, schoolName, logoUrl, moreContent }: SidebarProps) {
+export function Sidebar({ activeTab, onNavigate, actorType, canViewStudents, canViewFinance, schoolName, logoUrl, moreContent }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const isGuardian = actorType === 'guardian' || actorType === 'student'
-  const visibleItems = getVisibleNavItems(actorType, canViewStudents).filter((item) => item.id !== 'more')
+  const visibleItems = getVisibleNavItems(actorType, canViewStudents, canViewFinance).filter((item) => item.id !== 'more')
 
   return (
     <aside

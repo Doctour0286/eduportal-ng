@@ -66,6 +66,22 @@
  * tab from a platform_admin actor. actorType === 'platform_admin' is
  * checked directly, same pattern App.tsx already uses for its own
  * isAdmin derivation (isAdminRole || actorType === 'platform_admin').
+ *
+ * FIX (PRD Tier 9 / Problem 9.1): the Finance entry previously carried
+ * guardianHidden only — no staff-side permission gate at all, so every
+ * actorType === 'staff' account saw the tab regardless of role, including
+ * a non-admin teacher holding zero finance.* permissions. Finance now
+ * gets the same treatment as Students: a canViewFinance boolean threaded
+ * into getVisibleNavItems, sourced from authStore.ts's canViewFinance()
+ * selector (admin OR any held finance.* key, per the owner's 2026-07-23
+ * "union of granted permissions" clarification — not admin-only). Computed
+ * once in authStore.ts, not re-derived here, so BottomNav.tsx and App.tsx's
+ * finance branch can never drift into two different answers for the same
+ * actor. Same platform_admin edge case as the Students tab above applies
+ * here too: canViewFinance() alone returns false for platform_admin
+ * (isAdminRole/permissionScopes are both hard-coded false/empty for that
+ * actor type), so an explicit `|| actorType === 'platform_admin'` OR is
+ * required at the call site below — not decorative, and not optional.
  */
 
 import type { ReactNode } from 'react'
@@ -86,6 +102,9 @@ export const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?
   { id: 'timetable',  label: 'Timetable',  icon: <Icon name="calendar" />,      guardianHidden: true },
   { id: 'attendance', label: 'Attendance', icon: <Icon name="circle-check" />,  guardianHidden: true },
   { id: 'students',   label: 'Students',   icon: <Icon name="users" />,         staffOnly: true },
+  // guardianHidden unchanged; the finance.* permission gate is applied
+  // separately in getVisibleNavItems below (same treatment as 'students'
+  // above), not encoded as a static flag on this row — PRD Tier 9 / Problem 9.1.
   { id: 'finance',    label: 'Finance',    icon: <Icon name="wallet" />,        guardianHidden: true },
   { id: 'library',    label: 'Library',    icon: <Icon name="book" />,          staffHidden: true },
   { id: 'more',       label: 'More',       icon: <Icon name="menu" />,          guardianHidden: true },
@@ -104,6 +123,7 @@ export const NAV_ITEMS: { id: NavTab; label: string; icon: ReactNode; staffOnly?
 export function getVisibleNavItems(
   actorType: 'staff' | 'guardian' | 'student' | 'platform_admin' | null,
   canViewStudents: boolean,
+  canViewFinance: boolean,
 ) {
   const isGuardian = actorType === 'guardian' || actorType === 'student'
   return NAV_ITEMS.filter((item) => {
@@ -111,6 +131,10 @@ export function getVisibleNavItems(
     if (item.staffHidden && !isGuardian) return false
     if (item.guardianHidden && isGuardian) return false
     if (item.id === 'students' && !canViewStudents) return false
+    // PRD Tier 9 / Problem 9.1 — Finance's guardianHidden flag above still
+    // applies (guardian/student never see this tab); this adds the
+    // staff-side permission gate guardianHidden alone never covered.
+    if (item.id === 'finance' && !canViewFinance) return false
     return true
   })
 }
@@ -118,8 +142,13 @@ export function getVisibleNavItems(
 export function BottomNav({ activeTab, onNavigate, actorType }: BottomNavProps) {
   const isGuardian = actorType === 'guardian' || actorType === 'student'
   const can = useAuthStore((s) => s.can)
+  const canViewFinanceStore = useAuthStore((s) => s.canViewFinance)
   const canViewStudents = can('students.records.view') || actorType === 'platform_admin'
-  const visibleItems = getVisibleNavItems(actorType, canViewStudents)
+  // See this file's header comment — canViewFinance() alone returns false
+  // for platform_admin (same edge case as canViewStudents above), so the
+  // explicit OR is required, not decorative.
+  const canViewFinance = canViewFinanceStore() || actorType === 'platform_admin'
+  const visibleItems = getVisibleNavItems(actorType, canViewStudents, canViewFinance)
 
   return (
     <nav className="bottom-nav" role="navigation" aria-label="Main navigation">
