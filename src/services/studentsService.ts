@@ -36,6 +36,9 @@
  *   assignStudentRole()           — Session 13: assign a student_roles row to a student
  *   unassignStudentRole()         — Session 13: remove a role assignment
  *   uploadStudentPhoto()          — Session 21: resize + upload to Storage, save path to photo_url
+ *   getActivePlacedStudentCount() — Problem 9.9 (Tier 9): the one canonical "active, currently-
+ *                                    placed higher-ed student" count, shared by AdminDashboard.tsx
+ *                                    and this file's own getHigherEdStudentStatusCounts()
  *
  * Pure helpers:
  *   buildClassPathMap()           — O(1) map of classNodeId → path label string
@@ -128,6 +131,18 @@ export interface StudentUpsertParams {
   hobbies: string | null
   email: string | null
   phone: string | null
+  // Problem 9.8 (Tier 9) — higher-ed-only, optional. When both are set on
+  // createStudent(), a student_programme_placements row is written right
+  // after the student is created (see createStudent() below). Deliberately
+  // NOT part of the students table insert itself — placement lives in its
+  // own table, unrelated to this insert's columns; carried here only so
+  // the caller (StudentsModule.tsx's Add form) can pass both in one params
+  // object instead of two separate calls with two separate error-handling
+  // paths at the call site. Never read by updateStudent() — editing a
+  // student's placement is a separate, existing action (upsertPlacement()
+  // directly), not part of the general edit form.
+  programme_level_id?: string | null
+  session_id?: string | null
 }
 
 export interface GuardianLink {
@@ -416,32 +431,103 @@ export async function loadStudents(params: {
 
     if (error) return { ok: false, error: error.message }
 
-    const students: Student[] = (data ?? []).map((r: any) => ({
-      id: r.id,
-      full_name: r.full_name,
-      date_of_birth: r.date_of_birth ?? null,
-      gender: r.gender ?? null,
-      class_node_id: r.class_node_id ?? null,
-      class_path_label: null,
-      admission_date: r.admission_date ?? null,
-      student_code: r.student_code ?? null,
-      matric_number: r.matric_number ?? null,
-      status: r.status,
-      blood_group: r.blood_group ?? null,
-      address: r.address ?? null,
-      medical_notes: r.medical_notes ?? null,
-      emergency_contact_name: r.emergency_contact_name ?? null,
-      emergency_contact_phone: r.emergency_contact_phone ?? null,
-      hobbies: r.hobbies ?? null,
-      email: r.email ?? null,
-      phone: r.phone ?? null,
-      photo_url: r.photo_url ?? null,
-      created_at: r.created_at,
-    }))
+    const students: Student[] = (data ?? []).map(mapStudentRow)
 
     return { ok: true, data: students }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load students' }
+  }
+}
+
+// Shared row → Student mapper, factored out (Problem 9.8 build) so
+// loadStudents() and the new loadUnplacedHigherEdStudents() below don't
+// each carry their own independent copy of this same field-by-field
+// mapping — the exact "one implementation, not two" discipline this file's
+// own header comment already asks for elsewhere. loadStudent() (singular,
+// by-id) keeps its own inline version below, since its select list is
+// already a different shape (fewer/different columns) — not worth forcing
+// into this same helper only to immediately diverge.
+function mapStudentRow(r: any): Student {
+  return {
+    id: r.id,
+    full_name: r.full_name,
+    date_of_birth: r.date_of_birth ?? null,
+    gender: r.gender ?? null,
+    class_node_id: r.class_node_id ?? null,
+    class_path_label: null,
+    admission_date: r.admission_date ?? null,
+    student_code: r.student_code ?? null,
+    matric_number: r.matric_number ?? null,
+    status: r.status,
+    blood_group: r.blood_group ?? null,
+    address: r.address ?? null,
+    medical_notes: r.medical_notes ?? null,
+    emergency_contact_name: r.emergency_contact_name ?? null,
+    emergency_contact_phone: r.emergency_contact_phone ?? null,
+    hobbies: r.hobbies ?? null,
+    email: r.email ?? null,
+    phone: r.phone ?? null,
+    photo_url: r.photo_url ?? null,
+    created_at: r.created_at,
+  }
+}
+
+/**
+ * Problem 9.8 (Tier 9) — every status='active' higher-ed student with no
+ * current student_programme_placements row. The exact inverse of
+ * loadStudents()'s isHigherEd branch above: that function fetches
+ * placementStudentIds and does `.in('id', placementStudentIds)`; this one
+ * fetches the identical placementStudentIds shape and does the opposite —
+ * `.not('id', 'in', ...)` — so "placed" is defined exactly once, the same
+ * way, in both places, and can never quietly drift into two different
+ * meanings of "placed" over time.
+ *
+ * Deliberately its own function rather than a new loadStudents() param
+ * (e.g. `unplacedOnly?: boolean`) — "unplaced" is not a statusFilter value
+ * (students.status has no such state, per that column's own real enum) and
+ * forcing it through the same param as active/inactive/alumni would
+ * conflate a real DB status with a derived, placement-based condition that
+ * happens to share only the 'active' status as a precondition.
+ */
+export async function loadUnplacedHigherEdStudents(
+  schoolId: string,
+): Promise<Result<Student[]>> {
+  try {
+    const { data: placementRows, error: placementError } = await supabase
+      .from('student_programme_placements')
+      .select('student_id')
+      .eq('school_id', schoolId)
+      .eq('is_current', true)
+    if (placementError) return { ok: false, error: placementError.message }
+    const placedStudentIds = Array.from(new Set((placementRows ?? []).map((r: any) => r.student_id as string)))
+
+    let query = supabase
+      .from('students')
+      .select(`
+        id, full_name, date_of_birth, gender, class_node_id, admission_date,
+        status, student_code, matric_number, blood_group, address,
+        medical_notes, emergency_contact_name, emergency_contact_phone,
+        hobbies, email, phone, photo_url, created_at
+      `)
+      .eq('school_id', schoolId)
+      .eq('status', 'active')
+      .order('full_name')
+
+    // Supabase/PostgREST's .not('id', 'in', (...)) needs a non-empty list —
+    // an empty placedStudentIds means "nobody is placed yet," which is a
+    // real, valid state (every active student is unplaced) and must NOT be
+    // treated as "no filter" the same way loadStudents() already guards
+    // against the mirror-image case for its own .in() call above.
+    if (placedStudentIds.length > 0) {
+      query = query.not('id', 'in', `(${placedStudentIds.join(',')})`)
+    }
+
+    const { data, error } = await query
+    if (error) return { ok: false, error: error.message }
+
+    return { ok: true, data: (data ?? []).map(mapStudentRow) }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load unplaced students' }
   }
 }
 
@@ -452,6 +538,13 @@ export interface StudentStatusCounts {
   transferred_out: number
   transferred_in_pending: number
   total: number
+  // Problem 9.8 (Tier 9) — higher-ed only. Count of students with
+  // status = 'active' who have no current student_programme_placements
+  // row (direct-add students never routed through placement). Undefined
+  // for secondary schools (getStudentStatusCounts() never sets it) — not
+  // 0, since 0 and "not applicable" are different facts and a stray 0
+  // tile would misleadingly imply the concept exists for that school type.
+  unplaced?: number
 }
 
 /**
@@ -540,17 +633,50 @@ export async function getStudentStatusCounts(params: {
  * is exactly the kind of drift this codebase has flagged before, so
  * fixed rather than left as a latent inconsistency.
  */
+// Problem 9.9 (Tier 9) — the one canonical query for "which students at
+// this school currently have an active placement," extracted so every
+// caller (the count below, getHigherEdStudentStatusCounts()'s own
+// activeCount/unplaced derivation, and AdminDashboard.tsx via the count
+// function) shares one real query, not independently-written copies that
+// happen to agree by coincidence. This is exactly the "one canonical
+// derivation, never two independently-computed versions that could drift"
+// discipline already applied elsewhere in this codebase (nowColState,
+// canViewFinance) — extended here across files rather than within just one.
+async function loadCurrentlyPlacedStudentIds(
+  schoolId: string,
+): Promise<Result<Set<string>>> {
+  const { data, error } = await supabase
+    .from('student_programme_placements')
+    .select('student_id')
+    .eq('school_id', schoolId)
+    .eq('is_current', true)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, data: new Set((data ?? []).map((r: any) => r.student_id as string)) }
+}
+
+// Root cause this closes: AdminDashboard.tsx's totalStudents card was a
+// flat `students` count with `status = 'active'` and no join to placement
+// at all — a directly-added-but-unplaced student (Problem 9.8's own defect,
+// now fixed at creation time, but any student who slips through the
+// Unplaced view's remediation crosses this same boundary too) was counted
+// here even though StudentsModule.tsx's list/stat-strip never queried them
+// in the first place. Both surfaces now resolve "active" the same way.
+export async function getActivePlacedStudentCount(
+  schoolId: string,
+): Promise<Result<number>> {
+  const result = await loadCurrentlyPlacedStudentIds(schoolId)
+  if (!result.ok) return result
+  return { ok: true, data: result.data.size }
+}
+
 export async function getHigherEdStudentStatusCounts(
   schoolId: string,
 ): Promise<Result<StudentStatusCounts>> {
   try {
-    const { data: placementRows, error: placementError } = await supabase
-      .from('student_programme_placements')
-      .select('student_id')
-      .eq('school_id', schoolId)
-      .eq('is_current', true)
-    if (placementError) return { ok: false, error: placementError.message }
-    const activeCount = new Set((placementRows ?? []).map((r: any) => r.student_id as string)).size
+    const placedResult = await loadCurrentlyPlacedStudentIds(schoolId)
+    if (!placedResult.ok) return placedResult
+    const placedStudentIds = placedResult.data
+    const activeCount = placedStudentIds.size
 
     const { data: transferRows, error: transferError } = await supabase
       .from('students')
@@ -561,6 +687,23 @@ export async function getHigherEdStudentStatusCounts(
     const transferredOut = (transferRows ?? []).filter((r: any) => r.status === 'transferred_out').length
     const transferredInPending = (transferRows ?? []).filter((r: any) => r.status === 'transferred_in_pending').length
 
+    // Problem 9.8 (Tier 9) — "unplaced" is every status='active' student NOT
+    // in placedStudentIds above. Deliberately a second, separate query
+    // rather than trying to derive it from placedStudentIds alone (that set
+    // only tells us who IS placed — it says nothing about how many active
+    // students exist in total, which is the other half of the subtraction).
+    // Scoped to status='active' only, matching this function's own existing
+    // convention that 'active' for higher-ed means "should have a current
+    // placement" — an inactive/alumni/transferred student missing a
+    // placement is not this problem's concern and must not inflate the count.
+    const { data: activeStatusRows, error: activeStatusError } = await supabase
+      .from('students')
+      .select('id')
+      .eq('school_id', schoolId)
+      .eq('status', 'active')
+    if (activeStatusError) return { ok: false, error: activeStatusError.message }
+    const unplacedCount = (activeStatusRows ?? []).filter((r: any) => !placedStudentIds.has(r.id)).length
+
     return {
       ok: true,
       data: {
@@ -570,6 +713,7 @@ export async function getHigherEdStudentStatusCounts(
         transferred_out: transferredOut,
         transferred_in_pending: transferredInPending,
         total: activeCount + transferredOut + transferredInPending,
+        unplaced: unplacedCount,
       },
     }
   } catch (err: any) {
@@ -922,10 +1066,65 @@ export async function getStudentPhotoSignedUrl(photoPath: string | null): Promis
  * school_id is required — RLS `with check` enforces it matches the caller's school.
  * status defaults to 'active' at the DB level; no need to pass it on creation.
  */
+// Problem 9.8 (Tier 9) — REVISED. The previous version of this function
+// inserted `students` directly, then separately called upsertPlacement()
+// as a second, non-atomic client call. That shape could leave a real,
+// committed, unplaced student behind if the second call failed — exactly
+// the "orphaned student" defect this problem reports, just made
+// survivable-and-visible rather than actually prevented. Per the owner's
+// clarification (TIER_9_OWNER_REPORTED_ISSUES.md, Problem 9.8), the real
+// fix is prevention at the point of creation: student + placement must
+// succeed or fail together. For higher-ed schools this now calls the new
+// create_placed_student() RPC (migration_session_problem_9_8.sql) — a
+// single security-definer transaction, mirroring admit_student()'s own
+// atomic shape. Secondary schools are unaffected: they have no placement
+// concept, so they keep the original plain `students` insert unchanged.
+//
+// Return type reverted to the plain Result<T> shape — the prior
+// function-specific CreateStudentResult existed only to carry an optional
+// `warning` for the now-impossible "created but not placed" degraded
+// state; with a real atomic call, createStudent() either fully succeeds
+// or fully fails, so the generic Result<T> is sufficient again.
 export async function createStudent(
   params: StudentUpsertParams,
+  isHigherEd?: boolean,
 ): Promise<Result<{ id: string }>> {
   try {
+    if (isHigherEd) {
+      // Both-or-neither is enforced again here (not just relied on
+      // server-side) so a caller bug surfaces at the call site rather than
+      // as a raw Postgres exception string.
+      if (Boolean(params.programme_level_id) !== Boolean(params.session_id)) {
+        return { ok: false, error: 'A programme level requires a session, and vice versa.' }
+      }
+      const { data, error } = await supabase.rpc('create_placed_student', {
+        p_school_id:                params.schoolId,
+        p_full_name:                params.full_name.trim(),
+        p_date_of_birth:            params.date_of_birth || null,
+        p_gender:                   params.gender || null,
+        p_admission_date:           params.admission_date || null,
+        p_student_code:             params.student_code || null,
+        p_blood_group:               params.blood_group || null,
+        p_address:                   params.address || null,
+        p_medical_notes:             params.medical_notes || null,
+        p_emergency_contact_name:    params.emergency_contact_name || null,
+        p_emergency_contact_phone:   params.emergency_contact_phone || null,
+        p_hobbies:                   params.hobbies || null,
+        p_email:                     params.email || null,
+        p_phone:                     params.phone || null,
+        p_programme_level_id:        params.programme_level_id || null,
+        p_session_id:                params.session_id || null,
+      })
+      if (error) return { ok: false, error: friendlyError(error.message) }
+      // Postgres RETURNS TABLE functions come back as an array of rows via
+      // .rpc() — exactly one row here since create_placed_student() either
+      // returns one row or raises (same convention as admissionService.ts's
+      // admitStudent()).
+      const row = Array.isArray(data) ? data[0] : data
+      if (!row?.student_id) return { ok: false, error: 'Student creation did not return a result.' }
+      return { ok: true, data: { id: row.student_id } }
+    }
+
     const { data, error } = await supabase
       .from('students')
       .insert({
@@ -949,6 +1148,7 @@ export async function createStudent(
       .single()
 
     if (error) return { ok: false, error: friendlyError(error.message) }
+
     return { ok: true, data: { id: data.id } }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to create student' }

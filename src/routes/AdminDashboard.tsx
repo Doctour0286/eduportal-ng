@@ -10,6 +10,7 @@ import { useSchoolStore } from '../stores/schoolStore';
 import { useAuthStore } from '../stores/authStore';
 import { Icon } from '../components/icons';
 import { loadTermProgress, type TermProgress } from '../services/portalService';
+import { getActivePlacedStudentCount } from '../services/studentsService';
 import { TermProgressCard } from '../components/TermProgressCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -216,6 +217,7 @@ export default function AdminDashboard({
   }, [school?.id]);
 
   async function loadStats() {
+    if (!school) return;
     setStatsLoading(true);
     setError(null);
     try {
@@ -240,20 +242,35 @@ export default function AdminDashboard({
         // denominator (used below for the secondary path) would be
         // meaningless here; the denominator is real marked records today,
         // not the whole student body.
+        //
+        // Problem 9.9 (Tier 9) — totalStudents itself was ALSO wrong for
+        // higher-ed specifically: a flat `students` count with
+        // status='active' counts every row regardless of whether it has a
+        // current student_programme_placements row, while
+        // StudentsModule.tsx's own list/stat-strip (getHigherEdStudentStatusCounts())
+        // only ever counts placed students — a directly-added-but-unplaced
+        // student (or one who slips through the Unplaced remediation view)
+        // was counted here but invisible there. Replaced with the shared
+        // getActivePlacedStudentCount(), the same canonical definition
+        // getHigherEdStudentStatusCounts() itself uses, so this card and the
+        // Students module can never structurally disagree again. Run
+        // alongside the other Promise.all queries below, not sequentially,
+        // to avoid adding a serial round trip to this card's load time.
         const [
-          studentsRes,
+          activeStudentCountRes,
           staffRes,
           todaySessionsRes,
           pendingScoresRes,
           pendingLeaveRes,
         ] = await Promise.all([
-          supabase.from('students').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+          getActivePlacedStudentCount(school.id),
           supabase.from('staff').select('id', { count: 'exact', head: true }).eq('status', 'active'),
           // Sessions held today across every course offering (school-scoped via RLS)
           supabase.from('course_attendance_sessions').select('id').eq('session_date', today),
           supabase.from('scores').select('id', { count: 'exact', head: true }).is('approved_at', null),
           supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
         ]);
+        const totalStudentsHigherEd = activeStudentCountRes.ok ? activeStudentCountRes.data : 0;
 
         const todaySessionIds = (todaySessionsRes.data ?? []).map((s: { id: string }) => s.id);
         let recordsToday: { status: string }[] = [];
@@ -275,7 +292,7 @@ export default function AdminDashboard({
         const paymentsTotal = (allPayments ?? []).reduce((sum, p) => sum + parseFloat(p.amount), 0);
 
         setStats({
-          totalStudents: studentsRes.count ?? 0,
+          totalStudents: totalStudentsHigherEd,
           totalStaff: staffRes.count ?? 0,
           // Denominator/numerator both real course-attendance-record counts
           // today, not total active students — see comment above.

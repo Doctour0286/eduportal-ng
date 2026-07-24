@@ -74,6 +74,8 @@ import {
   getStudentStatusCounts,
   getHigherEdStudentStatusCounts,
   type StudentStatusCounts,
+  // Problem 9.8 (Tier 9)
+  loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
 import {
   searchGuardians,
@@ -92,7 +94,7 @@ import { printStudentIdCards, type IdCardStudent } from '../services/printStuden
 // service code, this file only adds a rendering layer around them.
 import { loadStudentTranscript, type StudentTranscript } from '../services/courseResultsService'
 import { downloadTranscriptPdf } from '../services/transcriptPdf'
-import { loadStudentCurrentPlacement, loadProgrammes, loadProgrammeLevels, type StudentCurrentPlacement, type Programme, type ProgrammeLevel } from '../services/settingsService'
+import { loadStudentCurrentPlacement, loadProgrammes, loadProgrammeLevels, upsertPlacement, type StudentCurrentPlacement, type Programme, type ProgrammeLevel } from '../services/settingsService'
 import { loadCurrentSession } from '../services/attendanceService'
 import { loadStudentOverallAttendance, type StudentOverallAttendance } from '../services/courseAttendanceService'
 
@@ -163,6 +165,14 @@ interface FormState {
   hobbies: string
   email: string
   phone: string
+  // Problem 9.8 (Tier 9) — higher-ed only, optional. Replaces class_node_id
+  // for that school type in the Add form (a higher-ed school has no class
+  // nodes at all — class_node_id was rendering a meaningless "Class"
+  // picker for higher-ed before this fix, a separate latent bug fixed in
+  // the same pass). Left blank = student created unplaced, same as today's
+  // behavior, fixable later via the Status tab or the Unplaced list.
+  programme_id: string
+  programme_level_id: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -180,6 +190,8 @@ const EMPTY_FORM: FormState = {
   hobbies: '',
   email: '',
   phone: '',
+  programme_id: '',
+  programme_level_id: '',
 }
 
 // ─── Guardian form state ──────────────────────────────────────────────────────
@@ -314,6 +326,14 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // indicator or by clicking the same chip again.
   const [statusFilter, setStatusFilter] = useState<Student['status']>('active')
 
+  // Problem 9.8 (Tier 9) — higher-ed only. Mutually exclusive with
+  // statusFilter's usual drill-down (see loadList() below): "unplaced" is
+  // not a students.status value, so it can't reuse statusFilter's own
+  // state the way the active/inactive/alumni/transferred chips already do
+  // — it's a separate, derived condition (no current placement row) that
+  // only ever applies on top of status='active'.
+  const [showUnplacedOnly, setShowUnplacedOnly] = useState(false)
+
   // Counts across ALL statuses, scoped to filterClass — independent of
   // statusFilter above, so the stat strip's numbers stay stable while the
   // list underneath switches which single status it displays.
@@ -340,6 +360,25 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // create (the person lands back on the plain list, not inside the new
   // student's own panel).
   const [listSuccessMsg,  setListSuccessMsg]  = useState('')
+
+  // Problem 9.8 (Tier 9) — Add form's own programme→level dependent
+  // dropdown, higher-ed only. Deliberately separate from
+  // programmeLevels/filterLevelId above (that pair belongs to the list's
+  // filter picker, a different UI concern with its own independent
+  // lifecycle — reusing it here would mean opening the Add form
+  // could stomp on whatever filter the admin currently has applied to the
+  // list behind it, or vice versa). `programmes` itself (the school's full
+  // programme list) IS shared — it's the same static list either way, no
+  // reason to fetch it twice.
+  const [formLevels,        setFormLevels]        = useState<ProgrammeLevel[]>([])
+  const [formLevelsLoading, setFormLevelsLoading]  = useState(false)
+  // Problem 9.8 (Tier 9) — the current session id, needed alongside
+  // programme_level_id to call upsertPlacement() from the Add form (and
+  // from the Status tab's Assign-to-level action below). Fetched once on
+  // mount for higher-ed schools only, same "load once, reuse everywhere in
+  // this component" shape AdmissionManualMatricSection uses in
+  // SettingsModule.tsx for the identical value — not re-fetched per submit.
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
 
   // ── Detail panel ──────────────────────────────────────────────────────────
   const [detailStudent,  setDetailStudent]  = useState<Student | null>(null)
@@ -386,6 +425,26 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // existing isHigherEd-gated-fetch pattern (fetchAssignableRoles, etc).
   const [currentPlacement, setCurrentPlacement] = useState<StudentCurrentPlacement | null | undefined>(undefined)
   const [placementState,   setPlacementState]   = useState<LoadState>('booting')
+
+  // Problem 9.8 (Tier 9) — Status tab's "Assign to level" action. Its own
+  // small, self-contained picker state, shown only when currentPlacement
+  // is null (nothing to assign once a placement already exists — use
+  // upsertPlacement() again some other way if a correction is ever
+  // needed, not this one-time "first placement" control). Same
+  // programme→level dependent-dropdown shape as the Add form's own
+  // formLevels above and as AdmissionManualMatricSection's precedent in
+  // SettingsModule.tsx — deliberately a third, independent copy of this
+  // small piece of local UI state (not shared with the other two) since
+  // each lives in a different part of the tree with its own open/close
+  // lifecycle; only the underlying upsertPlacement() write itself is
+  // shared, never the state around it.
+  const [assignPanelOpen,      setAssignPanelOpen]      = useState(false)
+  const [assignProgrammeId,    setAssignProgrammeId]    = useState('')
+  const [assignLevelId,        setAssignLevelId]        = useState('')
+  const [assignLevels,         setAssignLevels]         = useState<ProgrammeLevel[]>([])
+  const [assignLevelsLoading,  setAssignLevelsLoading]  = useState(false)
+  const [assigning,            setAssigning]            = useState(false)
+  const [assignError,          setAssignError]          = useState('')
 
   // SESSION 64 (owner-reported gap, researched) — the Brief tab's
   // "Performance" stat was a hardcoded "Not yet available" stub for every
@@ -644,6 +703,17 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
         }
         setProgrammes(res.data)
         setBootState('ready')
+        // Problem 9.8 (Tier 9) — fired alongside, not blocking bootState,
+        // same "a failure here degrades gracefully" treatment as
+        // loadParentClassGroups() below for the secondary-school branch. A
+        // failure (or no current session set) just means the Add form's
+        // Level picker stays disabled with an explanatory hint — see
+        // renderAddForm() — never a hard error blocking the whole module.
+        loadCurrentSession().then(sessionRes => {
+          if (!cancelled && sessionRes.ok && sessionRes.sessionId) {
+            setCurrentSessionId(sessionRes.sessionId)
+          }
+        })
         return
       }
 
@@ -743,6 +813,27 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
 
   const loadList = useCallback(async () => {
     setListState('loading')
+
+    // Problem 9.8 (Tier 9) — "unplaced" is a completely separate query
+    // shape (loadUnplacedHigherEdStudents(), no statusFilter/class/level
+    // params at all — it's always status='active' AND no current
+    // placement, by definition), not a variant of the normal loadStudents()
+    // call below. Short-circuits before touching any of the usual
+    // class/programme/level filter params, which don't apply to this view.
+    if (isHigherEd && showUnplacedOnly) {
+      const unplacedRes = await loadUnplacedHigherEdStudents(schoolId)
+      if (!unplacedRes.ok) {
+        setListError(unplacedRes.error)
+        setListState('error')
+        return
+      }
+      setStudents(unplacedRes.data)
+      setListState(unplacedRes.data.length === 0 ? 'empty' : 'ready')
+      const unplacedTagsRes = await loadStudentRoleTagsBatch(unplacedRes.data.map(s => s.id))
+      if (unplacedTagsRes.ok) setListRoleTags(unplacedTagsRes.data)
+      return
+    }
+
     const res = await loadStudents({
       classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
       statusFilter,
@@ -777,7 +868,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     enriched
       .filter(s => s.photo_url)
       .forEach(s => { resolvePhoto(s.photo_url) })
-  }, [effectiveSelectionKey, effectiveHigherEdSelectionKey, statusFilter, classPathMap])
+  }, [effectiveSelectionKey, effectiveHigherEdSelectionKey, statusFilter, classPathMap, isHigherEd, showUnplacedOnly, schoolId])
 
   useEffect(() => {
     if (bootState === 'ready') loadList()
@@ -829,14 +920,24 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     inactive: statusCounts?.inactive ?? 0,
     alumni: statusCounts?.alumni ?? 0,
     transferred: (statusCounts?.transferred_out ?? 0) + (statusCounts?.transferred_in_pending ?? 0),
+    // Problem 9.8 (Tier 9) — higher-ed only; undefined for secondary
+    // schools (getStudentStatusCounts() never sets it), left as undefined
+    // here too rather than coerced to 0, so renderStatStrip() below can
+    // tell "not applicable to this school type" apart from "genuinely
+    // zero unplaced students" if it ever needs to.
+    unplaced: statusCounts?.unplaced,
   }
 
   // ─── Open detail panel ────────────────────────────────────────────────────
 
 
-  function openDetail(student: Student) {
+  // Problem 9.8 (Tier 9) — optional initialTab param so the Unplaced list
+  // can open a row straight into the Status tab (where "Assign to level"
+  // lives) instead of always defaulting to Brief. Every existing caller
+  // omits it and keeps today's Brief-first behavior unchanged.
+  function openDetail(student: Student, initialTab: DetailTab = 'brief') {
     setDetailStudent(student)
-    setDetailTab('brief')
+    setDetailTab(initialTab)
     // Pre-fill info form
     setEditingId(student.id)
     setForm({
@@ -854,6 +955,14 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
       hobbies:                   student.hobbies ?? '',
       email:                     student.email ?? '',
       phone:                     student.phone ?? '',
+      // Problem 9.8 — the Edit form never edits placement (that's the
+      // Status tab's job, or upsertPlacement() directly), so these two
+      // always reset to blank on open regardless of the student's real
+      // current placement. Distinct from currentPlacement (fetched
+      // separately below via fetchBrief) which is what actually drives the
+      // read-only Programme/Level display and the Status tab's own gate.
+      programme_id: '',
+      programme_level_id: '',
     })
     setFormError('')
     setBriefSuccessMsg('')
@@ -895,6 +1004,15 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     setPhotoUploading(false)
     setPhotoError('')
     setPhotoPreviewOpen(false)
+    // Problem 9.8 (Tier 9) — Status tab's "Assign to level" panel resets
+    // closed on every open, same reset-on-open discipline as every other
+    // per-student panel above.
+    setAssignPanelOpen(false)
+    setAssignProgrammeId('')
+    setAssignLevelId('')
+    setAssignLevels([])
+    setAssigning(false)
+    setAssignError('')
     fetchBrief(student.id)
     fetchStudentIdentity(student.id)
     fetchRoleTags(student.id)
@@ -1217,6 +1335,14 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     setForm({ ...EMPTY_FORM, admission_date: todayDateString() })
     setFormError('')
     setFormOpen(true)
+    // Problem 9.8 (Tier 9) — same reset-on-open discipline as the rest of
+    // this function; EMPTY_FORM already clears programme_id/
+    // programme_level_id, but formLevels is separate derived state (not
+    // part of FormState) and needs its own explicit reset so a previous
+    // Add session's level list never briefly appears before the (empty)
+    // programme selection re-triggers its own fetch.
+    setFormLevels([])
+    setFormLevelsLoading(false)
     setTimeout(() => nameInputRef.current?.focus(), 80)
   }
 
@@ -1240,6 +1366,91 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
 
   function setField(field: keyof FormState, value: string) {
     setForm(prev => ({ ...prev, [field]: value }))
+  }
+
+  // Problem 9.8 (Tier 9) — Add form's Programme → Level dependent picker.
+  // Changing the programme must always clear whatever level was previously
+  // selected (a level id from the old programme is meaningless once the
+  // programme itself changes) and re-fetch formLevels for the new
+  // programme — same shape as the existing filter picker's own
+  // programme-change effect and AdmissionManualMatricSection's
+  // programmeId-change effect in SettingsModule.tsx.
+  async function handleAddFormProgrammeChange(programmeId: string) {
+    setForm(prev => ({ ...prev, programme_id: programmeId, programme_level_id: '' }))
+    if (!programmeId) {
+      setFormLevels([])
+      return
+    }
+    setFormLevelsLoading(true)
+    const res = await loadProgrammeLevels(programmeId)
+    setFormLevelsLoading(false)
+    if (!res.error) setFormLevels(res.data)
+  }
+
+  // Problem 9.8 (Tier 9) — Status tab's own Programme → Level dependent
+  // picker, structurally identical to handleAddFormProgrammeChange() above
+  // but deliberately a separate function against separate state
+  // (assignProgrammeId/assignLevels, not form/formLevels) — this panel and
+  // the Add form have independent open/close lifecycles and must not share
+  // state, per this problem's own Tier 9 writeup reasoning.
+  async function handleAssignProgrammeChange(programmeId: string) {
+    setAssignProgrammeId(programmeId)
+    setAssignLevelId('')
+    if (!programmeId) {
+      setAssignLevels([])
+      return
+    }
+    setAssignLevelsLoading(true)
+    const res = await loadProgrammeLevels(programmeId)
+    setAssignLevelsLoading(false)
+    if (!res.error) setAssignLevels(res.data)
+  }
+
+  // Problem 9.8 (Tier 9) — the actual remediation write, reused by both
+  // the per-student Status tab flow here and, indirectly, by the Unplaced
+  // list (which routes into this same Status tab rather than duplicating
+  // this call — see openDetail()'s initialTab param and the list row's
+  // onClick above). Calls the same upsertPlacement() the Add form's
+  // optional placement and AdmissionManualMatricSection's own handlePlace()
+  // both call — one write path, three entry points.
+  async function handleAssignToLevel() {
+    if (!detailStudent || !assignLevelId || !currentSessionId) return
+    setAssigning(true)
+    setAssignError('')
+    const res = await upsertPlacement({
+      school_id: schoolId,
+      student_id: detailStudent.id,
+      programme_level_id: assignLevelId,
+      session_id: currentSessionId,
+    })
+    setAssigning(false)
+    if (res.error) {
+      setAssignError(res.error)
+      return
+    }
+    setAssignPanelOpen(false)
+    setAssignProgrammeId('')
+    setAssignLevelId('')
+    setAssignLevels([])
+    // Refresh currentPlacement so the badge/note above flips to "Active"
+    // immediately, without requiring the admin to close and reopen the
+    // detail panel — same "no reload required" bar this codebase already
+    // holds itself to elsewhere (e.g. Problem 9.2's own live-revoke
+    // Definition of Done in the Tier 9 doc).
+    setPlacementState('loading')
+    const placementRes = await loadStudentCurrentPlacement(detailStudent.id)
+    if (placementRes.error) {
+      setPlacementState('error')
+    } else {
+      setCurrentPlacement(placementRes.data)
+      setPlacementState('ready')
+    }
+    // Also refresh the list/stat-strip in the background so the Unplaced
+    // count and (if currently in unplaced view) the list itself stay
+    // accurate without a manual refresh — same non-blocking treatment as
+    // the role-tag/photo batches elsewhere in this file.
+    loadList()
+    loadStatusCounts()
   }
 
   async function handleSubmit() {
@@ -1267,11 +1478,26 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
       email:                     form.email.trim() || null,
       phone:                     form.phone.trim() || null,
     }
+    const isCreating = !editingId || !detailStudent
+    // Problem 9.8 (Tier 9) — placement fields only ever attached to the
+    // CREATE call, never to updateStudent()'s params — editing a student's
+    // placement is a separate, existing action (upsertPlacement()
+    // directly, via the Status tab's own Assign-to-level control), not
+    // part of this general edit form. Both fields together are also only
+    // sent when a level was actually chosen (form.programme_level_id set)
+    // AND a current session was resolved (currentSessionId set) —
+    // createStudent() now rejects a mismatched pair explicitly (both
+    // required together, or neither) rather than silently no-oping, but
+    // building createParams this way still keeps a clean "both or
+    // neither" contract visible at the call site too.
+    const createParams = isCreating && isHigherEd && form.programme_level_id && currentSessionId
+      ? { ...params, programme_level_id: form.programme_level_id, session_id: currentSessionId }
+      : params
     const result = editingId && !detailStudent
-      ? await createStudent(params)   // shouldn't happen but safety net
+      ? await createStudent(createParams, isHigherEd)   // shouldn't happen but safety net
       : editingId
         ? await updateStudent(editingId, params)
-        : await createStudent(params)
+        : await createStudent(createParams, isHigherEd)
 
     setFormSaving(false)
     if (!result.ok) {
@@ -1320,6 +1546,16 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
       // Previously ended here with nothing shown — the form just closed
       // and the list refreshed, with no confirmation the new student (and
       // its full set of details) actually saved.
+      //
+      // Problem 9.8 (Tier 9) — the prior "warning" surfaced here (student
+      // created but placement failed) belonged to createStudent()'s old
+      // non-atomic two-step write. That state can no longer occur once
+      // createStudent() calls the atomic create_placed_student() RPC for
+      // higher-ed schools (student + placement succeed or fail together) —
+      // removed rather than left as dead, non-type-checking code. This was
+      // also a real TS2339 build error (`result` here is a union that
+      // includes updateStudent()'s plain Ok<void>, which has no `warning`
+      // field at all — not narrowable the way the removed code assumed).
       setListSuccessMsg(`${form.full_name.trim()} added.`)
       window.setTimeout(() => setListSuccessMsg(''), 3000)
     }
@@ -1723,7 +1959,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
           <li key={student.id} className="stu-row">
             <button
               className="stu-row-btn"
-              onClick={() => openDetail(student)}
+              onClick={() => openDetail(student, showUnplacedOnly ? 'status' : 'brief')}
             >
               <div className="stu-row-avatar" aria-hidden>
                 {/* Session 21 — photo_url is a Storage path, never rendered
@@ -1787,6 +2023,18 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
             onClick={() => setStatusFilter('active')}
           >
             Showing: {statusLabel(statusFilter)} ×
+          </button>
+        )}
+        {/* Problem 9.8 (Tier 9) — parallel indicator for showUnplacedOnly,
+            since it's a separate piece of state from statusFilter and
+            neither one implies the other. */}
+        {showUnplacedOnly && (
+          <button
+            type="button"
+            className="stu-status-filter-clear"
+            onClick={() => setShowUnplacedOnly(false)}
+          >
+            Showing: Unplaced ×
           </button>
         )}
         {/* PRD Tier 6 / Problem 6.10 — bulk ID card print for whatever's
@@ -1863,6 +2111,21 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
           <span className="stu-stat stu-stat--transferred stu-stat--static">
             {studentStats.transferred} transferred
           </span>
+        )}
+        {/* Problem 9.8 (Tier 9) — higher-ed only. Deliberately its own
+            button, not routed through chip() above: chip() toggles
+            statusFilter, but "unplaced" isn't a status value — it toggles
+            showUnplacedOnly instead, a separate piece of state loadList()
+            branches on. Hidden entirely (not just zero-count-hidden) for
+            secondary schools, where studentStats.unplaced is undefined. */}
+        {isHigherEd && typeof studentStats.unplaced === 'number' && studentStats.unplaced > 0 && (
+          <button
+            type="button"
+            className={`stu-stat stu-stat--unplaced${showUnplacedOnly ? ' stu-stat--selected' : ''}`}
+            onClick={() => setShowUnplacedOnly(prev => !prev)}
+          >
+            {studentStats.unplaced} unplaced
+          </button>
         )}
       </div>
     )
@@ -3026,8 +3289,87 @@ function renderGuardiansTab() {
               </span>
               <p className="stu-status-note">
                 Derived from this student's current programme placement — not manually set.
-                {currentPlacement ? ' To change it, update their placement instead.' : ' Admit this student into a programme/level to make them active.'}
+                {currentPlacement ? ' To change it, update their placement instead.' : ''}
               </p>
+              {/* Problem 9.8 (Tier 9) — this used to be static, unactionable
+                  copy ("Admit this student into a programme/level to make
+                  them active") with no control anywhere to actually do it.
+                  Real "Assign to level" action added here: only shown once
+                  placementState has genuinely settled to 'ready' with no
+                  current placement (never mid-fetch, and never for a
+                  student who already has one — see the note above for that
+                  case instead), and only for someone with edit rights,
+                  matching this file's canEditStudentRecords gate used
+                  elsewhere for write actions. */}
+              {placementState === 'ready' && !currentPlacement && canEditStudentRecords && (
+                assignPanelOpen ? (
+                  <div className="stu-assign-panel">
+                    <div className="stu-field">
+                      <label className="stu-label" htmlFor="stu-assign-programme">Programme</label>
+                      <select
+                        id="stu-assign-programme"
+                        className="stu-select"
+                        value={assignProgrammeId}
+                        onChange={e => handleAssignProgrammeChange(e.target.value)}
+                      >
+                        <option value="">Choose a programme</option>
+                        {programmes.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {assignProgrammeId && (
+                      <div className="stu-field">
+                        <label className="stu-label" htmlFor="stu-assign-level">Level</label>
+                        <select
+                          id="stu-assign-level"
+                          className="stu-select"
+                          value={assignLevelId}
+                          onChange={e => setAssignLevelId(e.target.value)}
+                          disabled={assignLevelsLoading || assignLevels.length === 0}
+                        >
+                          <option value="">
+                            {assignLevelsLoading ? 'Loading levels…' : assignLevels.length === 0 ? 'No levels for this programme' : 'Choose a level'}
+                          </option>
+                          {assignLevels.map(l => (
+                            <option key={l.id} value={l.id}>{l.level_label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    {!currentSessionId && (
+                      <p className="stu-form-error">No current session is set for this school — placement needs one. Set a current session under Settings → Calendar first.</p>
+                    )}
+                    {assignError && <p className="stu-form-error">{assignError}</p>}
+                    <div className="stu-status-actions">
+                      <button
+                        type="button"
+                        className="stu-status-action-btn"
+                        onClick={() => { setAssignPanelOpen(false); setAssignProgrammeId(''); setAssignLevelId(''); setAssignLevels([]); setAssignError('') }}
+                        disabled={assigning}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="stu-status-action-btn stu-status-action-btn--activate"
+                        onClick={handleAssignToLevel}
+                        disabled={assigning || !assignLevelId || !currentSessionId}
+                      >
+                        {assigning ? 'Assigning…' : 'Assign'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="stu-status-action-btn stu-status-action-btn--activate"
+                    onClick={() => setAssignPanelOpen(true)}
+                  >
+                    Assign to level
+                  </button>
+                )
+              )}
             </>
           ) : (
             <>
@@ -3492,20 +3834,71 @@ function renderGuardiansTab() {
                 autoComplete="off"
               />
             </div>
-            <div className="stu-field">
-              <label className="stu-label" htmlFor="stu-add-class">Class</label>
-              <select
-                id="stu-add-class"
-                className="stu-select"
-                value={form.class_node_id}
-                onChange={e => setField('class_node_id', e.target.value)}
-              >
-                <option value="">— not yet assigned —</option>
-                {classes.map(c => (
-                  <option key={c.id} value={c.id}>{c.path_label}</option>
-                ))}
-              </select>
-            </div>
+            {/* Problem 9.8 (Tier 9) — this field previously rendered
+                unconditionally regardless of school type, showing a
+                meaningless "Class" picker (always empty — `classes` is
+                only ever populated for secondary schools, see the boot
+                effect above) on a higher-ed school. Branches here instead:
+                secondary keeps the existing Class picker untouched;
+                higher-ed gets a real Programme → Level dependent picker,
+                optional (per the owner's "optional at creation" decision —
+                see this problem's Tier 9 writeup), wired to createStudent()'s
+                new optional placement params in handleSubmit(). */}
+            {isHigherEd ? (
+              <>
+                <div className="stu-field">
+                  <label className="stu-label" htmlFor="stu-add-programme">Programme</label>
+                  <select
+                    id="stu-add-programme"
+                    className="stu-select"
+                    value={form.programme_id}
+                    onChange={e => handleAddFormProgrammeChange(e.target.value)}
+                  >
+                    <option value="">— not yet placed —</option>
+                    {programmes.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                {form.programme_id && (
+                  <div className="stu-field">
+                    <label className="stu-label" htmlFor="stu-add-level">Level</label>
+                    <select
+                      id="stu-add-level"
+                      className="stu-select"
+                      value={form.programme_level_id}
+                      onChange={e => setField('programme_level_id', e.target.value)}
+                      disabled={formLevelsLoading || formLevels.length === 0}
+                    >
+                      <option value="">
+                        {formLevelsLoading ? 'Loading levels…' : formLevels.length === 0 ? 'No levels for this programme' : 'Choose a level'}
+                      </option>
+                      {formLevels.map(l => (
+                        <option key={l.id} value={l.id}>{l.level_label}</option>
+                      ))}
+                    </select>
+                    <p className="stu-field-hint">
+                      Optional — leave blank to add the student without placing them yet. Place them later from the Unplaced list or their Status tab.
+                    </p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="stu-field">
+                <label className="stu-label" htmlFor="stu-add-class">Class</label>
+                <select
+                  id="stu-add-class"
+                  className="stu-select"
+                  value={form.class_node_id}
+                  onChange={e => setField('class_node_id', e.target.value)}
+                >
+                  <option value="">— not yet assigned —</option>
+                  {classes.map(c => (
+                    <option key={c.id} value={c.id}>{c.path_label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="stu-field">
               <label className="stu-label" htmlFor="stu-add-gender">Gender</label>
               <select

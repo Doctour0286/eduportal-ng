@@ -17619,6 +17619,18 @@ body {
   color: var(--color-warning);
 }
 
+/* Problem 9.8 (Tier 9) — reuses the same warning token as --transferred:
+   both represent a state that needs an admin's attention (a transfer
+   pending action, or a student pending placement), not a neutral status
+   like active/inactive/alumni. Unlike --transferred, this one IS
+   clickable (see renderStatStrip()'s own separate handler for it), so it
+   deliberately does NOT get --static and keeps the default hover/focus
+   treatment above. */
+.stu-stat--unplaced {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
 /* Selected state for whichever status chip the list is currently drilled
    into — a visible ring rather than a color swap, so it still reads as
    "the same active/inactive/alumni chip" underneath. */
