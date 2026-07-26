@@ -859,17 +859,100 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     }
 
     // PRD Tier 9 / Problem 9.2 follow-up — real bug fix, confirmed via
-    // on-device screenshot: a staff member holding ONLY finance.analytics.view
-    // could see this tab's content, defeating that key's entire purpose.
-    // Single gate here (not duplicated inside each of the three render
-    // functions) since all three tabs share the same underlying data
-    // sensitivity and the same correct rule — see canViewFinanceData's own
-    // definition above for the full reasoning on which keys qualify.
-    if (!canViewFinanceData) {
+    // on-device screenshot, TWICE over:
+    // (1) a staff member holding ONLY finance.analytics.view could see the
+    //     full tab content (fixed below via canViewFinanceData's own gate);
+    // (2) fixing (1) naively then broke the opposite case — that same
+    //     analytics-only holder got the generic lock screen and never saw
+    //     the one card they ARE entitled to, because the lock check ran
+    //     before canViewAnalytics got a chance to render anything on its
+    //     own. Both must be true at once: an analytics-only holder sees
+    //     JUST the summary card (no tabs, no list, no search — those are
+    //     canViewFinanceData's surface, not theirs), and a genuinely
+    //     unpermitted holder (neither key) sees the lock message.
+    if (!canViewFinanceData && !canViewAnalytics) {
       return (
         <div className="fin-empty-state">
           <span className="fin-empty-icon"><Icon name="lock" size={40} /></span>
           <p className="fin-empty-msg">You don't have permission to view this section. Contact your admin if you think this is wrong.</p>
+        </div>
+      )
+    }
+
+    // Analytics-only holder (no canViewFinanceData): render the summary
+    // card standalone, bypassing renderBalances()'s own tab machinery
+    // entirely (search bar, student list, detail sheet) — none of that is
+    // this holder's to use. The four totals below are computed the same
+    // way renderBalances() computes them, over the same currentSession-
+    // scoped filteredBalances already fetched during boot; duplicating a
+    // four-line reduce() here is simpler and clearer than threading a
+    // "render mode" flag through renderBalances() itself.
+    if (!canViewFinanceData && canViewAnalytics) {
+      if (!currentSession) {
+        return (
+          <div className="fin-empty-state">
+            <span className="fin-empty-icon"><Icon name="calendar" size={40} /></span>
+            <p className="fin-empty-msg">No current session is set up. Set up an academic session to track fees.</p>
+          </div>
+        )
+      }
+      // Matches renderBalances()'s own early-return sequence exactly
+      // (balancesState, not bootState — bootState governs the outer
+      // session/roster boot; balancesState is loadBalances()'s own fetch
+      // state, which only starts once bootState reaches 'ready'). Copied
+      // rather than shared because this branch skips renderBalances()'s
+      // list/search/detail-sheet UI entirely — only the loading/error/empty
+      // triage above the list is relevant to an analytics-only holder.
+      if (balancesState === 'loading' || balancesState === 'booting') {
+        return (
+          <div className="fin-list-skel">
+            {[1,2,3,4].map(i => <div key={i} className="fin-row-skel skeleton" />)}
+          </div>
+        )
+      }
+      if (balancesState === 'error') {
+        return (
+          <div className="fin-error-state">
+            <span className="fin-error-icon"><Icon name="alert-triangle" size={32} style={{ color: 'var(--color-warning, #d97706)' }} /></span>
+            <p className="fin-error-msg">{balancesError}</p>
+            <button className="fin-retry-btn" onClick={loadBalances}>Retry</button>
+          </div>
+        )
+      }
+      if (balancesState === 'empty') {
+        return (
+          <div className="fin-empty-state">
+            <span className="fin-empty-icon"><Icon name="users" size={40} /></span>
+            <p className="fin-empty-msg">No active students found. Add students first.</p>
+          </div>
+        )
+      }
+      const totalBalanceOnly  = balances.reduce((s, b) => s + b.balance, 0)
+      const totalPaidOnly     = balances.reduce((s, b) => s + b.paid_total, 0)
+      const totalAssignedOnly = balances.reduce((s, b) => s + b.assigned_total, 0)
+      const outstandingOnly   = balances.filter(b => b.balance > 0).length
+      return (
+        <div className="fin-balance-summary">
+          <div className="fin-balance-stat">
+            <span className="fin-balance-stat-label">Total billed</span>
+            <span className="fin-balance-stat-value">{formatNaira(totalAssignedOnly)}</span>
+          </div>
+          <div className="fin-balance-stat">
+            <span className="fin-balance-stat-label">Collected</span>
+            <span className="fin-balance-stat-value fin-balance-stat-value--ok">{formatNaira(totalPaidOnly)}</span>
+          </div>
+          <div className="fin-balance-stat">
+            <span className="fin-balance-stat-label">Outstanding</span>
+            <span className={`fin-balance-stat-value${totalBalanceOnly > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
+              {formatNaira(totalBalanceOnly)}
+            </span>
+          </div>
+          <div className="fin-balance-stat">
+            <span className="fin-balance-stat-label">Owing</span>
+            <span className={`fin-balance-stat-value${outstandingOnly > 0 ? ' fin-balance-stat-value--warn' : ''}`}>
+              {outstandingOnly} student{outstandingOnly !== 1 ? 's' : ''}
+            </span>
+          </div>
         </div>
       )
     }
@@ -1923,4 +2006,3 @@ function formatDate(iso: string): string {
     return iso
   }
 }
-

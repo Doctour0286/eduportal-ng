@@ -181,7 +181,6 @@ export default function AdminDashboard({
   schoolType: string | null
 }) {
   const school = useSchoolStore((s) => s.school);
-  const session = useAuthStore((s) => s.session);
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -197,9 +196,14 @@ export default function AdminDashboard({
   // degrade-independently convention on this screen.
   const [termProgress, setTermProgress] = useState<TermProgress | null>(null);
 
-  // Derive greeting name from session user metadata
-  const staffName = (session?.user?.user_metadata?.full_name as string | undefined) ?? 'Admin';
-  const firstName = staffName.split(' ')[0];
+  // Real name, resolved once at login from staff.full_name (PRD Tier 9 /
+  // Problem 9.3) — never Supabase Auth's user_metadata.full_name, which is
+  // not guaranteed to be set for server-provisioned staff accounts. A
+  // genuinely-null name (real data gap, not the common case) falls back to
+  // the role-neutral "there", never the literal word "Admin" standing in
+  // for a name.
+  const displayName = useAuthStore((s) => s.displayName);
+  const firstName = displayName?.split(' ')[0] ?? 'there';
 
   const greeting = (() => {
     const h = new Date().getHours();

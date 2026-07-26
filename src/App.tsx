@@ -25,6 +25,7 @@ import { applyBrandTheme, type ThemeMode } from './services/themeService'
 import { loadThemePreference, saveThemePreference } from './services/settingsService'
 import { LoginPage } from './routes/LoginPage'
 import { PublicHomepage } from './routes/PublicHomepage'
+import { PlatformHomepage } from './routes/PlatformHomepage'
 import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
 import { Sidebar } from './components/Sidebar'
@@ -235,7 +236,7 @@ export default function App() {
     sheetTouchDeltaY.current = 0
   }
 
-  const { session, actorType, actorRecordId, schoolId: identitySchoolId, isAdminRole, isLoading: authLoading, isInitialized, initialize, can, canViewFinance: canViewFinanceStore } = useAuthStore()
+  const { session, actorType, actorRecordId, schoolId: identitySchoolId, displayName, email: authEmail, isAdminRole, isLoading: authLoading, isInitialized, initialize, can, canViewFinance: canViewFinanceStore } = useAuthStore()
 
   // Initialize auth once on mount
   useEffect(() => {
@@ -520,19 +521,7 @@ export default function App() {
   // ─── No subdomain ──────────────────────────────────────────────────────
 
   if (slugState === 'no-slug') {
-    return (
-      <div className="platform-home">
-        <div className="platform-home-inner">
-          <h1 className="platform-home-title">Eduportal NG</h1>
-          <p className="platform-home-desc">
-            School management platform for Nigerian schools.
-          </p>
-          <p className="platform-home-hint">
-            Access your school at <strong>yourschool.eduportalng.com</strong>
-          </p>
-        </div>
-      </div>
-    )
+    return <PlatformHomepage />
   }
 
   // ─── School not found ──────────────────────────────────────────────────
@@ -736,7 +725,7 @@ export default function App() {
           {roleLabel && (
             <div className="app-header-user-chip" aria-hidden="true">
               <span className="app-header-user-chip-avatar">
-                {(session?.user?.user_metadata?.full_name as string | undefined)?.[0]?.toUpperCase() ?? '•'}
+                {displayName?.[0]?.toUpperCase() ?? '•'}
               </span>
               <span className="app-header-user-chip-role">{roleLabel}</span>
             </div>
@@ -801,10 +790,18 @@ export default function App() {
             <div className="account-popover-header">
               <div className="account-popover-identity">
                 <div className="account-popover-name">
-                  {(session?.user?.user_metadata?.full_name as string | undefined) ?? session?.user?.email ?? '—'}
+                  {displayName ?? authEmail ?? session?.user?.email ?? '—'}
                 </div>
                 {roleLabel && (
                   <div className="account-popover-role">{roleLabel}</div>
+                )}
+                {/* Real staff.email (PRD Tier 9 / Problem 9.3), not auth
+                    metadata — only rendered when it differs from the name
+                    line above (i.e. displayName resolved to a real name, not
+                    already falling back to the email itself), so the email
+                    is never shown twice in a row for the same account. */}
+                {displayName && authEmail && (
+                  <div className="account-popover-email">{authEmail}</div>
                 )}
               </div>
               {/* Explicit, operable close control — §4.10 requires a visible control,

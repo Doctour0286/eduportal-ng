@@ -305,7 +305,6 @@ export default function TeacherDashboard({
   onNavigate: (tab: DashboardNavTarget) => void
 }) {
   const school = useSchoolStore((s) => s.school);
-  const session = useAuthStore((s) => s.session);
 
   const [stats, setStats] = useState<TeacherStats | null>(null);
   const [pendingScoreGroups, setPendingScoreGroups] = useState<PendingScoreGroup[]>([]);
@@ -359,10 +358,14 @@ export default function TeacherDashboard({
   const [scoresExpanded, setScoresExpanded] = useState(false);
   const [payslipExpanded, setPayslipExpanded] = useState(false);
 
-  // Derive greeting name from session user metadata — same pattern as
-  // AdminDashboard.tsx, defaulting to a role-appropriate fallback.
-  const staffName = (session?.user?.user_metadata?.full_name as string | undefined) ?? 'Teacher';
-  const firstName = staffName.split(' ')[0];
+  // Real name, resolved once at login from staff.full_name (PRD Tier 9 /
+  // Problem 9.3) — never Supabase Auth's user_metadata.full_name, which is
+  // not guaranteed to be set for server-provisioned staff accounts. A
+  // genuinely-null name (real data gap, not the common case) falls back to
+  // the role-neutral "there", never the literal word "Teacher" standing in
+  // for a name.
+  const displayName = useAuthStore((s) => s.displayName);
+  const firstName = displayName?.split(' ')[0] ?? 'there';
 
   const greeting = (() => {
     const h = new Date().getHours();

@@ -63,6 +63,24 @@ interface AuthState {
   actorRecordId: string | null   // FK to staff.id / guardians.id / students.id
   schoolId: string | null        // from app_identities — the school this session belongs to
   /**
+   * The signed-in staff member's real name/email, read directly from the
+   * `staff` table (`staff.full_name`/`staff.email`) — never from Supabase
+   * Auth's `user_metadata.full_name`, which is only populated if something
+   * explicitly wrote it at signup and is not guaranteed to be set for staff
+   * accounts provisioned server-side (PRD Tier 9 / Problem 9.3). Resolved
+   * once at login, alongside isAdminRole/permissionScopes, so every screen
+   * reads the same value instead of re-deriving it from auth metadata.
+   * null for non-staff actor types (guardian/student self-identity is
+   * already resolved separately by portalService.ts/GuardianPortal.tsx,
+   * which never had this bug — out of scope for this fix per the owner's
+   * 2026-07-23 staff-specific clarification) and for a staff member whose
+   * row is somehow missing full_name (should not happen given the column's
+   * NOT NULL constraint, but the resolver degrades to null rather than
+   * throwing, matching resolveAdminRole's own fail-safe convention).
+   */
+  displayName: string | null
+  email: string | null
+  /**
    * True only when the signed-in staff member holds at least one role where
    * roles.is_admin_role = true (resolved via staff_roles → roles).
    * Always false for non-staff actor types (guardian, student, platform_admin).
@@ -121,6 +139,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   actorType: null,
   actorRecordId: null,
   schoolId: null,
+  displayName: null,
+  email: null,
   isAdminRole: false,
   permissionScopes: new Map(),
   isLoading: true,
@@ -141,7 +161,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (session?.user) {
       await resolveIdentity(session, set)
     } else {
-      set({ session: null, user: null, actorType: null, isAdminRole: false, permissionScopes: new Map(), isLoading: false, isInitialized: true })
+      set({ session: null, user: null, actorType: null, displayName: null, email: null, isAdminRole: false, permissionScopes: new Map(), isLoading: false, isInitialized: true })
     }
 
     // Subscribe to future auth state changes
@@ -165,6 +185,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       actorType: null,
       actorRecordId: null,
       schoolId: null,
+      displayName: null,
+      email: null,
       isAdminRole: false,
       permissionScopes: new Map(),
       isLoading: false,
@@ -239,6 +261,8 @@ async function resolveIdentity(
       actorType: 'platform_admin',
       actorRecordId: platformAdmin.id,
       schoolId: null,
+      displayName: null, // platform_admin has no equivalent name lookup — out of this problem's scope
+      email: null,
       isAdminRole: false, // platform_admin is its own concept; isAdminRole is school-scoped
       permissionScopes: new Map(), // platform_admin bypasses the school-level permission catalog entirely
       isLoading: false,
@@ -257,15 +281,33 @@ async function resolveIdentity(
   const actorType = (identity?.actor_type as ActorType) ?? null
   const actorRecordId = identity?.actor_record_id ?? null
 
-  // For staff actors, resolve whether they hold an admin-role and their
-  // effective permission scopes. Non-staff actors (guardian, student) always
-  // have isAdminRole = false and an empty permission map — their access is
-  // governed by RLS and portal-specific read-only rules, not this catalog.
+  // For staff actors, resolve whether they hold an admin-role, their
+  // effective permission scopes, and their real name/email (PRD Tier 9 /
+  // Problem 9.3). Non-staff actors (guardian, student) always have
+  // isAdminRole = false, an empty permission map, and displayName/email
+  // left null here — their own self-identity is resolved separately by
+  // portalService.ts/GuardianPortal.tsx, which already reads the real
+  // students.full_name column correctly and was never part of this bug.
+  //
+  // All three staff-branch reads are independent of one another (none
+  // depends on another's result), so they run via a single Promise.all
+  // rather than three sequential awaits — Goal 1 of Problem 9.3, a genuine
+  // performance improvement alongside the name fetch, not just a name fetch
+  // riding along.
   let isAdminRole = false
   let permissionScopes: PermissionScopeMap = new Map()
+  let displayName: string | null = null
+  let email: string | null = null
   if (actorType === 'staff' && actorRecordId) {
-    isAdminRole = await resolveAdminRole(actorRecordId)
-    permissionScopes = await loadEffectivePermissionScopes(actorRecordId)
+    const [adminRole, scopes, profile] = await Promise.all([
+      resolveAdminRole(actorRecordId),
+      loadEffectivePermissionScopes(actorRecordId),
+      resolveStaffProfile(actorRecordId),
+    ])
+    isAdminRole = adminRole
+    permissionScopes = scopes
+    displayName = profile.full_name
+    email = profile.email
   }
 
   set({
@@ -274,9 +316,40 @@ async function resolveIdentity(
     actorType,
     actorRecordId,
     schoolId: identity?.school_id ?? null,
+    displayName,
+    email,
     isAdminRole,
     permissionScopes,
     isLoading: false,
     isInitialized: true,
   })
+}
+
+// ---------------------------------------------------------------------------
+// resolveStaffProfile
+// Reads the signed-in staff member's real full_name/email directly from the
+// `staff` table (PRD Tier 9 / Problem 9.3) — rides the same round trip
+// pattern as resolveAdminRole/loadEffectivePermissionScopes, keyed on the
+// same actorRecordId, run in parallel with them via Promise.all above.
+// staff.full_name/staff.email are [STD]-readable by any staff member (no
+// admin restriction, per the master plan's schema section) and full_name is
+// NOT NULL, so a missing row/column here reflects a genuine query failure,
+// not an expected data gap — degrades to null rather than throwing, so a
+// transient DB error cannot break login, matching resolveAdminRole's own
+// fail-safe convention.
+// ---------------------------------------------------------------------------
+async function resolveStaffProfile(
+  actorRecordId: string,
+): Promise<{ full_name: string | null; email: string | null }> {
+  const { data, error } = await supabase
+    .from('staff')
+    .select('full_name, email')
+    .eq('id', actorRecordId)
+    .maybeSingle()
+
+  if (error || !data) {
+    return { full_name: null, email: null }
+  }
+
+  return { full_name: data.full_name ?? null, email: data.email ?? null }
 }
