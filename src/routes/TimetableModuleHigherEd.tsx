@@ -59,8 +59,13 @@ import {
   rangesOverlap,
   dayName,
   formatTime,
+  loadPeriodsForTimetable,
+  loadLecturersForAssignment,
+  assignOfferingLecturer,
   type OfferingTimetableEntry,
   type CourseOffering,
+  type Period,
+  type LecturerOption,
 } from '../services/courseOfferingTimetableService'
 import { loadCurrentSession } from '../services/settingsService'
 import { Modal } from '../components/Modal'
@@ -121,6 +126,16 @@ export default function TimetableModuleHigherEd({
   const [formSaving, setFormSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
+
+  // ── Schedule-tab periods + lecturer assignment (TIER 9 / PROBLEM,
+  // 2026-07-30) — admin-only, loaded once alongside offerings/entries,
+  // not per form-open, since neither changes while the screen is open. ──
+  const [periods, setPeriods] = useState<Period[]>([])
+  const [selectedPeriodId, setSelectedPeriodId] = useState<string>('') // '' = custom time
+  const [lecturers, setLecturers] = useState<LecturerOption[]>([])
+  const [lecturerPickerId, setLecturerPickerId] = useState<string>('')
+  const [lecturerSaving, setLecturerSaving] = useState(false)
+  const [lecturerError, setLecturerError] = useState<string | null>(null)
 
   // ── Read-only detail popup (mirrors TimetableModuleSecondary's Session 24 pattern) ──
   const [detailEntry, setDetailEntry] = useState<OfferingTimetableEntry | null>(null)
@@ -201,6 +216,23 @@ export default function TimetableModuleHigherEd({
       return
     }
     setEntries(entriesRes.data)
+
+    // Admin-only, TIER 9 / PROBLEM (2026-07-30): the Schedule-tab periods
+    // and staff list power the add/edit-slot form's period picker and
+    // lecturer-assignment control respectively — neither is needed for a
+    // lecturer/student read-only view, so both are skipped outside the
+    // admin branch. Failures here are non-fatal to the screen (the form
+    // simply falls back to manual time entry / no lecturer picker) rather
+    // than blocking the whole timetable load over a convenience feature.
+    if (isAdmin) {
+      const [periodsRes, lecturersRes] = await Promise.all([
+        loadPeriodsForTimetable(schoolId),
+        loadLecturersForAssignment(schoolId),
+      ])
+      setPeriods(periodsRes.ok ? periodsRes.data : [])
+      setLecturers(lecturersRes.ok ? lecturersRes.data : [])
+    }
+
     setLoadState(entriesRes.data.length > 0 || offeringsResult.length > 0 ? 'ready' : 'empty')
   }, [schoolId, isAdmin, isStudentView, currentStudentId, currentStaffId])
 
@@ -283,23 +315,81 @@ export default function TimetableModuleHigherEd({
 
   // ─── Add/edit slot form ────────────────────────────────────────────────
 
+  // Finds a saved period whose start/end exactly match the given times, so
+  // opening an existing slot for edit correctly shows the picker already
+  // set to that period rather than always defaulting to "Custom" — the
+  // same "don't make the admin re-derive state the app already has" bar
+  // this form's other fields are held to. Compares on time-of-day only
+  // (both sides already 'HH:MM' or 'HH:MM:SS'; slice to 5 for a stable
+  // compare regardless of which shape either source uses).
+  function matchingPeriodId(startTime: string, endTime: string): string {
+    const match = periods.find(
+      p => p.start_time.slice(0, 5) === startTime.slice(0, 5) && p.end_time.slice(0, 5) === endTime.slice(0, 5)
+    )
+    return match?.id ?? ''
+  }
+
   function openAddSlot() {
     if (!editOfferingId) return
+    const defaultStart = '09:00'
+    const defaultEnd = '10:00'
     setFormEntry({
       course_offering_id: editOfferingId,
       day_of_week: 1,
-      start_time: '09:00',
-      end_time: '10:00',
+      start_time: defaultStart,
+      end_time: defaultEnd,
       venue: null,
     })
+    setSelectedPeriodId(matchingPeriodId(defaultStart, defaultEnd))
+    setLecturerPickerId('')
+    setLecturerError(null)
     setFormError(null)
     setFormOpen(true)
   }
 
   function openEditSlot(entry: OfferingTimetableEntry) {
     setFormEntry({ ...entry })
+    setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
+    setLecturerPickerId('')
+    setLecturerError(null)
     setFormError(null)
     setFormOpen(true)
+  }
+
+  // Picking a period pre-fills the same start/end time inputs the form
+  // already has — a convenience default, not a constraint. The admin can
+  // still edit either time field afterward (which silently reverts the
+  // picker to "Custom" on next open, via matchingPeriodId() above, rather
+  // than lying about which period is selected).
+  function handlePeriodPick(periodId: string) {
+    setSelectedPeriodId(periodId)
+    if (!periodId) return
+    const period = periods.find(p => p.id === periodId)
+    if (!period) return
+    setFormEntry(prev => prev ? {
+      ...prev,
+      start_time: period.start_time.slice(0, 5),
+      end_time: period.end_time.slice(0, 5),
+    } : prev)
+  }
+
+  // Lecturer assignment (TIER 9 / PROBLEM) — writes to course_offerings,
+  // not to the timetable entry itself (a lecturer belongs to the offering,
+  // every one of its time slots inherits it). Reloads afterward so the
+  // offering picker's "(name)" suffix and the read-only grid's Lecturer
+  // line both immediately reflect the change.
+  async function handleAssignLecturer() {
+    if (!editOffering || !lecturerPickerId) return
+    setLecturerSaving(true)
+    setLecturerError(null)
+    const res = await assignOfferingLecturer(editOffering, lecturerPickerId)
+    setLecturerSaving(false)
+    if (!res.ok) {
+      setLecturerError(res.error)
+      return
+    }
+    setLecturerPickerId('')
+    await load()
   }
 
   async function handleSaveSlot() {
@@ -521,6 +611,48 @@ export default function TimetableModuleHigherEd({
       <Modal open={formOpen} onClose={() => { setFormOpen(false); setFormEntry(null) }} title={formEntry?.id ? 'Edit time slot' : 'Add time slot'}>
         {formEntry && (
           <div className="tt-oe-form">
+            {/* Lecturer awareness (TIER 9 / PROBLEM, 2026-07-30) — the
+                lecturer belongs to the course offering itself, not to this
+                one time slot, so this is display + a fix-it-here shortcut,
+                not a per-slot field. When the offering already has a
+                lecturer, show it read-only (this form isn't where a
+                lecturer gets reassigned once one exists — that stays in
+                Curriculum/Offerings setup, matching this problem's own
+                scoping to the "never assigned yet" gap). When it doesn't,
+                offer the picker directly rather than sending the admin
+                back to a different screen mid-scheduling. */}
+            {editOffering && (
+              <div className="tt-oe-form-lecturer">
+                {editOffering.staff_id ? (
+                  <p className="tt-oe-form-lecturer-assigned">
+                    <strong>Lecturer:</strong> {editOffering.staff_name ?? 'Assigned'}
+                  </p>
+                ) : (
+                  <label className="tt-oe-form-label">
+                    Lecturer — not yet assigned
+                    <select
+                      className="tt-selector"
+                      value={lecturerPickerId}
+                      onChange={e => setLecturerPickerId(e.target.value)}
+                    >
+                      <option value="">Select a lecturer…</option>
+                      {lecturers.map(l => (
+                        <option key={l.id} value={l.id}>{l.full_name}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="tt-oe-form-assign-lecturer-btn"
+                      onClick={handleAssignLecturer}
+                      disabled={!lecturerPickerId || lecturerSaving}
+                    >
+                      {lecturerSaving ? 'Assigning…' : 'Assign lecturer'}
+                    </button>
+                    {lecturerError && <p className="tt-oe-form-error">{lecturerError}</p>}
+                  </label>
+                )}
+              </div>
+            )}
             <label className="tt-oe-form-label">
               Day
               <select
@@ -533,13 +665,38 @@ export default function TimetableModuleHigherEd({
                 ))}
               </select>
             </label>
+            {/* Schedule-tab period picker (TIER 9 / PROBLEM, 2026-07-30) —
+                a convenience default only: picking a period pre-fills the
+                two time inputs below, which stay fully editable afterward
+                for a one-off time that doesn't match any saved period. */}
+            {periods.length > 0 && (
+              <label className="tt-oe-form-label">
+                Period
+                <select
+                  className="tt-selector"
+                  value={selectedPeriodId}
+                  onChange={e => handlePeriodPick(e.target.value)}
+                >
+                  <option value="">Custom time</option>
+                  {periods.filter(p => !p.is_break).map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} ({formatTime(p.start_time)}–{formatTime(p.end_time)})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="tt-oe-form-label">
               Start time
               <input
                 type="time"
                 className="tt-selector"
                 value={(formEntry.start_time ?? '09:00').slice(0, 5)}
-                onChange={e => setFormEntry({ ...formEntry, start_time: e.target.value })}
+                onChange={e => {
+                  const start_time = e.target.value
+                  setFormEntry({ ...formEntry, start_time })
+                  setSelectedPeriodId(matchingPeriodId(start_time, formEntry.end_time ?? '10:00'))
+                }}
               />
             </label>
             <label className="tt-oe-form-label">
@@ -548,7 +705,11 @@ export default function TimetableModuleHigherEd({
                 type="time"
                 className="tt-selector"
                 value={(formEntry.end_time ?? '10:00').slice(0, 5)}
-                onChange={e => setFormEntry({ ...formEntry, end_time: e.target.value })}
+                onChange={e => {
+                  const end_time = e.target.value
+                  setFormEntry({ ...formEntry, end_time })
+                  setSelectedPeriodId(matchingPeriodId(formEntry.start_time ?? '09:00', end_time))
+                }}
               />
             </label>
             <label className="tt-oe-form-label">

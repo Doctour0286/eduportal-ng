@@ -1647,6 +1647,60 @@ export async function removeCurriculumEntry(curriculumEntryId: string): Promise<
   return { error: error?.message ?? null }
 }
 
+// Reverse lookup of loadCurriculum() above: given a course, find every
+// programme/level whose curriculum actually includes it, rather than
+// loadCurriculum()'s "given a level, find its courses" direction. Needed
+// for OfferingsTab's "Add offering" form (SettingsModule.tsx) — once a
+// course is picked with no programme/level chosen yet, the form uses this
+// to show a checkbox per programme/level actually teaching that course, so
+// an admin can create every needed offering (one row per programme/level,
+// same course_id, same staff_id/term/threshold) in a single save rather
+// than repeating the whole form once per programme/level and risking a
+// duplicate/forgotten offering for a course shared across several
+// programmes by the same lecturer.
+//
+// Deliberately a separate, new query rather than reshaping loadCurriculum()
+// itself — the two have opposite scoping directions (one row per level vs.
+// one row per course), and loadCurriculum()'s existing callers (CurriculumTab)
+// depend on its current per-level shape unchanged.
+//
+// termId scoping mirrors loadCurriculum()'s own convention exactly: when
+// termId is null (school doesn't use terms, or no term chosen yet), rows
+// with a null term_id are read, not every term's rows regardless of value —
+// same "term-less school's curriculum is simply not term-partitioned"
+// reasoning as loadCurriculum()'s header comment states.
+export interface CourseCurriculumProgrammeLevel {
+  programme_id: string
+  programme_level_id: string
+}
+
+export async function loadProgrammeLevelsTeachingCourse(
+  courseId: string,
+  termId: string | null,
+): Promise<{ data: CourseCurriculumProgrammeLevel[]; error: string | null }> {
+  let query = supabase
+    .from('programme_curriculum')
+    .select('programme_id, programme_level_id, term_id')
+    .eq('course_id', courseId)
+  query = termId ? query.eq('term_id', termId) : query.is('term_id', null)
+  const { data, error } = await query
+  if (error) return { data: [], error: error.message }
+  // De-duplicated by (programme_id, programme_level_id) — a course could in
+  // principle appear more than once for the same level (e.g. core in one
+  // term row and elective in another, if the school's data has that), and
+  // the checkbox list only needs to know "does this level teach it at all,"
+  // not how many curriculum rows say so.
+  const seen = new Set<string>()
+  const result: CourseCurriculumProgrammeLevel[] = []
+  for (const row of data ?? []) {
+    const key = `${row.programme_id}:${row.programme_level_id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push({ programme_id: row.programme_id, programme_level_id: row.programme_level_id })
+  }
+  return { data: result, error: null }
+}
+
 // ─── Roles & permissions ──────────────────────────────────────────────────────
 
 export async function loadPermissionsCatalog(): Promise<{ data: Permission[]; error: string | null }> {
@@ -2688,8 +2742,7 @@ export async function loadCourseOfferings(
   const { data, error } = await q
   if (error) return { data: [], error: error.message }
 
-  return {
-    data: (data ?? []).map((o: any) => ({
+  const mapped = (data ?? []).map((o: any) => ({
       id: o.id,
       course_id: o.course_id,
       course_code: o.courses?.code ?? '',
@@ -2701,7 +2754,18 @@ export async function loadCourseOfferings(
       programme_id: o.programme_id ?? null,
       programme_level_id: o.programme_level_id ?? null,
       attendance_eligibility_threshold_pct: o.attendance_eligibility_threshold_pct === null ? null : Number(o.attendance_eligibility_threshold_pct),
-    })),
+  }))
+  // Alphabetical by course code — same reasoning as
+  // loadCourseOfferingsForStaff() in courseAttendanceService.ts: joined
+  // foreign-table ordering isn't reliable via .order() here, sorted
+  // client-side after mapping instead. OfferingsTab's own Programme->Level
+  // grouping (SettingsModule.tsx) still applies on top of this — this just
+  // makes the rows within each level group alphabetical rather than
+  // insertion-ordered.
+  mapped.sort((a, b) => a.course_code.localeCompare(b.course_code))
+
+  return {
+    data: mapped,
     error: null,
   }
 }
@@ -2740,6 +2804,44 @@ export async function upsertCourseOffering(
   const { error } = await supabase
     .from('course_offerings')
     .insert(payload)
+  return { error: error?.message ?? null }
+}
+
+// Creates one offering per checked programme/level in a single request —
+// OfferingsTab's multi-select "Add offering" path (SettingsModule.tsx),
+// for a course taught to several programme/levels by the same lecturer
+// (the exact scenario a repeated single-offering form risks a duplicate or
+// a forgotten programme/level for). A genuine Postgres multi-row insert,
+// not a client-side loop calling upsertCourseOffering() once per level —
+// a loop could partially succeed (e.g. network drop after row 2 of 4),
+// silently leaving some programme/levels offered and others not, which is
+// exactly the kind of gap this feature exists to prevent in the first
+// place. Always a plain insert, never an update — this path is
+// specifically for creating new offerings; editing a single existing
+// offering still goes through upsertCourseOffering() above, unchanged.
+export async function createCourseOfferingsForProgrammeLevels(params: {
+  course_id: string
+  session_id: string
+  term_id?: string | null
+  staff_id?: string | null
+  attendance_eligibility_threshold_pct?: number | null
+  programmeLevels: CourseCurriculumProgrammeLevel[]
+}): Promise<{ error: string | null }> {
+  if (params.programmeLevels.length === 0) {
+    return { error: 'No programme/levels selected.' }
+  }
+  const rows = params.programmeLevels.map(pl => ({
+    course_id: params.course_id,
+    session_id: params.session_id,
+    term_id: params.term_id ?? null,
+    staff_id: params.staff_id ?? null,
+    programme_id: pl.programme_id,
+    programme_level_id: pl.programme_level_id,
+    attendance_eligibility_threshold_pct: params.attendance_eligibility_threshold_pct ?? null,
+  }))
+  const { error } = await supabase
+    .from('course_offerings')
+    .insert(rows)
   return { error: error?.message ?? null }
 }
 

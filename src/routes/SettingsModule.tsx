@@ -67,6 +67,8 @@ import {
   loadProgrammePromotionRules, upsertProgrammePromotionRule, deleteProgrammePromotionRule,
   runProgrammePromotion, recordManualPromotionDecision, type PromotionRunResultRow,
   loadCourseOfferings,      upsertCourseOffering, deleteCourseOffering,
+  loadProgrammeLevelsTeachingCourse, createCourseOfferingsForProgrammeLevels,
+  type CourseCurriculumProgrammeLevel,
   type SchoolSettings,
   type SchoolPublicConfig,
   type WelcomePost,
@@ -3035,6 +3037,23 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
   // changes, so a stale warning can never linger against a new choice.
   const [fOffCurriculumConfirm, setFOffCurriculumConfirm] = useState(false)
 
+  // Multi-programme/level checkbox list — a course is chosen with NO
+  // programme/level pre-selected (the admin left "Programme (optional)" on
+  // "No programme"), so the form shows every programme/level whose
+  // curriculum actually includes that course, each with its own checkbox.
+  // Purpose: a course shared across programmes/levels but taught by the
+  // same lecturer (e.g. a general Anatomy course both Nursing and
+  // Midwifery take) previously had to be offered once per programme/level
+  // via repeated trips through this form, with no visibility into which
+  // programme/levels even teach it — real risk of a duplicate or a
+  // forgotten offering for the same course. Only shown when fProgrammeId
+  // is empty; picking a specific Programme/Level the normal way (as
+  // before) bypasses this entirely and saves exactly one offering, single
+  // upsertCourseOffering() call, unchanged from existing behavior.
+  const [courseProgrammeLevels, setCourseProgrammeLevels] = useState<CourseCurriculumProgrammeLevel[]>([])
+  const [courseProgrammeLevelsLoading, setCourseProgrammeLevelsLoading] = useState(false)
+  const [checkedLevelKeys, setCheckedLevelKeys] = useState<Set<string>>(new Set())
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -3108,6 +3127,54 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
 
   useEffect(() => { loadFormCurriculum() }, [loadFormCurriculum])
 
+  // Fetches the list (item 2) whenever a course is picked, in either of two
+  // real cases: (a) creating a new offering with no programme pre-selected
+  // (the interactive checkbox path), or (b) editing ANY existing offering,
+  // regardless of whether it has a programme_id set — most real offerings
+  // do have one, and the read-only list still needs to fetch and render
+  // for those, not just the rare unassigned/shared ones. Deliberately
+  // keyed on editingOffering too (not just fCourseId/fProgrammeId) so
+  // switching between create/edit mode re-evaluates this correctly.
+  const loadCourseProgrammeLevels = useCallback(async () => {
+    if (!fCourseId || (fProgrammeId && !editingOffering)) {
+      setCourseProgrammeLevels([]); setCheckedLevelKeys(new Set()); return
+    }
+    setCourseProgrammeLevelsLoading(true)
+    const res = await loadProgrammeLevelsTeachingCourse(fCourseId, terms.length > 0 ? selectedTermId : null)
+    setCourseProgrammeLevels(res.error ? [] : res.data)
+    // Default: nothing pre-checked in CREATE mode — an admin must actively
+    // choose which programme/levels to offer this course to, matching this
+    // form's own existing "no silent default" convention (fShowAllCourses/
+    // fOffCurriculumConfirm both start false/unset for the same reason).
+    // In EDIT mode this is irrelevant (the list renders read-only off
+    // editingOffering.programme_level_id directly, never off this set) but
+    // cleared anyway for a consistent, predictable state either way.
+    setCheckedLevelKeys(new Set())
+    setCourseProgrammeLevelsLoading(false)
+  }, [fCourseId, fProgrammeId, editingOffering, selectedTermId, terms.length])
+
+  useEffect(() => { loadCourseProgrammeLevels() }, [loadCourseProgrammeLevels])
+
+  function toggleLevelKey(programmeId: string, levelId: string) {
+    const key = `${programmeId}:${levelId}`
+    setCheckedLevelKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  // Resolves a programme/level's display name for the checkbox list —
+  // small, already-loaded data (programmes/levelsByProgramme), no extra
+  // query, same reasoning openForm() already uses to resolve an existing
+  // offering's programme from its level id.
+  function levelDisplayName(pl: CourseCurriculumProgrammeLevel): string {
+    const programme = programmes.find(p => p.id === pl.programme_id)
+    const level = (levelsByProgramme[pl.programme_id] ?? []).find(l => l.id === pl.programme_level_id)
+    return `${programme?.name ?? 'Unknown programme'} — ${level?.level_label ?? 'Unknown level'}`
+  }
+
   const formLevels = fProgrammeId ? (levelsByProgramme[fProgrammeId] ?? []) : []
   // The actual list the course dropdown renders: curriculum-filtered by
   // default once a level is chosen, full catalogue if no level is chosen
@@ -3137,6 +3204,7 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
     setFError(null)
     setFShowAllCourses(false)
     setFOffCurriculumConfirm(false)
+    setCheckedLevelKeys(new Set())
     setShowForm(true)
   }
 
@@ -3151,6 +3219,31 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
         return
       }
     }
+
+    // Multi-programme/level batch path (item 2) — only reachable when
+    // creating a NEW offering (never editing one, editingOffering is null)
+    // with no single Programme chosen and at least one checkbox ticked.
+    // Editing an existing offering always goes through the single-offering
+    // path below unchanged, even if it happens to have no programme set —
+    // an edit is inherently one specific row, never a batch-create.
+    if (!editingOffering && !fProgrammeId && checkedLevelKeys.size > 0) {
+      const selected = courseProgrammeLevels.filter(pl => checkedLevelKeys.has(`${pl.programme_id}:${pl.programme_level_id}`))
+      setFSaving(true)
+      const res = await createCourseOfferingsForProgrammeLevels({
+        course_id: fCourseId,
+        session_id: selectedSessionId,
+        term_id: terms.length > 0 ? selectedTermId : null,
+        staff_id: fStaffId,
+        attendance_eligibility_threshold_pct: threshold,
+        programmeLevels: selected,
+      })
+      if (res.error) { setFError(res.error); setFSaving(false); return }
+      setShowForm(false)
+      setFSaving(false)
+      await loadOfferingsList()
+      return
+    }
+
     // SESSION 69 soft warning — non-blocking, matches
     // CourseRegistrationModule.tsx's checkCreditLoad()-then-confirm shape:
     // a course chosen while curriculum-filtered is on-curriculum by
@@ -3188,7 +3281,33 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
     if (!confirm(`Delete the offering "${label}"? This cannot be undone if course registrations or attendance already reference it.`)) return
     setDeletingId(offeringId)
     const res = await deleteCourseOffering(offeringId)
-    if (res.error) { alert(res.error); setDeletingId(null); return }
+    if (res.error) {
+      // Translate the two known real foreign-key blockers into plain
+      // language rather than surface Postgres's raw constraint-name
+      // message — deleteCourseOffering() itself stays a genuine hard
+      // delete with no cascade (the right default for something that may
+      // have real dependent data), this only changes what the admin sees
+      // when that protection actually fires. Matched on the FK constraint
+      // name itself (stable, not the free-text wording around it) so this
+      // doesn't silently stop matching if Postgres's message phrasing ever
+      // changes.
+      let message = res.error
+      if (res.error.includes('course_attendance_sessions_course_offering_id_fkey')) {
+        message =
+          `Can't delete "${label}" — attendance has already been recorded for this offering ` +
+          `(at least one attendance session exists for it). Deleting it would orphan or destroy ` +
+          `real attendance history. If this offering genuinely needs to go, the attendance ` +
+          `sessions/records for it need to be dealt with first — this isn't something to do from ` +
+          `this screen, since it's real historical data, not configuration.`
+      } else if (res.error.includes('course_offering_timetable_entries_course_offering_id_fkey') || res.error.includes('course_offering_timetable')) {
+        message =
+          `Can't delete "${label}" — it still has timetable slots assigned to it. ` +
+          `Remove its slots from the Timetable module first, then delete the offering.`
+      }
+      alert(message)
+      setDeletingId(null)
+      return
+    }
     setOfferings(prev => prev.filter(o => o.id !== offeringId))
     setDeletingId(null)
   }
@@ -3445,6 +3564,78 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
               </p>
             )}
 
+            {/* Multi-programme/level list (item 2) — two real modes here,
+                not one:
+                  - CREATE mode (editingOffering is null): interactive
+                    checkboxes, as before — checking several creates one
+                    offering per checked programme/level in a single save.
+                  - EDIT mode (editingOffering is set): READ-ONLY, for
+                    visibility/consistency only, per explicit owner
+                    direction — checking more boxes here does NOT create
+                    additional offerings; Edit always updates exactly the
+                    one row being edited, same as before this feature
+                    existed. Shown whenever a course is picked, regardless
+                    of whether this specific offering has a Programme set,
+                    so an admin editing one offering can see every
+                    programme/level that teaches this course and where the
+                    one they're editing sits among them — with the
+                    currently-saved programme/level (if any) shown checked
+                    and disabled, everything else shown unchecked and
+                    disabled. */}
+            {fCourseId && (!fProgrammeId || editingOffering) && (
+              <FieldRow label={editingOffering ? 'Programmes/levels teaching this course' : 'Offer to (programmes/levels teaching this course)'}>
+                {courseProgrammeLevelsLoading ? (
+                  <p className="set-hint-text">Loading…</p>
+                ) : courseProgrammeLevels.length === 0 ? (
+                  <p className="set-empty-hint">
+                    No programme/level currently has this course on its curriculum{terms.length > 0 ? ' for this semester' : ''}.
+                    {!editingOffering && ' Add it to a curriculum first (Curriculum tab), or pick a specific Programme/Level above to offer it directly.'}
+                  </p>
+                ) : (
+                  <div className="set-checkbox-list" role="group">
+                    {courseProgrammeLevels.map(pl => {
+                      const key = `${pl.programme_id}:${pl.programme_level_id}`
+                      // In edit mode, "checked" reflects this specific
+                      // offering's own saved programme_level_id — NOT the
+                      // checkedLevelKeys create-mode state, which is never
+                      // touched while editing (openForm() below never
+                      // populates it for an edit, so it stays empty).
+                      const isChecked = editingOffering
+                        ? editingOffering.programme_level_id === pl.programme_level_id
+                        : checkedLevelKeys.has(key)
+                      return (
+                        <label key={key} className="set-checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={!!editingOffering}
+                            onChange={() => { if (!editingOffering) toggleLevelKey(pl.programme_id, pl.programme_level_id) }}
+                          />
+                          <span>{levelDisplayName(pl)}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+                {!editingOffering && courseProgrammeLevels.length > 0 && (
+                  <p className="set-hint-text">
+                    {checkedLevelKeys.size === 0
+                      ? 'Check at least one programme/level, or pick a specific Programme above instead to offer to just one.'
+                      : `Will create ${checkedLevelKeys.size} offering${checkedLevelKeys.size === 1 ? '' : 's'} for this course, one per checked programme/level.`}
+                  </p>
+                )}
+                {editingOffering && courseProgrammeLevels.length > 0 && (
+                  <p className="set-hint-text">
+                    {editingOffering.programme_level_id && courseProgrammeLevels.some(pl => pl.programme_level_id === editingOffering.programme_level_id)
+                      ? 'Shown for reference — this offering is tied to the checked programme/level above. To offer this course to another programme/level as well, use "+ Add offering" separately rather than editing this one.'
+                      : editingOffering.programme_level_id
+                        ? "This offering's own programme/level isn't in the list above because that programme/level's curriculum doesn't currently include this course (likely saved via \"Show all courses instead\"). The list above shows only programme/levels whose curriculum does include it."
+                        : 'This offering has no specific programme/level (shared/unassigned) — none checked above. To restrict it to one programme/level, use the Programme/Level pickers above instead.'}
+                  </p>
+                )}
+              </FieldRow>
+            )}
+
             <FieldRow label="Lecturer (optional)">
               <select className="set-select" value={fStaffId ?? ''} onChange={e => setFStaffId(e.target.value || null)}>
                 <option value="">Unassigned</option>
@@ -3457,7 +3648,13 @@ function OfferingsTab({ schoolId }: { schoolId: string }) {
             {fError && <p className="set-form-error">{fError}</p>}
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowForm(false)}>Cancel</button>
-              <button className="set-save-btn" onClick={handleSave} disabled={fSaving}>{fSaving ? 'Saving…' : 'Save'}</button>
+              <button
+                className="set-save-btn"
+                onClick={handleSave}
+                disabled={fSaving || (!editingOffering && !fProgrammeId && !!fCourseId && courseProgrammeLevels.length > 0 && checkedLevelKeys.size === 0)}
+              >
+                {fSaving ? 'Saving…' : 'Save'}
+              </button>
             </div>
           </div>
         </div>

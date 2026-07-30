@@ -16596,6 +16596,48 @@ body {
   accent-color: var(--color-brand-600);
 }
 
+/* ── Offerings — multi-programme/level checkbox list ────────────────────────
+   OfferingsTab's "Add offering" form, item 2 — shown when a course is
+   picked with no single Programme chosen: one checkbox per programme/level
+   whose curriculum includes that course, so it can be offered to several
+   at once (same course, same lecturer) in one save. Mirrors
+   .set-scope-choice/.set-scope-option's exact shape/tokens directly above
+   rather than inventing a new checkbox visual language — same list/row/
+   checked-state structure, checkbox instead of radio being the only real
+   difference (multiple selection, not one-of-many). */
+
+.set-checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.set-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.set-checkbox-row:has(input:checked) {
+  border-color: var(--color-brand-600);
+  background-color: var(--color-brand-50);
+}
+
+.set-checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--color-brand-600);
+}
+
 /* ── Audit log ───────────────────────────────────────────────────────────── */
 
 .set-audit-filters {
@@ -19256,6 +19298,39 @@ body {
 }
 
 .tt-oe-form-save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Lecturer awareness section (TIER 9 / PROBLEM, 2026-07-30) — sits above
+   the day/time fields in the same .tt-oe-form; either a plain read-only
+   line (offering already has a lecturer) or a picker + assign button
+   (offering doesn't yet). */
+.tt-oe-form-lecturer {
+  padding-bottom: var(--space-2, 0.5rem);
+  border-bottom: 1px solid var(--color-border, #e5e7eb);
+}
+
+.tt-oe-form-lecturer-assigned {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text, #111827);
+}
+
+.tt-oe-form-assign-lecturer-btn {
+  align-self: flex-start;
+  margin-top: var(--space-1, 0.25rem);
+  padding: var(--space-1, 0.25rem) var(--space-3, 0.75rem);
+  border-radius: var(--radius-md, 0.5rem);
+  border: 1px solid var(--color-brand-600, #2563eb);
+  background: transparent;
+  color: var(--color-brand-600, #2563eb);
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.tt-oe-form-assign-lecturer-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }

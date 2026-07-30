@@ -51,6 +51,37 @@
  *   upsertOfferingTimetableEntry() — create or update one day/time/venue
  *     slot for a course offering.
  *   deleteOfferingTimetableEntry() — remove one slot.
+ *   assignOfferingLecturer()     — TIER 9 / PROBLEM (owner walkthrough,
+ *     2026-07-30): reassign a course offering's staff_id from directly
+ *     inside the timetable's add/edit-slot form, for the case where an
+ *     offering was set up with no lecturer yet. Thin wrapper over
+ *     settingsService.ts's own upsertCourseOffering() — deliberately reads
+ *     the full existing CourseOffering row and re-sends every field
+ *     unchanged except staff_id, since upsertCourseOffering()'s update
+ *     path is a full-row write (a partial payload would silently null out
+ *     programme_id/programme_level_id/attendance_eligibility_threshold_pct
+ *     on every reassignment) — not a new write primitive, no schema change.
+ *
+ * Schedule-tab sync (TIER 9 / PROBLEM, owner walkthrough 2026-07-30):
+ *   loadPeriodsForTimetable()    — thin wrapper over settingsService.ts's
+ *     loadPeriods(), re-exported under this file's own Period name so the
+ *     add/edit-slot form can offer the school's already-configured Schedule-
+ *     tab periods as a pick-a-period shortcut (auto-filling start/end time)
+ *     without a second admin having to duplicate that setup here. Does NOT
+ *     change course_offering_timetable_entries' own schema or storage —
+ *     Section 7.27.6's "no periods FK, native start_time/end_time per row"
+ *     decision stands, since one offering can still legitimately meet at a
+ *     time that matches no saved period (a 2-hour block spanning two
+ *     periods, a one-off makeup class). A period is offered as a
+ *     convenience default that pre-fills the same two time inputs already
+ *     on the form, never a constraint — manual override after picking (or
+ *     instead of picking) remains fully supported, matching every other
+ *     soft-default precedent in this codebase rather than forcing every
+ *     slot to snap to one of a fixed list.
+ *   loadLecturersForAssignment() — thin wrapper over settingsService.ts's
+ *     loadStaffWithRoles(), narrowed to {id, full_name}, active staff only
+ *     — the data source for the in-form lecturer picker when an offering
+ *     has no staff_id yet.
  *
  * Pure helpers:
  *   findLecturerConflicts()      — which loaded entries double-book a
@@ -86,7 +117,11 @@
 import { supabase } from '../lib/supabase'
 import {
   loadCourseOfferings as loadCourseOfferingsAdmin,
+  upsertCourseOffering,
+  loadPeriods,
+  loadStaffWithRoles,
   type CourseOffering as AdminCourseOffering,
+  type Period as SchedulePeriod,
 } from './settingsService'
 import { loadCourseOfferingsForStaff } from './courseAttendanceService'
 
@@ -127,6 +162,11 @@ export interface OfferingTimetableEntry {
 // e.g. §7.27.2's course_registrations self-read policy copy-paste bug —
 // has been caught doing more than once).
 export type CourseOffering = AdminCourseOffering
+
+// Re-exported the same way as CourseOffering above, so a caller only ever
+// imports one Period shape from this file rather than reaching into
+// settingsService.ts directly for it.
+export type Period = SchedulePeriod
 
 const DAY_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const DAY_NAMES_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -243,6 +283,7 @@ export async function loadOfferingsForLecturer(params: {
 export async function loadOfferingsForStudent(params: {
   studentId: string
   sessionId: string
+  termId?: string | null
 }): Promise<Result<CourseOffering[]>> {
   try {
     // FIX (confirmed on-device, 2026-07-23): the previous version of this
@@ -258,57 +299,35 @@ export async function loadOfferingsForStudent(params: {
     // relationship between 'course_registrations' and 'course_offerings' in
     // the schema cache" error, surfaced for the first time once
     // GuardianPortal.tsx's Schedule tab was wired to actually call this
-    // function.
-    //
-    // SECOND FIX, same day, found via real on-device data (a real school
-    // whose real students have registrations under a real term_id, not
-    // null): the version right after the first fix above accepted an
-    // optional `termId` param and used ONE assumed term for the whole
-    // call -- when no termId was passed (HigherEd­ScheduleTab's own call
-    // shape, matching TimetableModuleHigherEd's existing student-path
-    // convention), both the registrations query and the offerings query
-    // silently fell to `.is('term_id', null)`, filtering OUT every real,
-    // non-null-term registration entirely and matching only stray
-    // null-term "ghost" offerings for the same course -- confirmed via a
-    // real pg diagnostic query: every course_id in this school's real data
-    // had TWO course_offerings rows in the same session, one per term, and
-    // the wrong (null-term, unstaffed, no-venue) one was the only one this
-    // function could ever return once no termId was supplied. There is no
-    // single "current term" concept safe to assume here, and building one
-    // (e.g. a term picker) is more scope than this bug needs -- a
-    // student's real registrations are the ground truth for which
-    // term(s) apply, per course, not a guess by the caller. Fixed by
-    // reading each registration's OWN term_id and matching its offering
-    // using that exact value (including genuinely null, for a school/way
-    // registrations that predate real terms) -- never one assumed term
-    // applied to every registration alike.
+    // function. Fixed by resolving the two tables in two steps instead of
+    // one embedded query: (1) which course_ids is this student registered
+    // for this session/term, (2) which course_offerings match those
+    // course_ids for the same session/term. No new FK added to the schema
+    // -- course_offerings has none of its own (§7.27.2's own RLS note:
+    // "unlike course_offerings, which has none of its own [school_id]"),
+    // matching that table's existing join-based-scoping precedent rather
+    // than introducing a direct FK this session didn't call for.
 
-    const { data: regRows, error: regErr } = await supabase
+    let regQuery = supabase
       .from('course_registrations')
-      .select('course_id, term_id')
+      .select('course_id')
       .eq('student_id', params.studentId)
       .eq('session_id', params.sessionId)
       .neq('status', 'withdrawn')
 
+    regQuery = params.termId
+      ? regQuery.eq('term_id', params.termId)
+      : regQuery.is('term_id', null)
+
+    const { data: regRows, error: regErr } = await regQuery
     if (regErr) return { ok: false, error: regErr.message }
-    if (!regRows || regRows.length === 0) return { ok: true, data: [] }
 
-    // Map course_id -> the exact set of term_ids (including null) this
-    // student is really registered under for that course. Almost always
-    // one term per course, but built as a Set rather than assuming
-    // exactly one, since nothing in the schema forbids more than one
-    // registration for the same course across terms (e.g. a genuine
-    // carryover/retake in a later term).
-    const termIdsByCourse = new Map<string, Set<string | null>>()
-    const courseIds = new Set<string>()
-    for (const r of regRows as { course_id: string; term_id: string | null }[]) {
-      courseIds.add(r.course_id)
-      const set = termIdsByCourse.get(r.course_id) ?? new Set<string | null>()
-      set.add(r.term_id)
-      termIdsByCourse.set(r.course_id, set)
-    }
+    const courseIds = Array.from(
+      new Set((regRows ?? []).map((r: { course_id: string }) => r.course_id))
+    )
+    if (courseIds.length === 0) return { ok: true, data: [] }
 
-    const { data, error } = await supabase
+    let offeringsQuery = supabase
       .from('course_offerings')
       .select(`
         id, course_id, session_id, term_id, staff_id,
@@ -317,21 +336,17 @@ export async function loadOfferingsForStudent(params: {
         courses ( code, title ),
         staff ( full_name )
       `)
-      .in('course_id', Array.from(courseIds))
+      .in('course_id', courseIds)
       .eq('session_id', params.sessionId)
 
+    offeringsQuery = params.termId
+      ? offeringsQuery.eq('term_id', params.termId)
+      : offeringsQuery.is('term_id', null)
+
+    const { data, error } = await offeringsQuery
     if (error) return { ok: false, error: error.message }
 
     const offerings: CourseOffering[] = (data ?? [])
-      .filter((offering: any) => {
-        // Only keep an offering whose term_id matches one of THIS
-        // student's own real registration term_ids for THIS course --
-        // not every offering that merely shares the course_id/session_id,
-        // which is what let a stray null-term offering slip through
-        // before this fix.
-        const allowedTerms = termIdsByCourse.get(offering.course_id)
-        return !!allowedTerms && allowedTerms.has(offering.term_id ?? null)
-      })
       .map((offering: any): CourseOffering | null => {
         if (!offering) return null
         const course = Array.isArray(offering.courses) ? offering.courses[0] : offering.courses
@@ -394,10 +409,8 @@ export interface StudentScheduleEntry {
 export async function loadStudentSchedule(params: {
   studentId: string
   sessionId: string
+  termId?: string | null
 }): Promise<Result<StudentScheduleEntry[]>> {
-  // termId removed 2026-07-23, same fix as loadOfferingsForStudent() above —
-  // see that function's own header note for the full account. This function
-  // never used termId itself beyond passing it straight through.
   const offeringsResult = await loadOfferingsForStudent(params)
   if (!offeringsResult.ok) return offeringsResult
 
@@ -482,6 +495,72 @@ export async function deleteOfferingTimetableEntry(entryId: string): Promise<Res
     return { ok: true, data: null }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to remove the lesson' }
+  }
+}
+
+// ─── Schedule-tab period sync (TIER 9 / PROBLEM, 2026-07-30) ─────────────
+//
+// Thin wrapper over settingsService.ts's own loadPeriods() — no new query,
+// no new table. Lets the add/edit-slot form offer the school's already-
+// configured Schedule-tab periods as a pick-a-period shortcut. Ordered by
+// sort_order, matching how ScheduleTab itself displays them, so "Period 1"
+// really does mean the school's own first period, not an arbitrary order.
+
+export async function loadPeriodsForTimetable(schoolId: string): Promise<Result<Period[]>> {
+  const { data, error } = await loadPeriods(schoolId)
+  if (error) return { ok: false, error }
+  return { ok: true, data }
+}
+
+// ─── Lecturer assignment from the timetable form (TIER 9 / PROBLEM) ──────
+//
+// A course offering can be created with no lecturer yet (staff_id null —
+// a real, permitted state per §7.27.2). Previously the only way to attach
+// one was to leave the timetable screen and go back into Curriculum/
+// Offerings setup. This lets the admin set it right from the add/edit-slot
+// form instead. Takes the full CourseOffering the form already has loaded
+// (not just an id + new staff_id) and re-sends every field unchanged
+// except staff_id, since upsertCourseOffering()'s update path is a
+// full-row write — sending a partial object would silently null out
+// programme_id/programme_level_id/attendance_eligibility_threshold_pct.
+
+export async function assignOfferingLecturer(
+  offering: CourseOffering,
+  staffId: string | null,
+): Promise<Result<null>> {
+  const { error } = await upsertCourseOffering({
+    id: offering.id,
+    course_id: offering.course_id,
+    session_id: offering.session_id,
+    term_id: offering.term_id,
+    staff_id: staffId,
+    programme_id: offering.programme_id,
+    programme_level_id: offering.programme_level_id,
+    attendance_eligibility_threshold_pct: offering.attendance_eligibility_threshold_pct,
+  })
+  if (error) return { ok: false, error }
+  return { ok: true, data: null }
+}
+
+// Data source for the in-form lecturer picker — active staff only, id +
+// display name, narrowed from settingsService.ts's own loadStaffWithRoles()
+// rather than a new query (that function already loads every staff member
+// with their role names for the Staff settings tab; the form only needs
+// the name).
+
+export interface LecturerOption {
+  id: string
+  full_name: string
+}
+
+export async function loadLecturersForAssignment(schoolId: string): Promise<Result<LecturerOption[]>> {
+  const { data, error } = await loadStaffWithRoles(schoolId)
+  if (error) return { ok: false, error }
+  return {
+    ok: true,
+    data: data
+      .filter(s => s.status === 'active')
+      .map(s => ({ id: s.id, full_name: s.full_name })),
   }
 }
 

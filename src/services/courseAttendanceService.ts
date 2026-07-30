@@ -207,6 +207,15 @@ export async function loadCourseOfferingsForStaff(params: {
       }
     })
 
+    // Sorted alphabetically by course code — no reliable way to order by a
+    // joined foreign table's column via Supabase's .order() in this query
+    // shape, so sorted client-side after mapping instead. Both
+    // CourseAttendanceModule.tsx's offering picker and (via
+    // courseOfferingTimetableService.ts) TimetableModuleHigherEd.tsx's own
+    // course selector consume this function directly, so this one change
+    // fixes navigation ordering in both places at once.
+    offerings.sort((a, b) => a.course_code.localeCompare(b.course_code))
+
     return { ok: true, data: offerings }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load course offerings' }
