@@ -54,6 +54,7 @@ import {
   saveCourseAttendanceRecord,
   saveBatchCourseAttendance,
   flushCourseAttendanceQueue,
+  getPendingCourseAttendanceForSession,
   loadAttendanceEligibility,
   buildCourseAttendanceMap,
   getCourseAttendanceSummary,
@@ -231,10 +232,71 @@ export default function CourseAttendanceModule({ schoolId, isAdmin, schoolType }
     return () => { cancelled = true }
   }, [schoolId, actorRecordId, isAdmin, sessionId])
 
+  // ─── Load marks for the active session ────────────────────────────────────
+
+  const loadRecords = useCallback(async () => {
+    if (!activeSession) return
+    setRecordsState('loading')
+    const result = await loadCourseAttendanceRecords(activeSession.id)
+    if (!result.ok) {
+      setRecordsState('error')
+      setRecordsErr(result.error)
+      return
+    }
+
+    const base = buildCourseAttendanceMap(result.data)
+
+    // Merge in anything still sitting in the offline queue for this
+    // session — these haven't reached the server yet, so
+    // loadCourseAttendanceRecords() above can't see them, but they're real
+    // pending writes and must keep showing (with the queued/cloud badge)
+    // across a reload rather than vanishing.
+    const pending = await getPendingCourseAttendanceForSession(activeSession.id)
+    const merged: CourseAttendanceMap = new Map(base)
+    const stillQueued = new Set<string>()
+    pending.forEach((record, studentId) => {
+      merged.set(studentId, record)
+      stillQueued.add(studentId)
+    })
+
+    setAttMap(merged)
+    setQueuedIds(stillQueued)
+    setRecordsState('ready')
+  }, [activeSession])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!activeSession) return
+    loadRecords().then(() => {
+      if (cancelled) return
+    })
+    return () => { cancelled = true }
+  }, [activeSession, loadRecords])
+
   // ─── Online / offline detection — mirrors AttendanceModule.tsx exactly ──
 
   useEffect(() => {
-    const handleOnline = () => { setIsOnline(true); flushCourseAttendanceQueue() }
+    const handleOnline = () => {
+      setIsOnline(true)
+      // Fire-and-forget from the browser event's point of view, but the
+      // async work inside still runs to completion and updates state when
+      // it resolves — this is not discarded, just not blocking the handler.
+      void (async () => {
+        await flushCourseAttendanceQueue()
+        if (!activeSession) return
+        // Re-derive queuedIds/attMap from what's still actually pending
+        // rather than assuming the flush cleared everything: some items can
+        // fail (e.g. reconnected briefly, one row hit a real server error)
+        // and must keep showing the queued badge; anything that DID sync
+        // needs its badge cleared and, since it's no longer in the queue,
+        // will now come from the next loadRecords()/server read instead.
+        const stillPending = await getPendingCourseAttendanceForSession(activeSession.id)
+        setQueuedIds(new Set(stillPending.keys()))
+        // Refresh from the server so newly-synced rows (and their real
+        // server ids) replace the placeholder queued entries in attMap.
+        await loadRecords()
+      })()
+    }
     const handleOffline = () => setIsOnline(false)
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
@@ -242,7 +304,7 @@ export default function CourseAttendanceModule({ schoolId, isAdmin, schoolType }
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
     }
-  }, [])
+  }, [activeSession, loadRecords])
 
   // ─── Load register when an offering is selected ──────────────────────────
 
@@ -326,29 +388,6 @@ export default function CourseAttendanceModule({ schoolId, isAdmin, schoolType }
     openSession()
     return () => { cancelled = true }
   }, [selectedOffering, selectedDate, schoolId])
-
-  // ─── Load marks for the active session ────────────────────────────────────
-
-  useEffect(() => {
-    if (!activeSession) return
-    let cancelled = false
-
-    async function loadRecords() {
-      setRecordsState('loading')
-      const result = await loadCourseAttendanceRecords(activeSession!.id)
-      if (cancelled) return
-      if (!result.ok) {
-        setRecordsState('error')
-        setRecordsErr(result.error)
-        return
-      }
-      setAttMap(buildCourseAttendanceMap(result.data))
-      setRecordsState('ready')
-    }
-
-    loadRecords()
-    return () => { cancelled = true }
-  }, [activeSession])
 
   // ─── Optimistic status tap — mirrors handleStatusTap() exactly ──────────
 

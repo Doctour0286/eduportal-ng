@@ -1,6 +1,6 @@
 /**
  * AnnouncementsModule.tsx
- * Announcements + in-app notification bell for Eduportal NG.
+ * Announcements + in-app notification bell for EduSkola.
  *
  * Two sub-views accessed via a top tab bar:
  *   • Announcements — list with audience filter; compose sheet; detail

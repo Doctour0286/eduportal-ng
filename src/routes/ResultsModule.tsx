@@ -77,6 +77,7 @@ import {
   approveScores,
   unapproveScores,
   flushScoresQueue,
+  getPendingScoresForScope,
   buildScoreMap,
   computeWeightedTotal,
   getGradeLabel,
@@ -196,18 +197,9 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const [approving,   setApproving]   = useState(false)
   const [approveErr,  setApproveErr]  = useState('')
 
-  // ─── Online / offline detection ────────────────────────────────────────────
-
-  useEffect(() => {
-    const handleOnline  = () => { setIsOnline(true);  flushScoresQueue() }
-    const handleOffline = () => setIsOnline(false)
-    window.addEventListener('online',  handleOnline)
-    window.addEventListener('offline', handleOffline)
-    return () => {
-      window.removeEventListener('online',  handleOnline)
-      window.removeEventListener('offline', handleOffline)
-    }
-  }, [])
+  // Online/offline detection effect is declared further below, after
+  // loadGrid() exists — it needs to call loadGrid() on reconnect, see
+  // "Online / offline detection" near the offline-queue flush.
 
   // ─── Boot: session + assignments + components + grade scale ───────────────
 
@@ -279,14 +271,71 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
     if (!studentsRes.ok) { setGridError(studentsRes.error); setGridState('error'); return }
     if (!scoresRes.ok)   { setGridError(scoresRes.error);   setGridState('error'); return }
 
+    const base = buildScoreMap(scoresRes.data)
+
+    // Merge in anything still sitting in the offline queue for this
+    // subject/session/term scope — these haven't reached the server yet, so
+    // loadScores() above can't see them, but they're real pending writes and
+    // must keep showing (with the queued/cloud badge) across a reload rather
+    // than vanishing.
+    const pending = await getPendingScoresForScope({
+      subjectId: selectedAssign.subject_id,
+      sessionId: session.id,
+      termId:    selectedTerm?.id ?? null,
+    })
+    const merged: ScoreMap = new Map(base)
+    const stillQueued = new Set<string>()
+    pending.forEach((score, key) => {
+      merged.set(key, score)
+      stillQueued.add(key)
+    })
+
     setStudents(studentsRes.data)
-    setScoreMap(buildScoreMap(scoresRes.data))
+    setScoreMap(merged)
+    setQueuedKeys(stillQueued)
     setGridState(studentsRes.data.length === 0 ? 'empty' : 'ready')
   }, [selectedAssign, session, selectedTerm])
 
   useEffect(() => {
     if (selectedAssign && session) loadGrid()
   }, [loadGrid])
+
+  // ─── Online / offline detection ────────────────────────────────────────────
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true)
+      // Fire-and-forget from the browser event's point of view, but the
+      // async work inside still runs to completion and updates state when
+      // it resolves — this is not discarded, just not blocking the handler.
+      void (async () => {
+        await flushScoresQueue()
+        if (!selectedAssign || !session) return
+        // Re-derive queuedKeys/scoreMap from what's still actually pending
+        // rather than assuming the flush cleared everything: some items can
+        // fail (e.g. reconnected briefly, one row hit a real server error)
+        // and must keep showing the queued badge; anything that DID sync
+        // needs its badge cleared and, since it's no longer in the queue,
+        // will now come from the next loadGrid()/server read instead.
+        const stillPending = await getPendingScoresForScope({
+          subjectId: selectedAssign.subject_id,
+          sessionId: session.id,
+          termId:    selectedTerm?.id ?? null,
+        })
+        setQueuedKeys(new Set(stillPending.keys()))
+        // Refresh from the server so newly-synced rows (and their real
+        // server ids) replace the placeholder queued entries in scoreMap.
+        await loadGrid()
+      })()
+    }
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online',  handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online',  handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [selectedAssign, session, selectedTerm, loadGrid])
 
   // ─── Score cell save (optimistic) ─────────────────────────────────────────
 

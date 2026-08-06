@@ -23,11 +23,43 @@
 // Data sources, each reused from its owning service, never re-derived:
 //   - Their assigned classes:      hrService.ts's loadStaffTeachingAssignments()
 //   - Their pending score submissions: scores where entered_by = self (§7.14)
-//   - Today's + full-week timetable: timetableService.ts's loadTimetableData(),
-//     getCurrentPeriod(), dayName() — reused, not re-derived
+//   - Today's + full-week timetable (secondary): timetableService.ts's
+//     loadTimetableData(), getCurrentPeriod(), dayName() — reused, not re-derived
+//   - Today's + full-week schedule (higher-ed): courseOfferingTimetableService.ts's
+//     loadOfferingsForLecturer(), loadOfferingTimetable(), getCurrentOfferingEntry(),
+//     dayName() — PRD Tier 9 / Problem 9.4 addition, same reuse discipline
+//   - Average attendance (secondary): attendanceService.ts's
+//     loadTeacherAverageAttendance() — PRD Tier 9 / Problem 9.4 addition
+//   - Average attendance (higher-ed): courseAttendanceService.ts's
+//     loadLecturerAverageAttendance() — PRD Tier 9 / Problem 9.4 addition
 //   - School announcements:        announcementsService.ts's loadAnnouncements()
 //   - Payslip visibility + own payslips: hrService.ts's Session 17 additions
 //     (loadPayrollVisibilitySettings, loadMyPayslips, setMyPayslipCardHidden)
+//
+// PRD Tier 9 / Problem 9.4 (owner walkthrough, 2026-07-23): this file
+// previously had zero higher-education awareness at all — no schoolType
+// prop, no branch, no import from courseOfferingTimetableService.ts — even
+// though a higher-ed lecturer's real schedule lives in
+// course_offering_timetable_entries, a completely separate table/service
+// this dashboard had never been wired to. That gap is also the root cause
+// Problem 9.5 traced TimetableModuleHigherEd.tsx's own over-restriction
+// back to: because this dashboard had no working schedule card for a
+// lecturer, that module was instead scoped down to just the lecturer's own
+// offerings as a workaround. Both problems share one fix, built together:
+// this file gains a schoolType prop (threaded from App.tsx's existing
+// in-scope schoolType, the same single-prop pattern already used for
+// ResultsModule/CourseAttendanceModule/SettingsModule/AdminDashboard, per
+// SESSION 66) and branches internally — secondary keeps its existing
+// schedule/timetable cards exactly as they were; higher-ed gets its own
+// "My Schedule Today"/"My Timetable View" pair sourced from
+// course_offering_timetable_entries, mirroring the secondary cards' visual
+// language with a different data source underneath. Both branches also
+// gain a new "Average Attendance" card (overall % + expandable per-class/
+// per-course breakdown, whole current session/term) and a visibly-present,
+// clearly-labeled, non-functional "Performance" coming-soon card — reserve
+// the slot, don't silently omit it, matching this project's own
+// established convention for tracked-forward gaps (e.g. the Fees/HR
+// modules' own notes).
 //
 // No browser-only APIs. Zustand only for cross-cutting state (school),
 // per §5 — matches AdminDashboard.tsx's own useSchoolStore usage exactly.
@@ -47,6 +79,14 @@ import {
   type WeekDay,
 } from '../services/timetableService';
 import {
+  loadOfferingsForLecturer,
+  loadOfferingTimetable,
+  getCurrentOfferingEntry,
+  dayName as dayNameOffering,
+  formatTime as formatOfferingTime,
+  type OfferingTimetableEntry,
+} from '../services/courseOfferingTimetableService';
+import {
   loadStaffTeachingAssignments,
   loadPayrollVisibilitySettings,
   loadMyPayslips,
@@ -54,9 +94,26 @@ import {
   type TeachingAssignment,
   type Payslip,
 } from '../services/hrService';
+import {
+  loadTeacherAverageAttendance,
+  type TeacherAverageAttendance,
+} from '../services/attendanceService';
+import {
+  loadLecturerAverageAttendance,
+  type LecturerAverageAttendance,
+} from '../services/courseAttendanceService';
 import { loadAnnouncements, type Announcement as ServiceAnnouncement } from '../services/announcementsService';
 import { loadTermProgress, type TermProgress } from '../services/portalService';
 import { TermProgressCard } from '../components/TermProgressCard';
+
+// Same narrow, amended school_type branch precedent as App.tsx's own
+// isHigherEdSchool() (§3.16 — school_type is the one permitted branch
+// point) — duplicated locally rather than imported to avoid a circular
+// dependency back into App.tsx, matching this file's own existing
+// DashboardNavTarget precedent below for the identical reason.
+function isHigherEdSchool(schoolType: string | null | undefined): boolean {
+  return !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType);
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -294,6 +351,7 @@ type DashboardNavTarget = 'timetable' | 'attendance' | 'results' | 'announcement
 
 export default function TeacherDashboard({
   staffId,
+  schoolType,
   onNavigate,
 }: {
   // Resolved once in App.tsx via app_identities and threaded down as
@@ -302,9 +360,19 @@ export default function TeacherDashboard({
   // every query in this component is staff-scoped; there is nothing useful
   // to render without it.
   staffId: string
+  // PRD Tier 9 / Problem 9.4 (2026-07-23) — threaded from App.tsx's existing
+  // in-scope school.school_type, the same single-prop pattern already used
+  // for ResultsModule/CourseAttendanceModule/SettingsModule/AdminDashboard
+  // (SESSION 66). Optional/nullable rather than required, matching every
+  // other consumer of this same prop elsewhere in the app — a still-loading
+  // school record is a real, momentary state, not an error, and this
+  // component already tolerates !school by not firing its data-load effect
+  // at all (see the existing `if (!school || !staffId) return` guard below).
+  schoolType: string | null
   onNavigate: (tab: DashboardNavTarget) => void
 }) {
   const school = useSchoolStore((s) => s.school);
+  const isHigherEd = isHigherEdSchool(schoolType);
 
   const [stats, setStats] = useState<TeacherStats | null>(null);
   const [pendingScoreGroups, setPendingScoreGroups] = useState<PendingScoreGroup[]>([]);
@@ -313,6 +381,24 @@ export default function TeacherDashboard({
   const [periods, setPeriods] = useState<Period[]>([]);
   const [weekDays, setWeekDays] = useState<WeekDay[]>([]);
   const [announcements, setAnnouncements] = useState<DashAnnouncement[]>([]);
+
+  // Higher-ed schedule (PRD Tier 9 / Problem 9.4) — mirrors weekEntries/
+  // periods/weekDays above exactly in spirit ("My Schedule Today"/"My
+  // Timetable View" both read from one fetch), just against
+  // course_offering_timetable_entries instead of timetable_entries.
+  // offeringCount stands in for "assignment count" the same way
+  // assignments.length does for the secondary card's summary chip.
+  const [offeringEntries, setOfferingEntries] = useState<OfferingTimetableEntry[]>([]);
+  const [offeringCount, setOfferingCount] = useState(0);
+
+  // Average attendance (PRD Tier 9 / Problem 9.4) — exactly one of these two
+  // is populated depending on schoolType; kept as two separate, differently-
+  // shaped states rather than one unioned type, since TeacherAverageAttendance
+  // (per-class) and LecturerAverageAttendance (per-course) are genuinely
+  // different shapes, not a rename of each other (see each service
+  // function's own header comment).
+  const [teacherAttendance, setTeacherAttendance] = useState<TeacherAverageAttendance | null>(null);
+  const [lecturerAttendance, setLecturerAttendance] = useState<LecturerAverageAttendance | null>(null);
 
   // Payslip visibility (Session 17) — school switch + own preference, loaded
   // together since the card can't decide what to render without both.
@@ -357,6 +443,10 @@ export default function TeacherDashboard({
   const [timetableExpanded, setTimetableExpanded] = useState(false);
   const [scoresExpanded, setScoresExpanded] = useState(false);
   const [payslipExpanded, setPayslipExpanded] = useState(false);
+  // PRD Tier 9 / Problem 9.4 — both closed by default, same convention as
+  // every collapsible card here except the auto-opening schedule card above.
+  const [attendanceExpanded, setAttendanceExpanded] = useState(false);
+  const [performanceExpanded, setPerformanceExpanded] = useState(false);
 
   // Real name, resolved once at login from staff.full_name (PRD Tier 9 /
   // Problem 9.3) — never Supabase Auth's user_metadata.full_name, which is
@@ -381,108 +471,16 @@ export default function TeacherDashboard({
     loadPayslipVisibility();
     loadTermProgress(school.id).then(setTermProgress).catch(() => setTermProgress(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [school?.id, staffId]);
+  }, [school?.id, staffId, isHigherEd]);
 
   async function loadDashboardData() {
     setDataLoading(true);
     setError(null);
     try {
-      // 1. This teacher's teaching assignments (all sessions — the service
-      //    function's own documented scope) — filtered to the current
-      //    session for the dashboard's "assigned classes" stat, per SESSION
-      //    14's own instruction ("their assigned classes"), not the full
-      //    career history a future teacher-summary screen would want.
-      const [assignmentsRes, currentSessionRes] = await Promise.all([
-        loadStaffTeachingAssignments(staffId),
-        loadCurrentSession(),
-      ]);
-
-      if (!assignmentsRes.ok) {
-        setError(assignmentsRes.error);
-        setDataLoading(false);
-        return;
-      }
-
-      const currentSessionId = currentSessionRes.ok ? currentSessionRes.sessionId ?? null : null;
-      const currentAssignments = currentSessionId
-        ? assignmentsRes.data.filter((a) => a.session_id === currentSessionId)
-        : assignmentsRes.data;
-
-      setAssignments(currentAssignments);
-
-      const classCount = new Set(currentAssignments.map((a) => a.class_node_id)).size;
-      const subjectCount = new Set(currentAssignments.map((a) => a.subject_id)).size;
-
-      // 2. Pending score submissions — scores this teacher entered that
-      //    haven't been approved yet (§7.14: approved_at is null = draft,
-      //    invisible to guardians/students until approved), grouped by
-      //    subject+class so the expanded card can show a real breakdown,
-      //    not just a bare count. No existing service export scopes this to
-      //    one teacher, so queried directly — same direct-supabase pattern
-      //    AdminDashboard.tsx itself uses for its own school-wide version
-      //    of this stat.
-      const { data: pendingRows, error: scoresErr } = await supabase
-        .from('scores')
-        .select('id, subject_id, subjects ( name ), student_id, students ( class_node_id, class_nodes ( name ) )')
-        .eq('entered_by', staffId)
-        .is('approved_at', null);
-
-      if (scoresErr) throw scoresErr;
-
-      const groupMap = new Map<string, PendingScoreGroup>();
-      for (const r of (pendingRows ?? []) as any[]) {
-        const subjectId = r.subject_id as string;
-        const classNodeId = r.students?.class_node_id as string | undefined;
-        if (!classNodeId) continue;
-        const key = `${subjectId}|${classNodeId}`;
-        const existing = groupMap.get(key);
-        if (existing) {
-          existing.count += 1;
-        } else {
-          groupMap.set(key, {
-            subject_id: subjectId,
-            subject_name: r.subjects?.name ?? '—',
-            class_node_id: classNodeId,
-            class_name: r.students?.class_nodes?.name ?? '—',
-            count: 1,
-          });
-        }
-      }
-      const groups = [...groupMap.values()].sort((a, b) => b.count - a.count);
-      setPendingScoreGroups(groups);
-
-      setStats({
-        classCount,
-        subjectCount,
-        pendingScoreCount: (pendingRows ?? []).length,
-      });
-
-      // 3. Full-week timetable entries for this teacher — reuses
-      //    loadTimetableData() + getCurrentPeriod() from timetableService.ts
-      //    exactly as they exist; does not re-derive "what period is it now"
-      //    independently (SESSION 14's own instruction, and the same
-      //    function Problem 6.4's live-period widget is required to reuse
-      //    per its own dependency note). Loaded once for the whole week —
-      //    "My Timetable" (all days) and "My Schedule Today" (today's subset)
-      //    both read from this same fetch rather than two separate queries.
-      if (currentSessionId) {
-        const timetableRes = await loadTimetableData(currentSessionId);
-        if (timetableRes.ok && timetableRes.data) {
-          setPeriods(timetableRes.data.periods);
-          setWeekDays(timetableRes.data.weekDays);
-          setWeekEntries(timetableRes.data.entries.filter((e) => e.staff_id === staffId));
-
-          const { periodId } = getCurrentPeriod(timetableRes.data.periods, timetableRes.data.weekDays);
-          const isTeachingRightNow =
-            periodId !== null &&
-            timetableRes.data.entries.some(
-              (e) => e.staff_id === staffId && e.period_id === periodId
-            );
-          if (isTeachingRightNow && !scheduleAutoOpenedRef.current) {
-            setScheduleExpanded(true);
-            scheduleAutoOpenedRef.current = true;
-          }
-        }
+      if (isHigherEd) {
+        await loadHigherEdDashboardData();
+      } else {
+        await loadSecondaryDashboardData();
       }
     } catch (err) {
       console.error('Teacher dashboard data error:', err);
@@ -490,6 +488,190 @@ export default function TeacherDashboard({
     } finally {
       setDataLoading(false);
     }
+  }
+
+  // ── Secondary-school branch — byte-for-byte the same logic this file
+  // already had before Problem 9.4, just extracted into its own function so
+  // loadDashboardData() can dispatch on schoolType without duplicating the
+  // higher-ed branch's very different query shape inline. ──────────────────
+  async function loadSecondaryDashboardData() {
+    // 1. This teacher's teaching assignments (all sessions — the service
+    //    function's own documented scope) — filtered to the current
+    //    session for the dashboard's "assigned classes" stat, per SESSION
+    //    14's own instruction ("their assigned classes"), not the full
+    //    career history a future teacher-summary screen would want.
+    const [assignmentsRes, currentSessionRes] = await Promise.all([
+      loadStaffTeachingAssignments(staffId),
+      loadCurrentSession(),
+    ]);
+
+    if (!assignmentsRes.ok) {
+      setError(assignmentsRes.error);
+      return;
+    }
+
+    const currentSessionId = currentSessionRes.ok ? currentSessionRes.sessionId ?? null : null;
+    const currentAssignments = currentSessionId
+      ? assignmentsRes.data.filter((a) => a.session_id === currentSessionId)
+      : assignmentsRes.data;
+
+    setAssignments(currentAssignments);
+
+    const classCount = new Set(currentAssignments.map((a) => a.class_node_id)).size;
+    const subjectCount = new Set(currentAssignments.map((a) => a.subject_id)).size;
+
+    // 2. Pending score submissions — scores this teacher entered that
+    //    haven't been approved yet (§7.14: approved_at is null = draft,
+    //    invisible to guardians/students until approved), grouped by
+    //    subject+class so the expanded card can show a real breakdown,
+    //    not just a bare count. No existing service export scopes this to
+    //    one teacher, so queried directly — same direct-supabase pattern
+    //    AdminDashboard.tsx itself uses for its own school-wide version
+    //    of this stat.
+    const { data: pendingRows, error: scoresErr } = await supabase
+      .from('scores')
+      .select('id, subject_id, subjects ( name ), student_id, students ( class_node_id, class_nodes ( name ) )')
+      .eq('entered_by', staffId)
+      .is('approved_at', null);
+
+    if (scoresErr) throw scoresErr;
+
+    const groupMap = new Map<string, PendingScoreGroup>();
+    for (const r of (pendingRows ?? []) as any[]) {
+      const subjectId = r.subject_id as string;
+      const classNodeId = r.students?.class_node_id as string | undefined;
+      if (!classNodeId) continue;
+      const key = `${subjectId}|${classNodeId}`;
+      const existing = groupMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        groupMap.set(key, {
+          subject_id: subjectId,
+          subject_name: r.subjects?.name ?? '—',
+          class_node_id: classNodeId,
+          class_name: r.students?.class_nodes?.name ?? '—',
+          count: 1,
+        });
+      }
+    }
+    const groups = [...groupMap.values()].sort((a, b) => b.count - a.count);
+    setPendingScoreGroups(groups);
+
+    setStats({
+      classCount,
+      subjectCount,
+      pendingScoreCount: (pendingRows ?? []).length,
+    });
+
+    // 3. Full-week timetable entries for this teacher — reuses
+    //    loadTimetableData() + getCurrentPeriod() from timetableService.ts
+    //    exactly as they exist; does not re-derive "what period is it now"
+    //    independently (SESSION 14's own instruction, and the same
+    //    function Problem 6.4's live-period widget is required to reuse
+    //    per its own dependency note). Loaded once for the whole week —
+    //    "My Timetable" (all days) and "My Schedule Today" (today's subset)
+    //    both read from this same fetch rather than two separate queries.
+    if (currentSessionId) {
+      const timetableRes = await loadTimetableData(currentSessionId);
+      if (timetableRes.ok && timetableRes.data) {
+        setPeriods(timetableRes.data.periods);
+        setWeekDays(timetableRes.data.weekDays);
+        setWeekEntries(timetableRes.data.entries.filter((e) => e.staff_id === staffId));
+
+        const { periodId } = getCurrentPeriod(timetableRes.data.periods, timetableRes.data.weekDays);
+        const isTeachingRightNow =
+          periodId !== null &&
+          timetableRes.data.entries.some(
+            (e) => e.staff_id === staffId && e.period_id === periodId
+          );
+        if (isTeachingRightNow && !scheduleAutoOpenedRef.current) {
+          setScheduleExpanded(true);
+          scheduleAutoOpenedRef.current = true;
+        }
+      }
+    }
+
+    // 4. Average attendance (PRD Tier 9 / Problem 9.4) — scoped to this
+    //    teacher's own currently-assigned classes only (classCount's own
+    //    distinct class_node_id set above), never a school-wide query — the
+    //    same class of gap Problem 9.1/9.2 exists to close on the Finance
+    //    side, deliberately not reintroduced here. school?.id is guaranteed
+    //    non-null inside this function (the calling useEffect's own !school
+    //    guard), the `!` is safe.
+    const classNodeIds = Array.from(new Set(currentAssignments.map((a) => a.class_node_id)));
+    const classNames = new Map(currentAssignments.map((a) => [a.class_node_id, a.class_name]));
+    if (classNodeIds.length > 0) {
+      const attendanceRes = await loadTeacherAverageAttendance({
+        schoolId: school!.id,
+        classNodeIds,
+        classNames,
+      });
+      if (attendanceRes.ok) setTeacherAttendance(attendanceRes.data);
+    } else {
+      setTeacherAttendance({ overallPercent: null, totalMarks: 0, presentCount: 0, perClass: [] });
+    }
+  }
+
+  // ── Higher-ed branch (PRD Tier 9 / Problem 9.4, new this session) ──────
+  // Mirrors the secondary branch's own shape (load offerings/entries once,
+  // "My Schedule Today" + "My Timetable View" both read from that one
+  // fetch, auto-expand the schedule card when something's live right now)
+  // against course_offering_timetable_entries instead of timetable_entries.
+  // No pending-scores-equivalent card here — scores (§7.14, class_node+
+  // subject-anchored) is a secondary-only table; higher-ed's own
+  // course_results is a different anchor entirely and was not asked for on
+  // this dashboard by the owner's 2026-07-23 clarification (only "My
+  // Schedule Today"/"My Timetable View"/Average Attendance/Performance were
+  // requested for the higher-ed branch).
+  async function loadHigherEdDashboardData() {
+    const currentSessionRes = await loadCurrentSession();
+    const currentSessionId = currentSessionRes.ok ? currentSessionRes.sessionId ?? null : null;
+    if (!currentSessionId) {
+      setOfferingEntries([]);
+      setOfferingCount(0);
+      setLecturerAttendance({ overallPercent: null, presentCount: 0, totalMarks: 0, perCourse: [] });
+      return;
+    }
+
+    const offeringsRes = await loadOfferingsForLecturer({
+      schoolId: school!.id,
+      staffId,
+      isAdmin: false,
+      sessionId: currentSessionId,
+    });
+    if (!offeringsRes.ok) {
+      setError(offeringsRes.error);
+      return;
+    }
+    setOfferingCount(offeringsRes.data.length);
+
+    const offeringIds = offeringsRes.data.map((o) => o.id);
+    if (offeringIds.length > 0) {
+      const entriesRes = await loadOfferingTimetable(offeringIds);
+      if (entriesRes.ok) {
+        setOfferingEntries(entriesRes.data);
+
+        const liveEntry = getCurrentOfferingEntry(entriesRes.data);
+        if (liveEntry && !scheduleAutoOpenedRef.current) {
+          setScheduleExpanded(true);
+          scheduleAutoOpenedRef.current = true;
+        }
+      }
+    } else {
+      setOfferingEntries([]);
+    }
+
+    // Average attendance (PRD Tier 9 / Problem 9.4) — scoped to this
+    // lecturer's own offerings only, via loadLecturerAverageAttendance()'s
+    // own internal loadCourseOfferingsForStaff({isAdmin:false}) call — same
+    // "never school-wide" discipline as the secondary branch above.
+    const attendanceRes = await loadLecturerAverageAttendance({
+      schoolId: school!.id,
+      staffId,
+      sessionId: currentSessionId,
+    });
+    if (attendanceRes.ok) setLecturerAttendance(attendanceRes.data);
   }
 
   async function loadAnns() {
@@ -603,6 +785,52 @@ export default function TeacherDashboard({
       .filter((d) => d.entries.length > 0);
   }, [weekDays, weekEntries, periods]);
 
+  // ── Higher-ed schedule derived values (PRD Tier 9 / Problem 9.4) ────────
+  // Mirrors todaysEntries/currentPeriodEntry/weekGrouped above exactly in
+  // shape, just against offeringEntries (own start_time/end_time per row,
+  // no periods indirection — §7.27.6) instead of weekEntries+periods.
+
+  const liveOfferingEntry = useMemo(
+    () => (offeringEntries.length > 0 ? getCurrentOfferingEntry(offeringEntries, now) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [offeringEntries]
+  );
+
+  const todaysOfferingEntries = useMemo(
+    () =>
+      offeringEntries
+        .filter((e) => e.day_of_week === now.getDay())
+        .sort((a, b) => a.start_time.localeCompare(b.start_time)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [offeringEntries]
+  );
+
+  const todayOfferingLabel = dayNameOffering(now.getDay());
+
+  const offeringWeekGrouped = useMemo(() => {
+    const days = Array.from(new Set(offeringEntries.map((e) => e.day_of_week))).sort((a, b) => a - b);
+    return days.map((d) => ({
+      dayOfWeek: d,
+      entries: offeringEntries
+        .filter((e) => e.day_of_week === d)
+        .sort((a, b) => a.start_time.localeCompare(b.start_time)),
+    }));
+  }, [offeringEntries]);
+
+  // Countdown for a live offering entry — same minutes-remaining logic
+  // countdownLabel() already applies to a secondary Period, restated here
+  // since OfferingTimetableEntry has no Period-shaped object to pass it.
+  function offeringCountdownLabel(entry: OfferingTimetableEntry, at: Date): string {
+    const nowMinutes = at.getHours() * 60 + at.getMinutes();
+    const endMinutes = timeToMinutes(entry.end_time);
+    const remaining = Math.max(0, endMinutes - nowMinutes);
+    const hrs = Math.floor(remaining / 60);
+    const mins = remaining % 60;
+    if (hrs > 0) return `${hrs}h ${mins}m left`;
+    if (mins > 0) return `${mins}m left`;
+    return 'Ending now';
+  }
+
   const actionItems: ActionItem[] = ([
     {
       label: 'scores waiting for approval',
@@ -666,35 +894,59 @@ export default function TeacherDashboard({
       )}
 
       {/* ── Stat Cards ──────────────────────────────────────────────────────── */}
-      <div className="dash-section">
-        <div className="dash-section-label">Your teaching load</div>
-        <div className="dash-stat-grid">
-          <StatCard
-            label="Classes"
-            value={stats?.classCount ?? 0}
-            sub="this session"
-            icon={<Icon name="school" />}
-            loading={dataLoading}
-            accent="blue"
-          />
-          <StatCard
-            label="Subjects"
-            value={stats?.subjectCount ?? 0}
-            sub="you teach"
-            icon={<Icon name="book-open" />}
-            loading={dataLoading}
-            accent="purple"
-          />
-          <StatCard
-            label="Pending scores"
-            value={stats?.pendingScoreCount ?? 0}
-            sub="awaiting approval"
-            icon={<Icon name="pencil" />}
-            loading={dataLoading}
-            accent={(stats?.pendingScoreCount ?? 0) > 0 ? 'amber' : 'green'}
-          />
+      {isHigherEd ? (
+        <div className="dash-section">
+          <div className="dash-section-label">Your teaching load</div>
+          <div className="dash-stat-grid">
+            <StatCard
+              label="Course offerings"
+              value={offeringCount}
+              sub="this session"
+              icon={<Icon name="school" />}
+              loading={dataLoading}
+              accent="blue"
+            />
+            <StatCard
+              label="Average attendance"
+              value={lecturerAttendance?.overallPercent != null ? `${lecturerAttendance.overallPercent}%` : '—'}
+              sub="across your courses"
+              icon={<Icon name="clipboard-list" />}
+              loading={dataLoading}
+              accent="purple"
+            />
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="dash-section">
+          <div className="dash-section-label">Your teaching load</div>
+          <div className="dash-stat-grid">
+            <StatCard
+              label="Classes"
+              value={stats?.classCount ?? 0}
+              sub="this session"
+              icon={<Icon name="school" />}
+              loading={dataLoading}
+              accent="blue"
+            />
+            <StatCard
+              label="Subjects"
+              value={stats?.subjectCount ?? 0}
+              sub="you teach"
+              icon={<Icon name="book-open" />}
+              loading={dataLoading}
+              accent="purple"
+            />
+            <StatCard
+              label="Pending scores"
+              value={stats?.pendingScoreCount ?? 0}
+              sub="awaiting approval"
+              icon={<Icon name="pencil" />}
+              loading={dataLoading}
+              accent={(stats?.pendingScoreCount ?? 0) > 0 ? 'amber' : 'green'}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ── Collapsible cards ─────────────────────────────────────────────────
           New this session: one rectangular card per topic, closed by default
@@ -703,84 +955,144 @@ export default function TeacherDashboard({
         <div className="dash-section-label">At a glance</div>
         <div className="dash-collapse-list">
 
-          {/* My Schedule Today */}
-          <CollapsibleCard
-            icon={<Icon name="clock" />}
-            title="My Schedule Today"
-            summary={
-              dataLoading
-                ? undefined
-                : currentPeriodEntry
-                ? countdownLabel(currentPeriodEntry.period!, now)
-                : todaysEntries.length > 0
-                ? `${todaysEntries.length} period${todaysEntries.length === 1 ? '' : 's'}`
-                : 'No lessons today'
-            }
-            summaryTone={currentPeriodEntry ? 'warning' : 'normal'}
-            expanded={scheduleExpanded}
-            onToggle={() => setScheduleExpanded((v) => !v)}
-          >
-            {dataLoading ? (
-              <Skeleton className="dash-ann-skel" />
-            ) : todaysEntries.length === 0 ? (
-              <div className="dash-empty-state">
-                <div className="dash-empty-icon"><Icon name="clock" /></div>
-                <div className="dash-empty-msg">
-                  {todayLabel ? `No class scheduled for you, ${todayLabel}` : 'No lesson scheduled today'}
-                </div>
-              </div>
-            ) : (
-              <div className="dash-schedule-list">
-                {todaysEntries.map(({ entry, period }) => {
-                  const isNow = entry.period_id === currentPeriodId;
-                  return (
-                    <div
-                      key={entry.id}
-                      className={`dash-schedule-row${isNow ? ' dash-schedule-row--now' : ''}`}
-                    >
-                      <div className="dash-schedule-time">
-                        {formatClock(period!.start_time)} – {formatClock(period!.end_time)}
-                      </div>
-                      <div className="dash-schedule-body">
-                        <div className="dash-schedule-subject">{entry.subject_name ?? 'Free period'}</div>
-                        <div className="dash-schedule-class">{entry.class_node_name}</div>
-                      </div>
-                      {isNow && (
-                        <div className="dash-schedule-live">
-                          <span className="dash-schedule-live-dot" aria-hidden="true" />
-                          {countdownLabel(period!, now)}
+          {isHigherEd ? (
+            <>
+              {/* My Schedule Today — higher-ed (PRD Tier 9 / Problem 9.4) */}
+              <CollapsibleCard
+                icon={<Icon name="clock" />}
+                title="My Schedule Today"
+                summary={
+                  dataLoading
+                    ? undefined
+                    : liveOfferingEntry
+                    ? offeringCountdownLabel(liveOfferingEntry, now)
+                    : todaysOfferingEntries.length > 0
+                    ? `${todaysOfferingEntries.length} class${todaysOfferingEntries.length === 1 ? '' : 'es'}`
+                    : 'No lessons today'
+                }
+                summaryTone={liveOfferingEntry ? 'warning' : 'normal'}
+                expanded={scheduleExpanded}
+                onToggle={() => setScheduleExpanded((v) => !v)}
+              >
+                {dataLoading ? (
+                  <Skeleton className="dash-ann-skel" />
+                ) : todaysOfferingEntries.length === 0 ? (
+                  <div className="dash-empty-state">
+                    <div className="dash-empty-icon"><Icon name="clock" /></div>
+                    <div className="dash-empty-msg">No class scheduled for you, {todayOfferingLabel}</div>
+                  </div>
+                ) : (
+                  <div className="dash-schedule-list">
+                    {todaysOfferingEntries.map((entry) => {
+                      const isNow = liveOfferingEntry?.id === entry.id;
+                      return (
+                        <div
+                          key={entry.id}
+                          className={`dash-schedule-row${isNow ? ' dash-schedule-row--now' : ''}`}
+                        >
+                          <div className="dash-schedule-time">
+                            {formatOfferingTime(entry.start_time)} – {formatOfferingTime(entry.end_time)}
+                          </div>
+                          <div className="dash-schedule-body">
+                            <div className="dash-schedule-subject">{entry.course_code} — {entry.course_title}</div>
+                            {entry.venue && <div className="dash-schedule-class">{entry.venue}</div>}
+                          </div>
+                          {isNow && (
+                            <div className="dash-schedule-live">
+                              <span className="dash-schedule-live-dot" aria-hidden="true" />
+                              {offeringCountdownLabel(entry, now)}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </CollapsibleCard>
+                      );
+                    })}
+                  </div>
+                )}
+              </CollapsibleCard>
 
-          {/* My Timetable View */}
-          <CollapsibleCard
-            icon={<Icon name="calendar" />}
-            title="My Timetable View"
-            summary={dataLoading ? undefined : `${assignments.length} assignment${assignments.length === 1 ? '' : 's'}`}
-            expanded={timetableExpanded}
-            onToggle={() => setTimetableExpanded((v) => !v)}
-          >
-            {dataLoading ? (
-              <Skeleton className="dash-ann-skel" />
-            ) : weekGrouped.length === 0 ? (
-              <div className="dash-empty-state">
-                <div className="dash-empty-icon"><Icon name="calendar" /></div>
-                <div className="dash-empty-msg">No timetable entries yet this session</div>
-              </div>
-            ) : (
-              <div className="dash-timetable-week">
-                {weekGrouped.map((day) => (
-                  <div key={day.dayOfWeek} className="dash-timetable-day">
-                    <div className="dash-timetable-day-label">{dayName(day.dayOfWeek)}</div>
-                    <div className="dash-schedule-list">
-                      {day.entries.map(({ entry, period }) => (
-                        <div key={entry.id} className="dash-schedule-row">
+              {/* My Timetable View — higher-ed (PRD Tier 9 / Problem 9.4) */}
+              <CollapsibleCard
+                icon={<Icon name="calendar" />}
+                title="My Timetable View"
+                summary={dataLoading ? undefined : `${offeringCount} offering${offeringCount === 1 ? '' : 's'}`}
+                expanded={timetableExpanded}
+                onToggle={() => setTimetableExpanded((v) => !v)}
+              >
+                {dataLoading ? (
+                  <Skeleton className="dash-ann-skel" />
+                ) : offeringWeekGrouped.length === 0 ? (
+                  <div className="dash-empty-state">
+                    <div className="dash-empty-icon"><Icon name="calendar" /></div>
+                    <div className="dash-empty-msg">No timetable entries yet this session</div>
+                  </div>
+                ) : (
+                  <div className="dash-timetable-week">
+                    {offeringWeekGrouped.map((day) => (
+                      <div key={day.dayOfWeek} className="dash-timetable-day">
+                        <div className="dash-timetable-day-label">{dayNameOffering(day.dayOfWeek)}</div>
+                        <div className="dash-schedule-list">
+                          {day.entries.map((entry) => (
+                            <div key={entry.id} className="dash-schedule-row">
+                              <div className="dash-schedule-time">
+                                {formatOfferingTime(entry.start_time)} – {formatOfferingTime(entry.end_time)}
+                              </div>
+                              <div className="dash-schedule-body">
+                                <div className="dash-schedule-subject">{entry.course_code} — {entry.course_title}</div>
+                                {entry.venue && <div className="dash-schedule-class">{entry.venue}</div>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  className="btn btn--ghost dash-collapse-action"
+                  type="button"
+                  onClick={() => onNavigate('timetable')}
+                >
+                  Open full timetable →
+                </button>
+              </CollapsibleCard>
+            </>
+          ) : (
+            <>
+              {/* My Schedule Today */}
+              <CollapsibleCard
+                icon={<Icon name="clock" />}
+                title="My Schedule Today"
+                summary={
+                  dataLoading
+                    ? undefined
+                    : currentPeriodEntry
+                    ? countdownLabel(currentPeriodEntry.period!, now)
+                    : todaysEntries.length > 0
+                    ? `${todaysEntries.length} period${todaysEntries.length === 1 ? '' : 's'}`
+                    : 'No lessons today'
+                }
+                summaryTone={currentPeriodEntry ? 'warning' : 'normal'}
+                expanded={scheduleExpanded}
+                onToggle={() => setScheduleExpanded((v) => !v)}
+              >
+                {dataLoading ? (
+                  <Skeleton className="dash-ann-skel" />
+                ) : todaysEntries.length === 0 ? (
+                  <div className="dash-empty-state">
+                    <div className="dash-empty-icon"><Icon name="clock" /></div>
+                    <div className="dash-empty-msg">
+                      {todayLabel ? `No class scheduled for you, ${todayLabel}` : 'No lesson scheduled today'}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="dash-schedule-list">
+                    {todaysEntries.map(({ entry, period }) => {
+                      const isNow = entry.period_id === currentPeriodId;
+                      return (
+                        <div
+                          key={entry.id}
+                          className={`dash-schedule-row${isNow ? ' dash-schedule-row--now' : ''}`}
+                        >
                           <div className="dash-schedule-time">
                             {formatClock(period!.start_time)} – {formatClock(period!.end_time)}
                           </div>
@@ -788,64 +1100,201 @@ export default function TeacherDashboard({
                             <div className="dash-schedule-subject">{entry.subject_name ?? 'Free period'}</div>
                             <div className="dash-schedule-class">{entry.class_node_name}</div>
                           </div>
+                          {isNow && (
+                            <div className="dash-schedule-live">
+                              <span className="dash-schedule-live-dot" aria-hidden="true" />
+                              {countdownLabel(period!, now)}
+                            </div>
+                          )}
                         </div>
-                      ))}
-                    </div>
+                      );
+                    })}
                   </div>
-                ))}
-              </div>
-            )}
-            <button
-              className="btn btn--ghost dash-collapse-action"
-              type="button"
-              onClick={() => onNavigate('timetable')}
-            >
-              Open full timetable →
-            </button>
-          </CollapsibleCard>
+                )}
+              </CollapsibleCard>
 
-          {/* Pending Scores */}
+              {/* My Timetable View */}
+              <CollapsibleCard
+                icon={<Icon name="calendar" />}
+                title="My Timetable View"
+                summary={dataLoading ? undefined : `${assignments.length} assignment${assignments.length === 1 ? '' : 's'}`}
+                expanded={timetableExpanded}
+                onToggle={() => setTimetableExpanded((v) => !v)}
+              >
+                {dataLoading ? (
+                  <Skeleton className="dash-ann-skel" />
+                ) : weekGrouped.length === 0 ? (
+                  <div className="dash-empty-state">
+                    <div className="dash-empty-icon"><Icon name="calendar" /></div>
+                    <div className="dash-empty-msg">No timetable entries yet this session</div>
+                  </div>
+                ) : (
+                  <div className="dash-timetable-week">
+                    {weekGrouped.map((day) => (
+                      <div key={day.dayOfWeek} className="dash-timetable-day">
+                        <div className="dash-timetable-day-label">{dayName(day.dayOfWeek)}</div>
+                        <div className="dash-schedule-list">
+                          {day.entries.map(({ entry, period }) => (
+                            <div key={entry.id} className="dash-schedule-row">
+                              <div className="dash-schedule-time">
+                                {formatClock(period!.start_time)} – {formatClock(period!.end_time)}
+                              </div>
+                              <div className="dash-schedule-body">
+                                <div className="dash-schedule-subject">{entry.subject_name ?? 'Free period'}</div>
+                                <div className="dash-schedule-class">{entry.class_node_name}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  className="btn btn--ghost dash-collapse-action"
+                  type="button"
+                  onClick={() => onNavigate('timetable')}
+                >
+                  Open full timetable →
+                </button>
+              </CollapsibleCard>
+
+              {/* Pending Scores */}
+              <CollapsibleCard
+                icon={<Icon name="pencil" />}
+                title="Pending Scores"
+                summary={
+                  dataLoading
+                    ? undefined
+                    : (stats?.pendingScoreCount ?? 0) > 0
+                    ? `${stats?.pendingScoreCount} awaiting approval`
+                    : 'All caught up'
+                }
+                summaryTone={(stats?.pendingScoreCount ?? 0) > 0 ? 'warning' : 'normal'}
+                expanded={scoresExpanded}
+                onToggle={() => setScoresExpanded((v) => !v)}
+              >
+                {dataLoading ? (
+                  <Skeleton className="dash-ann-skel" />
+                ) : pendingScoreGroups.length === 0 ? (
+                  <div className="dash-empty-state">
+                    <div className="dash-empty-icon"><Icon name="circle-check" style={{ color: 'var(--color-success, #16a34a)' }} /></div>
+                    <div className="dash-empty-msg">No scores waiting for approval</div>
+                  </div>
+                ) : (
+                  <div className="dash-score-group-list">
+                    {pendingScoreGroups.map((g) => (
+                      <div key={`${g.subject_id}|${g.class_node_id}`} className="dash-score-group-row">
+                        <div className="dash-schedule-body">
+                          <div className="dash-schedule-subject">{g.subject_name}</div>
+                          <div className="dash-schedule-class">{g.class_name}</div>
+                        </div>
+                        <div className="dash-score-group-count">{g.count}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  className="btn btn--ghost dash-collapse-action"
+                  type="button"
+                  onClick={() => onNavigate('results')}
+                >
+                  Go to Results →
+                </button>
+              </CollapsibleCard>
+            </>
+          )}
+
+          {/* Average Attendance — PRD Tier 9 / Problem 9.4. Shared card
+              shell across both school types; content branches on which of
+              teacherAttendance/lecturerAttendance is populated. Overall %
+              in the collapsed summary chip, expandable to the per-class
+              (secondary) / per-course (higher-ed) breakdown, matching the
+              owner's own 2026-07-23 clarification. */}
           <CollapsibleCard
-            icon={<Icon name="pencil" />}
-            title="Pending Scores"
+            icon={<Icon name="clipboard-list" />}
+            title="Average Attendance"
             summary={
               dataLoading
                 ? undefined
-                : (stats?.pendingScoreCount ?? 0) > 0
-                ? `${stats?.pendingScoreCount} awaiting approval`
-                : 'All caught up'
+                : isHigherEd
+                ? lecturerAttendance?.overallPercent != null
+                  ? `${lecturerAttendance.overallPercent}%`
+                  : 'No sessions yet'
+                : teacherAttendance?.overallPercent != null
+                ? `${teacherAttendance.overallPercent}%`
+                : 'No records yet'
             }
-            summaryTone={(stats?.pendingScoreCount ?? 0) > 0 ? 'warning' : 'normal'}
-            expanded={scoresExpanded}
-            onToggle={() => setScoresExpanded((v) => !v)}
+            expanded={attendanceExpanded}
+            onToggle={() => setAttendanceExpanded((v) => !v)}
           >
             {dataLoading ? (
               <Skeleton className="dash-ann-skel" />
-            ) : pendingScoreGroups.length === 0 ? (
+            ) : isHigherEd ? (
+              !lecturerAttendance || lecturerAttendance.perCourse.length === 0 ? (
+                <div className="dash-empty-state">
+                  <div className="dash-empty-icon"><Icon name="clipboard-list" /></div>
+                  <div className="dash-empty-msg">No course offerings yet this session</div>
+                </div>
+              ) : (
+                <div className="dash-score-group-list">
+                  {lecturerAttendance.perCourse.map((c) => (
+                    <div key={c.courseOfferingId} className="dash-score-group-row">
+                      <div className="dash-schedule-body">
+                        <div className="dash-schedule-subject">{c.courseCode} — {c.courseTitle}</div>
+                        <div className="dash-schedule-class">
+                          {c.totalMarks > 0 ? `${c.presentCount} of ${c.totalMarks} sessions` : 'No sessions held yet'}
+                        </div>
+                      </div>
+                      <div className="dash-score-group-count">{c.percent != null ? `${c.percent}%` : '—'}</div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : !teacherAttendance || teacherAttendance.perClass.length === 0 ? (
               <div className="dash-empty-state">
-                <div className="dash-empty-icon"><Icon name="circle-check" style={{ color: 'var(--color-success, #16a34a)' }} /></div>
-                <div className="dash-empty-msg">No scores waiting for approval</div>
+                <div className="dash-empty-icon"><Icon name="clipboard-list" /></div>
+                <div className="dash-empty-msg">No assigned classes yet this session</div>
               </div>
             ) : (
               <div className="dash-score-group-list">
-                {pendingScoreGroups.map((g) => (
-                  <div key={`${g.subject_id}|${g.class_node_id}`} className="dash-score-group-row">
+                {teacherAttendance.perClass.map((c) => (
+                  <div key={c.classNodeId} className="dash-score-group-row">
                     <div className="dash-schedule-body">
-                      <div className="dash-schedule-subject">{g.subject_name}</div>
-                      <div className="dash-schedule-class">{g.class_name}</div>
+                      <div className="dash-schedule-subject">{c.className}</div>
+                      <div className="dash-schedule-class">
+                        {c.totalMarks > 0 ? `${c.presentCount} of ${c.totalMarks} marks` : 'No records yet'}
+                      </div>
                     </div>
-                    <div className="dash-score-group-count">{g.count}</div>
+                    <div className="dash-score-group-count">{c.percent != null ? `${c.percent}%` : '—'}</div>
                   </div>
                 ))}
               </div>
             )}
-            <button
-              className="btn btn--ghost dash-collapse-action"
-              type="button"
-              onClick={() => onNavigate('results')}
-            >
-              Go to Results →
-            </button>
+          </CollapsibleCard>
+
+          {/* Performance — PRD Tier 9 / Problem 9.4. Explicitly future
+              scope per the owner's 2026-07-23 clarification: reserve a
+              visible, clearly-labeled coming-soon slot now, no computation
+              wired — matching this project's own established "reserve the
+              slot, don't silently omit it" convention (e.g. the Fees/HR
+              modules' own tracked-forward-gap notes). Identical, school-
+              type-independent content — nothing here is genuinely built
+              yet regardless of school type, so there is nothing to branch
+              on. */}
+          <CollapsibleCard
+            icon={<Icon name="bar-chart" />}
+            title="Performance"
+            summary="Coming soon"
+            expanded={performanceExpanded}
+            onToggle={() => setPerformanceExpanded((v) => !v)}
+          >
+            <div className="dash-empty-state">
+              <div className="dash-empty-icon"><Icon name="bar-chart" /></div>
+              <div className="dash-empty-msg">
+                Performance in this course is coming soon — a look at how your students are doing over time.
+              </div>
+            </div>
           </CollapsibleCard>
 
           {/* My Payslip — Session 17. Only rendered at all when the

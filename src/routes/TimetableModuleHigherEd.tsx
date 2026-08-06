@@ -23,11 +23,23 @@
  * artificial common shape neither domain has" discipline §7.27's own
  * header already established.
  *
- * Three audiences, one query shape (per courseOfferingTimetableService.ts's
- * own file header):
+ * Three audiences (per courseOfferingTimetableService.ts's own file
+ * header):
  *   - Admin: every offering in the school, full edit chrome.
- *   - Lecturer: only their own assigned offerings, read-only.
- *   - Student: only their own currently-registered offerings, read-only.
+ *   - Lecturer: every offering in the school, read-only — FIX, PRD Tier 9 /
+ *     Problem 9.5 (owner walkthrough, 2026-07-23): previously scoped to
+ *     only the lecturer's own assigned offerings via
+ *     loadOfferingsForLecturer({ isAdmin: false }), an application-layer
+ *     over-restriction the owner confirmed was the wrong design — the
+ *     shared grid must show the complete picture for every staff role, at
+ *     both school types (secondary-school teachers already got the full
+ *     grid; this was a higher-ed-only defect). A lecturer's own personal
+ *     schedule now lives on their dashboard instead (Problem 9.4's own
+ *     cards), not as a restriction on this module. Both admin and lecturer
+ *     now load via the same loadOfferingsForTimetableAdmin() call; editing
+ *     remains admin-only exactly as before, untouched by this fix.
+ *   - Student: only their own currently-registered offerings, read-only —
+ *     unaffected by this fix.
  *
  * Conflict detection, two layers:
  *   - Read-only badge: findLecturerConflicts() (time-range overlap, not
@@ -49,7 +61,6 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   loadOfferingTimetable,
   loadOfferingsForTimetableAdmin,
-  loadOfferingsForLecturer,
   loadOfferingsForStudent,
   upsertOfferingTimetableEntry,
   deleteOfferingTimetableEntry,
@@ -172,32 +183,31 @@ export default function TimetableModuleHigherEd({
         return
       }
       offeringsResult = res.data
-    } else if (isAdmin) {
-      const res = await loadOfferingsForTimetableAdmin(sessionRes.data.id)
-      if (!res.ok) {
-        setLoadState('error')
-        setErrorMsg(res.error)
-        return
-      }
-      offeringsResult = res.data
     } else {
-      // Lecturer view — currentStaffId may still be null while identity
-      // is resolving; treat that as "no offerings yet," not an error,
-      // matching TimetableModuleSecondary's own null-currentStaffId
-      // tolerance (alarms simply stay off; here, the view simply stays
-      // empty until identity resolves).
-      if (!currentStaffId) {
-        setOfferings([])
-        setEntries([])
-        setLoadState('empty')
-        return
-      }
-      const res = await loadOfferingsForLecturer({
-        schoolId,
-        staffId: currentStaffId,
-        isAdmin: false,
-        sessionId: sessionRes.data.id,
-      })
+      // PRD Tier 9 / Problem 9.5 (owner walkthrough, 2026-07-23): admin AND
+      // non-admin lecturer both converge on the same full, school-wide
+      // offerings load — loadOfferingsForTimetableAdmin(), the exact call
+      // the admin branch already used. The general TimetableGrid must show
+      // the complete picture for every staff role, at both school types
+      // (owner's own confirmed correction); a lecturer's PERSONAL schedule
+      // now lives on their dashboard instead (Problem 9.4's "My Schedule
+      // Today"/"My Timetable View" cards), not as a restriction on this
+      // shared module. Only guardians/students stay excluded from this
+      // component entirely (routed to GuardianPortal, isStudentView branch
+      // above, unaffected by this fix).
+      //
+      // Editing stays admin-only exactly as it already was — every
+      // `isAdmin &&`-gated control below (Edit/Done buttons, the edit
+      // panel, the add/edit-slot form, lecturer assignment, delete) is
+      // untouched by this change; only which offerings/entries get loaded
+      // in the first place is affected. A non-admin lecturer now simply
+      // sees the same read-only grid an admin sees outside edit mode.
+      //
+      // currentStaffId is no longer read here at all (isLecturerView's own
+      // identity-resolution tolerance, previously "no offerings yet while
+      // resolving," no longer applies — the full-school load doesn't
+      // depend on which staff member is asking).
+      const res = await loadOfferingsForTimetableAdmin(sessionRes.data.id)
       if (!res.ok) {
         setLoadState('error')
         setErrorMsg(res.error)

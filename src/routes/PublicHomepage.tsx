@@ -244,7 +244,7 @@ export function PublicHomepage({ slug, onLogin }: PublicHomepageProps) {
       <div className="public-home-status">
         <div className="public-home-status-inner">
           <h1>School not found</h1>
-          <p>Check the web address — it should look like yourschool.eduportalng.com.</p>
+          <p>Check the web address — it should look like yourschool.eduskola.com.</p>
         </div>
       </div>
     )

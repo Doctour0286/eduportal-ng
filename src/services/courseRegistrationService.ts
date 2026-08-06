@@ -287,6 +287,81 @@ export async function loadExistingRegistrations(
   return { data: mapped as ExistingRegistration[], error: null }
 }
 
+export interface CurrentRegistrationRow {
+  id: string
+  course_id: string
+  course_code: string
+  course_title: string
+  credit_units: number
+  is_carryover: boolean
+  term_id: string | null
+  term_name: string | null
+}
+
+// ─── Currently-registered summary (PRD Tier 9 / Problem 9.6) ──────────────
+
+// Deliberately its OWN query, not a call-through to loadExistingRegistrations()
+// (which this function originally was — see git history/prior session).
+// Reason for the split, found while tracing a real on-device bug: a
+// student can end up with active course_registrations rows spread across
+// more than one term_id for the same session — confirmed directly via SQL
+// on a real student (two rows with term_id null, one with a real term_id,
+// all status='registered', same session_id). This happens because
+// registerStudent()'s withdraw-diff only ever reconciles rows within the
+// exact (session_id, term_id) it's called with — it has no way to know
+// about, and so never withdraws, that same student's active rows sitting
+// under a DIFFERENT term_id in the same session. loadExistingRegistrations()
+// being exact-term-scoped (by design, for the picker's own pre-check
+// purpose) meant the "Currently registered" summary — which is supposed to
+// answer "what does this student currently have active, full stop" — could
+// only ever see whichever single term the caller happened to resolve,
+// silently hiding the rest. This function instead loads every active row
+// for the student+session regardless of term, and returns each row's own
+// term_id/term_name so the UI can label multi-term registrations clearly
+// rather than pretending they don't exist.
+//
+// This does NOT change registerStudent()'s own save/withdraw behavior —
+// that per-term reconciliation gap is a separate, flagged decision (see
+// Problem 9.6 follow-up notes) requiring its own sign-off before touching
+// the write path. This is a read-side fix only: show the true current
+// state accurately, whatever it is.
+export async function loadCurrentRegistration(
+  studentId: string,
+  sessionId: string,
+): Promise<{ data: CurrentRegistrationRow[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('course_registrations')
+    .select(`
+      id, course_id, is_carryover, term_id,
+      courses(code, title, credit_units),
+      terms(name)
+    `)
+    .eq('student_id', studentId)
+    .eq('session_id', sessionId)
+    .neq('status', 'withdrawn')
+  if (error) return { data: [], error: error.message }
+
+  const mapped = (data ?? []).map((row: any) => {
+    const course = (Array.isArray(row.courses) ? row.courses[0] : row.courses) as
+      | { code: string; title: string; credit_units: number }
+      | undefined
+    const term = (Array.isArray(row.terms) ? row.terms[0] : row.terms) as
+      | { name: string }
+      | undefined
+    return {
+      id: row.id,
+      course_id: row.course_id,
+      course_code: course?.code ?? '—',
+      course_title: course?.title ?? 'Unknown course',
+      credit_units: course?.credit_units ?? 0,
+      is_carryover: row.is_carryover,
+      term_id: row.term_id,
+      term_name: term?.name ?? null,
+    }
+  })
+  return { data: mapped as CurrentRegistrationRow[], error: null }
+}
+
 // ─── Credit-load check (pure — no network) ─────────────────────────────────
 
 // Deliberately pure and synchronous so the UI can validate on every

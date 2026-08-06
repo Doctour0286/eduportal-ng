@@ -29,6 +29,11 @@
  *   loadAttendanceEligibility()    — computed present/total % for one
  *     student on one offering, checked against the offering's own
  *     attendance_eligibility_threshold_pct (nullable — no hardcoded 75%).
+ *   loadStudentOverallAttendance() — a student's own attendance rolled up
+ *     across every course they're currently registered for.
+ *   loadLecturerAverageAttendance() — PRD Tier 9 / Problem 9.4 (2026-07-23):
+ *     the reverse direction — one lecturer's own average attendance rolled
+ *     up across every course_offering they teach, overall + per-course.
  *
  * Write exports (mirrors attendanceService.ts's three-function family):
  *   ensureCourseAttendanceSession() — get-or-create today's (or a given
@@ -423,7 +428,7 @@ export async function saveCourseAttendanceRecord(
 
     if (error) {
       if (isNetworkError(error.message)) {
-        queueWrite('course_attendance_records', 'insert', payload)
+        await queueWrite('course_attendance_records', 'insert', payload)
         return { ok: true, queued: true }
       }
       return { ok: false, error: friendlyError(error.message) }
@@ -431,7 +436,7 @@ export async function saveCourseAttendanceRecord(
 
     return { ok: true }
   } catch (err: any) {
-    queueWrite('course_attendance_records', 'insert', payload)
+    await queueWrite('course_attendance_records', 'insert', payload)
     return { ok: true, queued: true }
   }
 }
@@ -460,7 +465,7 @@ export async function saveBatchCourseAttendance(params: {
 
     if (error) {
       if (isNetworkError(error.message)) {
-        rows.forEach(row => queueWrite('course_attendance_records', 'insert', row))
+        await Promise.all(rows.map(row => queueWrite('course_attendance_records', 'insert', row)))
         return { ok: true, queued: true }
       }
       return { ok: false, error: friendlyError(error.message) }
@@ -468,9 +473,50 @@ export async function saveBatchCourseAttendance(params: {
 
     return { ok: true }
   } catch (err: any) {
-    rows.forEach(row => queueWrite('course_attendance_records', 'insert', row))
+    await Promise.all(rows.map(row => queueWrite('course_attendance_records', 'insert', row)))
     return { ok: true, queued: true }
   }
+}
+
+// ─── Read pending (queued-but-unsynced) writes ─────────────────────────────
+// Mirrors attendanceService.getPendingAttendanceForDate() exactly, scoped by
+// course_attendance_session_id instead of date. Without this, a mark saved
+// offline never reaches `course_attendance_records` until
+// flushCourseAttendanceQueue() successfully runs, so loadCourseAttendanceRecords()
+// can't see it — the write is still safely queued, but a reload before the
+// next successful flush would otherwise make it disappear from the grid.
+
+export async function getPendingCourseAttendanceForSession(
+  courseAttendanceSessionId: string,
+): Promise<CourseAttendanceMap> {
+  const pending = (await getQueue()).filter(item => item.table === 'course_attendance_records')
+  const map: CourseAttendanceMap = new Map()
+
+  for (const item of pending) {
+    const payload = item.payload as {
+      course_attendance_session_id?: string
+      student_id?: string
+      status?: CourseAttendanceStatus
+      marked_by?: string
+    }
+    if (
+      payload.course_attendance_session_id !== courseAttendanceSessionId ||
+      !payload.student_id ||
+      !payload.status
+    ) {
+      continue
+    }
+
+    map.set(payload.student_id, {
+      id: item.id, // no server id yet — the queue item's own id stands in
+      course_attendance_session_id: courseAttendanceSessionId,
+      student_id: payload.student_id,
+      status: payload.status,
+      marked_by: payload.marked_by ?? '',
+    })
+  }
+
+  return map
 }
 
 // ─── Flush offline queue ───────────────────────────────────────────────────
@@ -480,7 +526,7 @@ export async function flushCourseAttendanceQueue(): Promise<{
   flushed: number
   failed: Array<{ payload: Record<string, unknown>; error: string }>
 }> {
-  const pending = getQueue().filter(item => item.table === 'course_attendance_records')
+  const pending = (await getQueue()).filter(item => item.table === 'course_attendance_records')
 
   let flushed = 0
   const failed: Array<{ payload: Record<string, unknown>; error: string }> = []
@@ -496,7 +542,7 @@ export async function flushCourseAttendanceQueue(): Promise<{
       if (error) {
         failed.push({ payload: item.payload, error: friendlyError(error.message) })
       } else {
-        clearFromQueue(item.id)
+        await clearFromQueue(item.id)
         flushed++
       }
     } catch (err: any) {
@@ -800,6 +846,130 @@ export async function loadStudentCourseAttendance(params: {
     return { ok: true, data: rows }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load course attendance' }
+  }
+}
+
+// ─── Lecturer's own average attendance (PRD Tier 9 / Problem 9.4) ──────────
+//
+// A genuinely different aggregation direction from loadStudentOverallAttendance()
+// above, not a rename of it: that function fans out across a STUDENT's own
+// registrations to roll up their attendance across every course they take;
+// this fans out across a LECTURER's own course_offerings (loadCourseOfferingsForStaff()
+// this file already exports, isAdmin: false so only their own assignments)
+// to roll up their students' attendance across every course they teach.
+// Overall + per-course breakdown returned together in one call, matching
+// attendanceService.ts's loadTeacherAverageAttendance() sibling function's
+// same "avoid a second round trip" shape — this file's own present+late =
+// attended semantics (CourseAttendanceEligibility's own doc comment above)
+// is reused here exactly, not redefined.
+
+export interface LecturerAverageAttendance {
+  overallPercent: number | null   // null when no sessions held yet across
+                                   // any of this lecturer's offerings
+  presentCount: number            // 'present' + 'late', same semantics as
+                                   // loadAttendanceEligibility() above
+  totalMarks: number
+  perCourse: {
+    courseOfferingId: string
+    courseCode: string
+    courseTitle: string
+    percent: number | null
+    presentCount: number
+    totalMarks: number
+  }[]
+}
+
+export async function loadLecturerAverageAttendance(params: {
+  schoolId: string
+  staffId: string
+  sessionId: string
+}): Promise<Result<LecturerAverageAttendance>> {
+  try {
+    const offeringsRes = await loadCourseOfferingsForStaff({
+      schoolId: params.schoolId,
+      staffId: params.staffId,
+      isAdmin: false,
+      sessionId: params.sessionId,
+    })
+    if (!offeringsRes.ok) return offeringsRes
+
+    const offerings = offeringsRes.data
+    if (offerings.length === 0) {
+      return { ok: true, data: { overallPercent: null, presentCount: 0, totalMarks: 0, perCourse: [] } }
+    }
+
+    const offeringIds = offerings.map(o => o.id)
+
+    const { data: sessions, error: sessErr } = await supabase
+      .from('course_attendance_sessions')
+      .select('id, course_offering_id')
+      .in('course_offering_id', offeringIds)
+
+    if (sessErr) return { ok: false, error: sessErr.message }
+
+    const sessionsByOffering = new Map<string, string[]>()
+    for (const s of (sessions ?? []) as any[]) {
+      const list = sessionsByOffering.get(s.course_offering_id) ?? []
+      list.push(s.id)
+      sessionsByOffering.set(s.course_offering_id, list)
+    }
+
+    const allSessionIds = (sessions ?? []).map((s: any) => s.id)
+    if (allSessionIds.length === 0) {
+      const perCourse = offerings.map(o => ({
+        courseOfferingId: o.id, courseCode: o.course_code, courseTitle: o.course_title,
+        percent: null, presentCount: 0, totalMarks: 0,
+      }))
+      return { ok: true, data: { overallPercent: null, presentCount: 0, totalMarks: 0, perCourse } }
+    }
+
+    const { data: records, error: recErr } = await supabase
+      .from('course_attendance_records')
+      .select('status, course_attendance_session_id')
+      .in('course_attendance_session_id', allSessionIds)
+
+    if (recErr) return { ok: false, error: recErr.message }
+
+    // session_id -> offering_id, for attributing each record back to a course.
+    const sessionToOffering = new Map<string, string>()
+    for (const [offeringId, sessIds] of sessionsByOffering) {
+      for (const sid of sessIds) sessionToOffering.set(sid, offeringId)
+    }
+
+    const byOffering = new Map<string, { present: number; total: number }>()
+    for (const o of offerings) byOffering.set(o.id, { present: 0, total: 0 })
+
+    let presentCount = 0
+    let totalMarks = 0
+    for (const r of (records ?? []) as any[]) {
+      const offeringId = sessionToOffering.get(r.course_attendance_session_id)
+      if (!offeringId || !byOffering.has(offeringId)) continue
+      const bucket = byOffering.get(offeringId)!
+      bucket.total += 1
+      totalMarks += 1
+      if (r.status === 'present' || r.status === 'late') {
+        bucket.present += 1
+        presentCount += 1
+      }
+    }
+
+    const perCourse = offerings.map(o => {
+      const bucket = byOffering.get(o.id)!
+      return {
+        courseOfferingId: o.id,
+        courseCode: o.course_code,
+        courseTitle: o.course_title,
+        percent: bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 1000) / 10 : null,
+        presentCount: bucket.present,
+        totalMarks: bucket.total,
+      }
+    })
+
+    const overallPercent = totalMarks > 0 ? Math.round((presentCount / totalMarks) * 1000) / 10 : null
+
+    return { ok: true, data: { overallPercent, presentCount, totalMarks, perCourse } }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load your average attendance' }
   }
 }
 

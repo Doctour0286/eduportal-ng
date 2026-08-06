@@ -14026,6 +14026,19 @@ body {
 .port-child-name { font-weight: 700; font-size: var(--text-lg); color: var(--color-text); }
 .port-child-meta { font-size: var(--text-sm); color: var(--color-text-muted); }
 
+/* PRD Tier 9 / Problem 9.3 scope fold-in — photo variant of the child-header
+   avatar. The base .port-child-avatar rule already sets width/height/
+   border-radius/background for the initials-circle case; an <img> element
+   needs object-fit + overflow to actually clip into that same circle
+   instead of stretching/spilling past it. Not clickable (no lightbox here,
+   unlike StudentsModule.tsx's admin-side equivalent) — this is a read-only
+   portal, so no button-chrome reset is needed. */
+.port-child-avatar--photo {
+  object-fit: cover;
+  overflow: hidden;
+  background: var(--color-neutral-200);
+}
+
 /* ── Tabs ─────────────────────────────────────────────────────────────── */
 
 .port-tabs {
@@ -14462,6 +14475,43 @@ body {
 .port-transcript-download-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* ── Registration tab (PRD Tier 9 / Problem 9.6) ─────────────────────────── */
+
+.port-registration {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.port-registration-core-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.port-registration-core-banner-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-brand-50, #eff6ff);
+  border: 1px solid var(--color-brand-600);
+  border-radius: var(--radius-md);
+}
+
+.port-registration-core-banner-row p {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  margin: 0;
+}
+
+.port-registration-download {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
 }
 
 .port-transcript-cgpa-card {
@@ -18541,6 +18591,82 @@ body {
 }
 
 .reg-save-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── "Currently registered" summary (PRD Tier 9 / Problem 9.6) ──────────── */
+
+.reg-drop-btn {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-danger-600, #dc2626);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-danger-600, #dc2626);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.reg-drop-btn:hover {
+  background: var(--color-danger-subtle, #fef2f2);
+}
+
+/* Drop confirmation — same inline-banner shape as StudentsModule.tsx's
+   .stu-confirm-banner/.stu-confirm-text/.stu-confirm-actions (this
+   project's established destructive-confirm pattern), reused here under
+   the reg- prefix rather than duplicating a second identical set of rules
+   under a different name. */
+.reg-drop-confirm-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-danger-subtle, #fef2f2);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-2);
+}
+
+.reg-drop-confirm-text {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.reg-drop-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.reg-drop-confirm-cancel {
+  flex: 1;
+  min-height: 40px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reg-drop-confirm-danger {
+  flex: 1;
+  min-height: 40px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-600, #dc2626);
+  color: #fff;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reg-drop-confirm-cancel:disabled,
+.reg-drop-confirm-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* ─── Admission module (adm-*) ───────────────────────────────────────────────
    New top-level module (SESSION 65 §12 correction) — admission was moved out
    of SettingsModule.tsx/InstitutionTab entirely, so it needs its own prefix

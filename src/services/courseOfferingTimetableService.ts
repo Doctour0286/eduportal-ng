@@ -84,6 +84,11 @@
  *     has no staff_id yet.
  *
  * Pure helpers:
+ *   getCurrentOfferingEntry()    — PRD Tier 9 / Problem 9.4 (2026-07-23):
+ *     "what's live right now" for a lecturer's own loaded entries — the
+ *     course-offering-timetable equivalent of timetableService.ts's
+ *     getCurrentPeriod(), simplified for this table's own native
+ *     start_time/end_time-per-row shape (no periods FK to intersect).
  *   findLecturerConflicts()      — which loaded entries double-book a
  *     lecturer (same staff_id, same day_of_week, overlapping time range).
  *     Mirrors timetableService.ts's findConflictingEntryIds() in spirit
@@ -785,6 +790,40 @@ export function cohortConflictMessage(conflict: CohortConflict): string {
     case 'unknown':
       return `This clashes with ${course}, but it isn't on any programme's curriculum yet — we can't tell which students it affects.`
   }
+}
+
+// ─── "What's live right now" — dashboard schedule-card helper ─────────────
+// PRD Tier 9 / Problem 9.4 (2026-07-23): timetableService.ts has
+// getCurrentPeriod() (periods.start_time/end_time + a weekDays school-day
+// check) for the secondary side; no equivalent existed here before this
+// session (confirmed via a live grep of this file's own exports as Goal 1
+// of the 9.4 clarification). Deliberately simpler than getCurrentPeriod():
+// course_offering_timetable_entries rows carry their OWN start_time/end_time
+// directly (§7.27.6 — no periods FK), so there is no separate periods table
+// to intersect against; "is today a school day" also doesn't apply the same
+// way here — a higher-ed timetable has no school_week_days/weekDays concept
+// of its own, so "live right now" is simply: does any of this lecturer's
+// entries have this exact day_of_week + a time window containing now. A day
+// with zero entries naturally returns null, the same observable behavior a
+// non-school-day would produce on the secondary side, without needing a
+// second concept to express it.
+
+export function getCurrentOfferingEntry(
+  entries: OfferingTimetableEntry[],
+  now: Date = new Date(),
+): OfferingTimetableEntry | null {
+  const dayOfWeek = now.getDay()
+  const hhmm = now.getHours() * 60 + now.getMinutes()
+
+  for (const e of entries) {
+    if (e.day_of_week !== dayOfWeek) continue
+    const [sh, sm] = e.start_time.split(':').map(Number)
+    const [eh, em] = e.end_time.split(':').map(Number)
+    const start = sh * 60 + sm
+    const end = eh * 60 + em
+    if (hhmm >= start && hhmm < end) return e
+  }
+  return null
 }
 
 // ─── Time format helper — matches timetableService.ts's own convention ────

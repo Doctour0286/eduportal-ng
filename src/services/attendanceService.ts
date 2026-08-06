@@ -27,6 +27,11 @@
  *   countSchoolDaysInRange()       — school-day count over a date range (the % denominator)
  *   getSchoolAttendanceAnalytics() — whole-school present/absent/excused/late/not-marked
  *                                    totals + % presence for day/week/term/session scope
+ *   loadTeacherAverageAttendance() — PRD Tier 9 / Problem 9.4 (2026-07-23):
+ *                                    one secondary-school teacher's own average
+ *                                    attendance across their currently-assigned
+ *                                    classes, whole current session/term, overall
+ *                                    + per-class breakdown in one call
  *
  * After-hours edit lock (2026-07-10, Session 31, owner request — a real bug
  * fix's follow-on: see this file's set_updated_at trigger fix below):
@@ -595,7 +600,7 @@ export async function saveAttendanceRecord(
       // RLS rejection (e.g. teacher marking a class they're not assigned to)
       // should surface as a real error, not be silently queued.
       if (isNetworkError(error.message)) {
-        queueWrite('attendance_records', 'insert', payload)
+        await queueWrite('attendance_records', 'insert', payload)
         return { ok: true, queued: true }
       }
       return { ok: false, error: friendlyError(error.message) }
@@ -604,7 +609,7 @@ export async function saveAttendanceRecord(
     return { ok: true }
   } catch (err: any) {
     // Caught here = fetch never completed (offline, DNS failure, etc.)
-    queueWrite('attendance_records', 'insert', payload)
+    await queueWrite('attendance_records', 'insert', payload)
     return { ok: true, queued: true }
   }
 }
@@ -645,7 +650,7 @@ export async function saveBatchAttendance(params: {
 
     if (error) {
       if (isNetworkError(error.message)) {
-        rows.forEach(row => queueWrite('attendance_records', 'insert', row))
+        await Promise.all(rows.map(row => queueWrite('attendance_records', 'insert', row)))
         return { ok: true, queued: true }
       }
       return { ok: false, error: friendlyError(error.message) }
@@ -653,9 +658,56 @@ export async function saveBatchAttendance(params: {
 
     return { ok: true }
   } catch (err: any) {
-    rows.forEach(row => queueWrite('attendance_records', 'insert', row))
+    await Promise.all(rows.map(row => queueWrite('attendance_records', 'insert', row)))
     return { ok: true, queued: true }
   }
+}
+
+// ─── Read pending (queued-but-unsynced) writes ─────────────────────────────
+
+/**
+ * Returns queued attendance writes for one date, keyed by studentId, in the
+ * same shape as buildAttendanceMap()'s output.
+ *
+ * Why this exists: loadAttendanceRecords() only reads rows that have already
+ * landed in the `attendance_records` table. A write made while offline never
+ * reaches that table until flushAttendanceQueue() successfully runs — it
+ * only lives in the local offline queue until then. Without this, a student
+ * marked offline appears correctly in the UI (optimistic update) right up
+ * until the next reload, at which point loadAttendanceRecords() comes back
+ * without that row and the mark silently disappears — the write itself is
+ * NOT lost (it's still safely in the queue and will sync once flushed), but
+ * the UI has no way to show it without reading the queue directly.
+ *
+ * Call this alongside loadAttendanceRecords() and merge the results into
+ * attMap so queued-but-not-yet-synced marks keep showing (with the queued
+ * badge) across a reload, instead of appearing to vanish.
+ */
+export async function getPendingAttendanceForDate(date: string): Promise<AttendanceMap> {
+  const pending = (await getQueue()).filter(item => item.table === 'attendance_records')
+  const map: AttendanceMap = new Map()
+
+  for (const item of pending) {
+    const payload = item.payload as {
+      student_id?: string
+      date?: string
+      status?: AttendanceStatus
+      notes?: string | null
+      marked_by?: string
+    }
+    if (!payload.student_id || payload.date !== date || !payload.status) continue
+
+    map.set(payload.student_id, {
+      id: item.id, // no server id yet — the queue item's own id stands in
+      student_id: payload.student_id,
+      date: payload.date,
+      status: payload.status,
+      notes: payload.notes ?? null,
+      marked_by: payload.marked_by ?? '',
+    })
+  }
+
+  return map
 }
 
 // ─── Flush offline queue ──────────────────────────────────────────────────────
@@ -672,7 +724,7 @@ export async function flushAttendanceQueue(): Promise<{
   flushed: number
   failed: Array<{ payload: Record<string, unknown>; error: string }>
 }> {
-  const pending = getQueue().filter(item => item.table === 'attendance_records')
+  const pending = (await getQueue()).filter(item => item.table === 'attendance_records')
 
   let flushed = 0
   const failed: Array<{ payload: Record<string, unknown>; error: string }> = []
@@ -688,7 +740,7 @@ export async function flushAttendanceQueue(): Promise<{
       if (error) {
         failed.push({ payload: item.payload, error: friendlyError(error.message) })
       } else {
-        clearFromQueue(item.id)
+        await clearFromQueue(item.id)
         flushed++
       }
     } catch (err: any) {
@@ -1139,6 +1191,137 @@ export async function getSchoolAttendanceAnalytics(params: {
     }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load attendance analytics' }
+  }
+}
+
+// ─── Teacher's own average attendance (PRD Tier 9 / Problem 9.4) ──────────────
+
+export interface TeacherAverageAttendance {
+  overallPercent: number | null     // null when no records exist yet across
+                                     // any of this teacher's classes, not 0%
+  totalMarks: number                // present+absent+excused+late, summed
+                                     // across every assigned class
+  presentCount: number              // 'present' only — attendance_records has
+                                     // no 'late'-counts-as-attended precedent
+                                     // of its own (unlike course attendance);
+                                     // matches getSchoolAttendanceAnalytics()'s
+                                     // own presentPercent numerator exactly,
+                                     // not re-derived with a different rule
+  perClass: {
+    classNodeId: string
+    className: string
+    percent: number | null
+    presentCount: number
+    totalMarks: number
+  }[]
+}
+
+/**
+ * A secondary-school teacher's own average attendance across every class
+ * they are currently assigned to teach (teaching_assignments, current
+ * session only — the caller resolves and filters to the current session
+ * the same way TeacherDashboard.tsx's own loadDashboardData() already does
+ * for its stat cards, not re-derived here), for the whole current
+ * session/term (owner clarification, 2026-07-23 walkthrough — not a
+ * rolling window). Built the same way loadStudentOverallAttendance()
+ * (courseAttendanceService.ts) was built: fan out across the caller's own
+ * scope, reuse the present="attended" semantics already established for
+ * this table (getSchoolAttendanceAnalytics()'s presentPercent numerator —
+ * this table has no per-period/'late' dimension of its own, see this
+ * file's header note on per-period marking's removal), one call returns
+ * both the overall figure and the per-class breakdown together (avoids a
+ * second round trip for numbers the UI renders in the same card).
+ *
+ * attendance_records has no subject_id column at all (attendance is
+ * whole-day, per-class — the same reason loadAttendanceRecords() above
+ * joins through students.class_node_id rather than reading a column on
+ * the table itself) — so "across a teacher's assigned classes/subjects"
+ * resolves to the distinct set of classNodeIds in classNodeIds below;
+ * a teacher assigned two subjects in the same class contributes that
+ * class's attendance once, not twice.
+ *
+ * scope/date bounds are resolved via resolveAnalyticsScopeRange() with
+ * scope: 'session' — the same "whole current session/term" range
+ * getSchoolAttendanceAnalytics() already computes for its own session
+ * scope — reused directly rather than re-implementing term/session
+ * date-window resolution a second time.
+ */
+export async function loadTeacherAverageAttendance(params: {
+  schoolId: string
+  classNodeIds: string[]     // distinct class_node_id set from this
+                              // teacher's current-session teaching_assignments
+                              // (caller already has this from
+                              // loadStaffTeachingAssignments())
+  classNames: Map<string, string>   // classNodeId -> display name, so this
+                              // function doesn't need its own class_nodes
+                              // query just to label the per-class breakdown
+}): Promise<Result<TeacherAverageAttendance>> {
+  try {
+    const { schoolId, classNodeIds } = params
+    if (classNodeIds.length === 0) {
+      return { ok: true, data: { overallPercent: null, totalMarks: 0, presentCount: 0, perClass: [] } }
+    }
+
+    const sessionRes = await loadCurrentSession()
+    if (!sessionRes.ok || !sessionRes.sessionId) {
+      return { ok: false, error: sessionRes.error ?? 'No current session found.' }
+    }
+    const termRes = await loadCurrentTerm(sessionRes.sessionId)
+    if (!termRes.ok) return termRes
+
+    const { startDate, endDate } = resolveAnalyticsScopeRange(
+      'session',
+      { sessionStartDate: sessionRes.sessionStartDate!, sessionEndDate: sessionRes.sessionEndDate! },
+      termRes.data ? { startDate: termRes.data.startDate, endDate: termRes.data.endDate } : null,
+    )
+
+    // One query for every attendance_records row across every assigned
+    // class in range — same students!inner(class_node_id) join
+    // loadAttendanceRecords() above already uses, widened to a date range
+    // and an .in() class list instead of one date/one-or-many classes.
+    const { data, error } = await supabase
+      .from('attendance_records')
+      .select('status, students!inner ( class_node_id )')
+      .eq('school_id', schoolId)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .in('students.class_node_id', classNodeIds)
+
+    if (error) return { ok: false, error: error.message }
+
+    const byClass = new Map<string, { present: number; total: number }>()
+    for (const id of classNodeIds) byClass.set(id, { present: 0, total: 0 })
+
+    let presentCount = 0
+    let totalMarks = 0
+    for (const row of (data ?? []) as any[]) {
+      const classId = Array.isArray(row.students) ? row.students[0]?.class_node_id : row.students?.class_node_id
+      if (!classId || !byClass.has(classId)) continue
+      const bucket = byClass.get(classId)!
+      bucket.total += 1
+      totalMarks += 1
+      if (row.status === 'present') {
+        bucket.present += 1
+        presentCount += 1
+      }
+    }
+
+    const perClass = classNodeIds.map((id) => {
+      const bucket = byClass.get(id)!
+      return {
+        classNodeId: id,
+        className: params.classNames.get(id) ?? '—',
+        percent: bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 1000) / 10 : null,
+        presentCount: bucket.present,
+        totalMarks: bucket.total,
+      }
+    })
+
+    const overallPercent = totalMarks > 0 ? Math.round((presentCount / totalMarks) * 1000) / 10 : null
+
+    return { ok: true, data: { overallPercent, totalMarks, presentCount, perClass } }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load your average attendance' }
   }
 }
 

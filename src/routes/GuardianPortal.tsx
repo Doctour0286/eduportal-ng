@@ -18,6 +18,7 @@
 
 import { useEffect, useState, useCallback, useRef, type TouchEvent as ReactTouchEvent } from 'react'
 import { Icon } from '../components/icons'
+import { getStudentPhotoSignedUrl } from '../services/studentsService'
 import {
   loadPortalIdentity,
   loadCurrentSession,
@@ -48,6 +49,13 @@ import {
   type StudentTranscript,
 } from '../services/courseResultsService'
 import { downloadTranscriptPdf } from '../services/transcriptPdf'
+import { downloadRegistrationSlipPdf } from '../services/registrationSlipPdf'
+import {
+  loadStudentPlacement,
+  loadRegistrableCourses,
+  loadCurrentRegistration,
+  registerStudent,
+} from '../services/courseRegistrationService'
 import { initiateFeesPayment, checkPaymentStatus } from '../services/remitaPortalService'
 import { downloadReceiptPdf } from '../services/receiptPdf'
 import { loadStudentCourseAttendance, type StudentCourseAttendanceRow } from '../services/courseAttendanceService'
@@ -64,7 +72,7 @@ import { TermProgressCard } from '../components/TermProgressCard'
 // SESSION 69: reused byte-for-byte from the admin flow, not reimplemented --
 // see RegistrationTab below for why reuse (not a leaner rebuild) is required.
 import { RegistrationStep } from './CourseRegistrationModule'
-import { type StudentSearchResult, loadCurrentSession as loadSettingsCurrentSession } from '../services/settingsService'
+import { type StudentSearchResult, loadCurrentSession as loadSettingsCurrentSession, loadTerms as loadSettingsTerms } from '../services/settingsService'
 // FIX (higher-ed Schedule tab routing gap, then owner-revised 2026-07-23):
 // the Schedule tab previously called TimetableModuleHigherEd directly
 // (that component's own student-facing path was already fully built and
@@ -335,6 +343,30 @@ function ChildDetail({
   const PORTAL_TABS = buildPortalTabs(isHigherEd, isStudentSelf)
   const activeIndex = PORTAL_TABS.indexOf(tab)
 
+  // Photo (PRD Tier 9 / Problem 9.3 scope fold-in) — students.photo_url is a
+  // private Storage path, never directly renderable, same convention as
+  // every other read of this column in the app (StudentsModule.tsx). This
+  // portal never resolved it at all before this fix; the avatar was a bare
+  // text initial regardless of whether the student had a real photo on
+  // file. Re-resolves on every child.photo_url change — a guardian with
+  // several children switching between them lands here with a different
+  // child prop each time, this component doesn't remount for that switch.
+  // getStudentPhotoSignedUrl() has its own internal cache keyed by path, so
+  // switching back to a previously-viewed child within the cache's TTL
+  // costs nothing extra.
+  const [childPhotoUrl, setChildPhotoUrl] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    if (!child.photo_url) {
+      setChildPhotoUrl(null)
+      return
+    }
+    getStudentPhotoSignedUrl(child.photo_url).then((url) => {
+      if (!cancelled) setChildPhotoUrl(url)
+    })
+    return () => { cancelled = true }
+  }, [child.photo_url])
+
   // Tracks which tabs have ever been opened. A tab's panel only mounts (and
   // therefore only fires its data-loading effect) the first time it's
   // visited — same cost as today's conditional render — but once mounted it
@@ -441,7 +473,11 @@ function ChildDetail({
   return (
     <div className="port-child-detail">
       <div className="port-child-header">
-        <div className="port-child-avatar">{child.full_name.charAt(0)}</div>
+        {childPhotoUrl ? (
+          <img src={childPhotoUrl} alt="" className="port-child-avatar port-child-avatar--photo" />
+        ) : (
+          <div className="port-child-avatar">{child.full_name.charAt(0)}</div>
+        )}
         <div>
           <p className="port-child-name">{child.full_name}</p>
           <p className="port-child-meta">{child.class_path_label}</p>
@@ -948,6 +984,15 @@ function TranscriptTab({
 // RegistrationStep (confirmed by direct inspection of that file); matric_number
 // is read only by StudentSearchStep, which this tab never renders, since a
 // student doesn't search for themselves.
+// PRD Tier 9 / Problem 9.6: student self-service is now read-only once an
+// initial registration exists — RegistrationStep's own summary/picker fork
+// (see that file) handles the "read-only" half via the readOnly prop; this
+// component supplies the two things that are genuinely specific to the
+// student-facing side and don't belong inside the shared step component:
+// the newly-added-core-course accept banner (the one permitted student-side
+// write, additive only) and the PDF download button (student self-service
+// only — never rendered on the admin side, per the owner's explicit
+// scoping in Problem 9.6).
 function RegistrationTab({
   schoolId,
   child,
@@ -967,7 +1012,221 @@ function RegistrationTab({
 
   return (
     <div className="port-registration">
-      <RegistrationStep schoolId={schoolId} student={selfAsStudent} onBack={() => {}} />
+      <RegistrationStep
+        schoolId={schoolId}
+        student={selfAsStudent}
+        onBack={() => {}}
+        readOnly
+        renderAboveSummary={({ onCourseAdded }) => (
+          <NewCoreCourseBanner schoolId={schoolId} studentId={child.id} onAccepted={onCourseAdded} />
+        )}
+      />
+      <StudentRegistrationDownload schoolId={schoolId} studentId={child.id} studentName={child.full_name} />
+    </div>
+  )
+}
+
+// ─── New-core-course accept banner (the one permitted student-side write) ──
+// Diffs the student's own curriculum's core-course list against their
+// currently active registrations; any core course present in the former
+// but absent from the latter is newly added since the student's initial
+// registration and surfaces here as an accept-to-add prompt. Additive
+// only — accepting calls registerStudent() with the existing active set
+// plus this one course_id; there is no reject/drop equivalent, matching
+// how core courses already behave as non-optional in the admin picker.
+function NewCoreCourseBanner({ schoolId, studentId, onAccepted }: {
+  schoolId: string
+  studentId: string
+  onAccepted: () => void
+}) {
+  const [missingCore, setMissingCore] = useState<{ course_id: string; course_code: string; course_title: string }[]>([])
+  const [placement, setPlacement] = useState<{ session_id: string } | null>(null)
+  const [termId, setTermId] = useState<string | null>(null)
+  const [accepting, setAcceptingId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const placementRes = await loadStudentPlacement(studentId)
+    if (placementRes.error || !placementRes.data) return
+    setPlacement({ session_id: placementRes.data.session_id })
+
+    // Resolve terms exactly the way RegistrationStep's own mount effect
+    // does (confirmed by direct read of that component) — via
+    // settingsService.ts's loadCurrentSession(schoolId) (the school's
+    // globally-current session), then loadTerms(schoolId, that session's
+    // id) — NOT the student's own placement.session_id. These two session
+    // ids are not guaranteed to match, and RegistrationStep's real,
+    // working behavior already depends on that exact split: the term
+    // list comes from the school's current session while the actual
+    // registration query is scoped to the student's placement session.
+    // An earlier pass here scoped terms to the placement session instead,
+    // which "cleaned up" the split but broke agreement with the visible
+    // summary — same root cause, same fix, as StudentRegistrationDownload
+    // above.
+    const schoolSessionRes = await loadSettingsCurrentSession(schoolId)
+    const termsRes = schoolSessionRes.data
+      ? await loadSettingsTerms(schoolId, schoolSessionRes.data.id)
+      : { data: [], error: null }
+    const termsForSchool = termsRes.error ? [] : termsRes.data
+    const resolvedTermId = termsForSchool.length > 0
+      ? [...termsForSchool].sort((a, b) => b.sequence - a.sequence)[0]?.id ?? null
+      : null
+    if (resolvedTermId !== termId) setTermId(resolvedTermId)
+
+    const [curRes, regRes] = await Promise.all([
+      loadRegistrableCourses(placementRes.data.programme_level_id, resolvedTermId),
+      // Session-scoped only, matching the fix in courseRegistrationService.ts —
+      // "is this core course already registered" must check across every
+      // term the student has an active row in, not just whichever term
+      // resolvedTermId happens to land on, or a core course registered
+      // under an older term would incorrectly still show as missing.
+      loadCurrentRegistration(studentId, placementRes.data.session_id),
+    ])
+    if (curRes.error || regRes.error) return
+
+    const registeredIds = new Set(regRes.data.map(r => r.course_id))
+    const missing = curRes.data
+      .filter(c => c.requirement_type === 'core' && !registeredIds.has(c.course_id))
+      .map(c => ({ course_id: c.course_id, course_code: c.course_code, course_title: c.course_title }))
+    setMissingCore(missing)
+  }, [studentId, termId])
+
+  useEffect(() => { load() }, [load])
+
+  // Additive accept — must respect the same per-term boundary confirmDrop
+  // (in CourseRegistrationModule.tsx) respects, for the identical reason:
+  // registerStudent() reconciles within exactly one (session_id, term_id)
+  // at a time, and this student's active rows can legitimately span
+  // multiple term_id values. Resubmitting every active row under a single
+  // termId (as an earlier pass here did) would silently rewrite the
+  // term_id of any row belonging to a different term — real data
+  // corruption, not an add. So this only resubmits the rows that already
+  // share the new course's own target term (termId, the resolved "latest"
+  // term this new core course is being added under), leaving every other
+  // term's rows completely untouched.
+  async function accept(courseId: string) {
+    if (!placement) return
+    setAcceptingId(courseId)
+    setError(null)
+    const existingRes = await loadCurrentRegistration(studentId, placement.session_id)
+    if (existingRes.error) { setError(existingRes.error); setAcceptingId(null); return }
+    const sameTermRows = existingRes.data.filter(r => r.term_id === termId)
+    const courses = [
+      ...sameTermRows.map(r => ({ course_id: r.course_id, is_carryover_reregistration: null as string | null })),
+      { course_id: courseId, is_carryover_reregistration: null },
+    ]
+    const res = await registerStudent({
+      school_id: schoolId,
+      student_id: studentId,
+      session_id: placement.session_id,
+      term_id: termId,
+      courses,
+    })
+    setAcceptingId(null)
+    if (res.error) { setError(res.error); return }
+    await load()
+    onAccepted()
+  }
+
+  if (missingCore.length === 0) return null
+
+  return (
+    <div className="port-registration-core-banner">
+      {missingCore.map(c => (
+        <div key={c.course_id} className="port-registration-core-banner-row">
+          <p>
+            A new required course has been added to your programme: <strong>{c.course_code} — {c.course_title}</strong>. Add it to your registration?
+          </p>
+          {error && <p className="reg-form-error">{error}</p>}
+          <button
+            className="reg-save-btn"
+            onClick={() => accept(c.course_id)}
+            disabled={accepting === c.course_id}
+          >
+            {accepting === c.course_id ? 'Adding…' : 'Add course'}
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── Registration slip download (student self-service only) ────────────────
+// Deliberately its own small component rather than logic inlined into
+// RegistrationTab — mirrors this file's own separation elsewhere (e.g.
+// TranscriptTab's own download button) and keeps the "students only, never
+// admin, never guardian-viewing-a-child" scoping enforced by simply never
+// being rendered from CourseRegistrationModule.tsx at all, rather than a
+// prop-gated conditional that could be flipped on by mistake later.
+function StudentRegistrationDownload({ schoolId, studentId, studentName }: {
+  schoolId: string
+  studentId: string
+  studentName: string
+}) {
+  const [downloading, setDownloading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleDownload() {
+    setDownloading(true)
+    setError(null)
+    const placementRes = await loadStudentPlacement(studentId)
+    if (placementRes.error || !placementRes.data) {
+      setError(placementRes.error ?? 'No current registration to download.')
+      setDownloading(false)
+      return
+    }
+    // Deliberately session-wide, not term-scoped — matches the summary's
+    // own fix (see loadCurrentRegistration()'s header in
+    // courseRegistrationService.ts): a student can have active rows under
+    // more than one term_id in the same session, and the download should
+    // show the same "true current state" the on-screen summary now shows,
+    // not a guessed single term that could hide some of it (the exact bug
+    // reported: "No active registration to download yet." next to a
+    // populated summary, traced via direct SQL to a 3-row registration
+    // split across two term_id values). No term resolution needed here
+    // at all now — sessionName still comes from the school's current
+    // session for the PDF header, but only display metadata, not a query
+    // filter.
+    const schoolSessionRes = await loadSettingsCurrentSession(schoolId)
+    const sessionName = schoolSessionRes.data?.id === placementRes.data.session_id
+      ? schoolSessionRes.data.name
+      : null
+    const regRes = await loadCurrentRegistration(studentId, placementRes.data.session_id)
+    if (regRes.error) { setError(regRes.error); setDownloading(false); return }
+    if (regRes.data.length === 0) {
+      setError('No active registration to download yet.')
+      setDownloading(false)
+      return
+    }
+    // Multiple distinct terms can legitimately appear across the rows
+    // (the same condition this whole fix is for) — join them for the PDF
+    // header rather than picking one arbitrarily; per-course term is also
+    // available via each row's own term_name if a future revision wants
+    // it broken out in the table itself.
+    const distinctTermNames = [...new Set(regRes.data.map(r => r.term_name).filter((n): n is string => !!n))]
+    const termName = distinctTermNames.length > 0 ? distinctTermNames.join(', ') : null
+    downloadRegistrationSlipPdf({
+      studentName,
+      matricNumber: placementRes.data.student_matric_number,
+      programmeName: placementRes.data.programme_name,
+      levelLabel: placementRes.data.level_label,
+      sessionName,
+      termName,
+      courses: regRes.data.map(r => ({
+        course_code: r.course_code,
+        course_title: r.course_title,
+        credit_units: r.credit_units,
+      })),
+    })
+    setDownloading(false)
+  }
+
+  return (
+    <div className="port-registration-download">
+      {error && <p className="reg-form-error">{error}</p>}
+      <button className="port-transcript-download-btn" onClick={handleDownload} disabled={downloading}>
+        {downloading ? 'Preparing…' : 'Download registration (PDF)'}
+      </button>
     </div>
   )
 }

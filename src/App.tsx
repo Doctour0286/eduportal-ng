@@ -1,6 +1,6 @@
 /**
  * App.tsx
- * Top-level routing shell for Eduportal NG.
+ * Top-level routing shell for EduSkola.
  *
  * Routing logic (in order):
  * 1. Read subdomain → query schools by slug
@@ -57,6 +57,64 @@ export interface NavIntent {
 // in this same file, not one shared binding.
 function isHigherEdSchool(schoolType: string | null | undefined): boolean {
   return !!schoolType && ['university', 'polytechnic', 'college_of_education', 'other'].includes(schoolType)
+}
+
+// ─── Active-tab persistence (PRD Tier 9 / Problem 9.7) ─────────────────────
+// A RELOAD mid-session should return to the same tab; a fresh LOGIN should
+// always force the dashboard. sessionStorage (not localStorage) is the
+// deliberate choice here — these are shared, staff-room-style devices, and
+// sessionStorage's own clear-on-tab-close behavior means a stale "last tab"
+// can never leak into a different person's later session on the same
+// machine, with no extra cleanup logic required to get that safety.
+//
+// Kept as a small, isolated read/write pair (per §5 — no browser-only APIs
+// scattered inline through render logic) rather than calling
+// sessionStorage directly at each of the several call sites below.
+const ACTIVE_TAB_STORAGE_KEY = 'activeTab'
+
+// Every value NavTab can legally hold — used to validate whatever string
+// (if anything) comes back out of sessionStorage before trusting it as a
+// real NavTab. An unrecognized or stale stored value (e.g. from a future
+// build that renamed/removed a tab) must fall back to 'home', never be
+// blindly cast.
+const VALID_NAV_TABS = new Set<NavTab>([
+  'home', 'results', 'hr', 'library', 'announcements', 'settings',
+  'guardians', 'account_preferences', 'course_registration',
+  'course_attendance', 'admission',
+  'timetable', 'attendance', 'students', 'finance', 'more',
+])
+
+function readStoredActiveTab(): NavTab {
+  if (typeof window === 'undefined' || !window.sessionStorage) return 'home'
+  try {
+    const stored = window.sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)
+    if (stored && VALID_NAV_TABS.has(stored as NavTab)) {
+      return stored as NavTab
+    }
+  } catch {
+    // sessionStorage can throw in some locked-down/private-browsing contexts —
+    // degrade to the safe default rather than crashing the app shell over it.
+  }
+  return 'home'
+}
+
+function writeStoredActiveTab(tab: NavTab): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return
+  try {
+    window.sessionStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab)
+  } catch {
+    // Same defensive degrade as readStoredActiveTab — losing persistence
+    // silently is acceptable, throwing out of a nav click is not.
+  }
+}
+
+function clearStoredActiveTab(): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return
+  try {
+    window.sessionStorage.removeItem(ACTIVE_TAB_STORAGE_KEY)
+  } catch {
+    // Same defensive degrade.
+  }
 }
 import AdminDashboard from './routes/AdminDashboard'
 import TeacherDashboard from './routes/TeacherDashboard'
@@ -121,8 +179,8 @@ function getSlugFromHostname(hostname: string): string | null {
     const parts = hostname.split('.')
     if (parts[0] !== 'localhost') return parts[0]
   } else {
-    // Production: {slug}.eduportalng.com — 3+ labels means a subdomain is present.
-    // A bare apex domain (eduportalng.com) or www.eduportalng.com has only 2
+    // Production: {slug}.eduskola.com — 3+ labels means a subdomain is present.
+    // A bare apex domain (eduskola.com) or www.eduskola.com has only 2
     // meaningful labels and must NOT be treated as a school slug.
     const parts = hostname.split('.')
     if (parts.length >= 3 && parts[0] !== 'www') {
@@ -166,7 +224,7 @@ export default function App() {
   // LoginPage from a stale flag. Reset is implicit — this is component
   // state, gone on unmount/reload, no explicit reset code needed.
   const [homepageAcknowledged, setHomepageAcknowledged] = useState(false)
-  const [activeTab, setActiveTab] = useState<NavTab>('home')
+  const [activeTab, setActiveTab] = useState<NavTab>(readStoredActiveTab)
   const [forceShowOnboarding, setForceShowOnboarding] = useState(false)
   // staff.id of the signed-in actor, resolved once via app_identities — needed by
   // HRModule so a non-admin staff member can submit/see their own leave requests.
@@ -669,6 +727,7 @@ export default function App() {
 
   function onNavigate(tab: NavTab, intent?: NavIntent) {
     setActiveTab(tab)
+    writeStoredActiveTab(tab) // Problem 9.7 — persist the bare tab id only, never the intent below
     setPendingIntent(intent ?? {})
     setMoreSheetOpen(false)    // always close More sheet on navigation
     setAccountPopoverOpen(false) // always close account popover on navigation
@@ -856,7 +915,19 @@ export default function App() {
               </button>
             )}
             <div className="account-popover-divider" />
-            <AccountSignOutButton onSignedOut={() => setAccountPopoverOpen(false)} />
+            <AccountSignOutButton
+              onSignedOut={() => {
+                setAccountPopoverOpen(false)
+                // Problem 9.7 — sign-out resets the remembered tab so the
+                // next person to log in on this device never briefly sees
+                // this account's last screen. Belt-and-suspenders with
+                // authStore.ts's own clearSession() reset below; either
+                // alone is sufficient, but there is no ordering-dependent
+                // edge case between a sign-out and the next sign-in this way.
+                setActiveTab('home')
+                clearStoredActiveTab()
+              }}
+            />
           </div>
         </>
       )}
@@ -1037,6 +1108,7 @@ function TabContent({
       return (
         <TeacherDashboard
           staffId={actorRecordId}
+          schoolType={schoolType}
           onNavigate={(tab) => onNavigate(tab)}
         />
       )

@@ -100,6 +100,7 @@ import {
   saveAttendanceRecord,
   saveBatchAttendance,
   flushAttendanceQueue,
+  getPendingAttendanceForDate,
   buildAttendanceMap,
   getAttendanceSummary,
   getSchoolAttendanceAnalytics,
@@ -416,20 +417,9 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     return () => { cancelled = true }
   }, [analyticsScope, sessionRange, currentTerm, schoolId])
 
-  // ─── Online / offline detection ────────────────────────────────────────────
-  // Uses window events but only for UI feedback — the offline queue logic in
-  // the service layer has no window references (React Native safe).
-
-  useEffect(() => {
-    const handleOnline  = () => { setIsOnline(true);  flushAttendanceQueue() }
-    const handleOffline = () => setIsOnline(false)
-    window.addEventListener('online',  handleOnline)
-    window.addEventListener('offline', handleOffline)
-    return () => {
-      window.removeEventListener('online',  handleOnline)
-      window.removeEventListener('offline', handleOffline)
-    }
-  }, [])
+  // Online/offline detection effect is declared further below, after
+  // loadRecords() exists — it needs to call loadRecords() on reconnect,
+  // see "Online / offline detection" near the offline-queue flush.
 
   // ── Two-tier selection helpers ────────────────────────────────────────────
   // Single source of truth for "what's actually picked right now," whichever
@@ -625,18 +615,65 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       date: selectedDate,
     })
 
+    const base = recordsRes.ok ? buildAttendanceMap(recordsRes.data) : new Map()
     if (!recordsRes.ok) {
-      // Non-fatal: show records as empty rather than crashing the whole view
-      setAttMap(new Map())
-      return
+      // Non-fatal: show synced records as empty rather than crashing the
+      // whole view — queued-but-unsynced rows below still get merged in.
     }
 
-    setAttMap(buildAttendanceMap(recordsRes.data))
+    // Merge in anything still sitting in the offline queue for this date —
+    // these haven't reached the server yet, so loadAttendanceRecords() above
+    // can't see them, but they're real pending writes and must keep showing
+    // (with the queued/cloud badge) across a reload rather than vanishing.
+    const pending = await getPendingAttendanceForDate(selectedDate)
+    const merged: AttendanceMap = new Map(base)
+    const stillQueued = new Set<string>()
+    pending.forEach((record, studentId) => {
+      merged.set(studentId, record)
+      stillQueued.add(studentId)
+    })
+
+    setAttMap(merged)
+    setQueuedIds(stillQueued)
   }, [effectiveSelectionKey, selectedDate, loadState])
 
   useEffect(() => {
     if (loadState === 'ready') loadRecords()
   }, [loadRecords, loadState, selectedDate])
+
+  // ─── Online / offline detection ────────────────────────────────────────────
+  // Uses window events but only for UI feedback — the offline queue logic in
+  // the service layer has no window references (React Native safe).
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true)
+      // Fire-and-forget from the browser event's point of view, but the
+      // async work inside still runs to completion and updates state when
+      // it resolves — this is not discarded, just not blocking the handler.
+      void (async () => {
+        await flushAttendanceQueue()
+        // Re-derive queuedIds/attMap from what's still actually pending
+        // rather than assuming the flush cleared everything: some items can
+        // fail (e.g. reconnected briefly, one row hit a real server error)
+        // and must keep showing the queued badge; anything that DID sync
+        // needs its badge cleared and, since it's no longer in the queue,
+        // will now come from the next loadRecords()/server read instead.
+        const stillPending = await getPendingAttendanceForDate(selectedDate)
+        setQueuedIds(new Set(stillPending.keys()))
+        // Refresh from the server so newly-synced rows (and their real
+        // server ids) replace the placeholder queued entries in attMap.
+        await loadRecords()
+      })()
+    }
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online',  handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online',  handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [selectedDate, loadRecords])
 
   // ─── Status tap handler (optimistic) ──────────────────────────────────────
 

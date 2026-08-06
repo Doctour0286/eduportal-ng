@@ -12,6 +12,28 @@ import type { PermissionScopeMap } from '../services/permissionsService'
 
 export type ActorType = 'staff' | 'guardian' | 'student' | 'platform_admin' | null
 
+// PRD Tier 9 / Problem 9.7 — same sessionStorage key App.tsx's own
+// read/write pair uses for the remembered active tab. Duplicated here
+// (rather than imported) since this codebase has no shared browser-utils
+// module today; kept as a single one-line constant + helper, not scattered
+// sessionStorage calls, so the key string only needs to match App.tsx's in
+// one place. A fresh login (real 'SIGNED_IN' event, never a reload
+// restoring an existing session) clears this so App.tsx's next render
+// always falls back to 'home', per the owner's explicit "login always
+// forces the dashboard" clarification.
+const ACTIVE_TAB_STORAGE_KEY = 'activeTab'
+
+function resetStoredActiveTab(): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return
+  try {
+    window.sessionStorage.removeItem(ACTIVE_TAB_STORAGE_KEY)
+  } catch {
+    // Same defensive degrade as App.tsx's own helpers — losing this
+    // persistence silently is acceptable, throwing out of the auth
+    // listener is not.
+  }
+}
+
 /**
  * Every finance.* permission key relevant to module ENTRY (PRD Tier 9 /
  * Problem 9.1). CONFIRMED against a real, direct query of the live
@@ -164,9 +186,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ session: null, user: null, actorType: null, displayName: null, email: null, isAdminRole: false, permissionScopes: new Map(), isLoading: false, isInitialized: true })
     }
 
-    // Subscribe to future auth state changes
-    supabase.auth.onAuthStateChange(async (_event, newSession) => {
+    // Subscribe to future auth state changes. `event` here is the real,
+    // reliable distinction between a fresh login and every other case this
+    // listener fires for (PRD Tier 9 / Problem 9.7) — the initial session
+    // restore on a page load/reload is handled entirely by the getSession()
+    // branch above and never reaches this callback at all, so a 'SIGNED_IN'
+    // event received here always means an actual, just-now sign-in, never a
+    // reload simply restoring an already-existing session. Confirmed against
+    // the real Supabase client behavior, not assumed from the event's name.
+    supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (newSession?.user) {
+        if (event === 'SIGNED_IN') {
+          // A fresh login must always land on the dashboard, regardless of
+          // whatever tab a previous session on this same browser tab last
+          // left behind — reset the persisted tab before/alongside identity
+          // resolution so App.tsx's next render never picks up a stale value.
+          resetStoredActiveTab()
+        }
         await resolveIdentity(newSession, set)
       } else {
         get().clearSession()
@@ -179,6 +215,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   clearSession: () => {
+    // Problem 9.7 — belt-and-suspenders with App.tsx's own AccountSignOutButton
+    // reset: either alone is sufficient, but clearing here too removes any
+    // ordering-dependent edge case between a sign-out and the next sign-in
+    // on the same device/browser tab.
+    resetStoredActiveTab()
     set({
       session: null,
       user: null,
@@ -283,11 +324,17 @@ async function resolveIdentity(
 
   // For staff actors, resolve whether they hold an admin-role, their
   // effective permission scopes, and their real name/email (PRD Tier 9 /
-  // Problem 9.3). Non-staff actors (guardian, student) always have
-  // isAdminRole = false, an empty permission map, and displayName/email
-  // left null here — their own self-identity is resolved separately by
-  // portalService.ts/GuardianPortal.tsx, which already reads the real
-  // students.full_name column correctly and was never part of this bug.
+  // Problem 9.3). Guardian and student actors don't have admin roles or a
+  // permission catalog to resolve (isAdminRole stays false, permissionScopes
+  // stays empty for them, same as before), but DO need their own real
+  // displayName/email resolved here too — App.tsx's account popover and
+  // header chip are shared across every actor type (mounted once, above
+  // the guardian/staff routing split), and previously fell through straight
+  // to the login email for guardian/student sessions since this branch left
+  // displayName/email null for them. portalService.ts/GuardianPortal.tsx
+  // already resolve a correct name separately for their own in-module
+  // rendering — this is a second, narrower resolution feeding only the
+  // shared App.tsx chrome, not a replacement for that existing one.
   //
   // All three staff-branch reads are independent of one another (none
   // depends on another's result), so they run via a single Promise.all
@@ -306,6 +353,13 @@ async function resolveIdentity(
     ])
     isAdminRole = adminRole
     permissionScopes = scopes
+    displayName = profile.full_name
+    email = profile.email
+  } else if ((actorType === 'guardian' || actorType === 'student') && actorRecordId) {
+    // No admin role or permission catalog applies to these actor types
+    // (isAdminRole/permissionScopes stay at their initialized false/empty
+    // defaults) — only the name/email resolution is relevant here.
+    const profile = await resolveGuardianOrStudentProfile(actorType, actorRecordId)
     displayName = profile.full_name
     email = profile.email
   }
@@ -343,6 +397,45 @@ async function resolveStaffProfile(
 ): Promise<{ full_name: string | null; email: string | null }> {
   const { data, error } = await supabase
     .from('staff')
+    .select('full_name, email')
+    .eq('id', actorRecordId)
+    .maybeSingle()
+
+  if (error || !data) {
+    return { full_name: null, email: null }
+  }
+
+  return { full_name: data.full_name ?? null, email: data.email ?? null }
+}
+
+// ---------------------------------------------------------------------------
+// resolveGuardianOrStudentProfile
+// Reads the signed-in guardian's or student's real full_name/email directly
+// from the `guardians`/`students` table (PRD Tier 9 / Problem 9.3 scope
+// extension). App.tsx's account popover and header chip are mounted once,
+// above the guardian/staff routing split, and are shared by every actor
+// type — before this fix, a guardian/student session left authStore's
+// displayName/email null and the popover fell through to the raw login
+// email, the same "vague name" bug class Problem 9.3 exists to close for
+// staff. This is a separate, narrower resolution than
+// portalService.ts/GuardianPortal.tsx's own existing in-module identity
+// read (loadPortalIdentity()/loadChildRecord()) — that one was already
+// correct and feeds the portal's own screens; this one exists only because
+// the shared App-level chrome has no other route to a real name. Both
+// `guardians.full_name`/`guardians.email` and `students.full_name`/
+// `students.email` are [STD]-readable by the record's own owner; email is
+// nullable on both tables (unlike staff.email), so a null email here is a
+// legitimate, expected value, not a query failure — only a genuinely
+// missing/errored row degrades full_name to null, matching
+// resolveStaffProfile's own fail-safe convention.
+// ---------------------------------------------------------------------------
+async function resolveGuardianOrStudentProfile(
+  actorType: 'guardian' | 'student',
+  actorRecordId: string,
+): Promise<{ full_name: string | null; email: string | null }> {
+  const table = actorType === 'guardian' ? 'guardians' : 'students'
+  const { data, error } = await supabase
+    .from(table)
     .select('full_name, email')
     .eq('id', actorRecordId)
     .maybeSingle()

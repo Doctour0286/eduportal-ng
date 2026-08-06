@@ -49,6 +49,18 @@ export interface PortalChild {
   class_node_id: string | null
   class_path_label: string
   status: string
+  /**
+   * Storage *path* (not a directly-renderable URL — the student-photos
+   * bucket is private, same as every other read of students.photo_url in
+   * this codebase). null if the student has no photo yet. Callers must
+   * resolve this via studentsService.ts's getStudentPhotoSignedUrl() before
+   * using it as an <img src>, exactly like StudentsModule.tsx already does
+   * — never render photo_url directly (PRD Tier 9 / Problem 9.3 scope
+   * fold-in: the portal's own avatar previously never read this column at
+   * all, unlike the admin-side Students module, which has had working
+   * photo upload/display since Session 21).
+   */
+  photo_url: string | null
 }
 
 export interface PortalSession {
@@ -239,7 +251,7 @@ async function loadChildRecord(studentId: string): Promise<PortalChild | null> {
     .from('students')
     .select(
       `
-      id, full_name, gender, date_of_birth, status, class_node_id,
+      id, full_name, gender, date_of_birth, status, class_node_id, photo_url,
       class_nodes ( id, name, parent_id )
     `
     )
@@ -260,6 +272,7 @@ async function loadChildRecord(studentId: string): Promise<PortalChild | null> {
     class_node_id: data.class_node_id,
     class_path_label: node?.name ?? 'Unassigned',
     status: data.status,
+    photo_url: data.photo_url ?? null,
   }
 }
 

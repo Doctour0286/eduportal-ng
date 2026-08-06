@@ -513,7 +513,7 @@ export async function saveScore(
 
     if (error) {
       if (isNetworkError(error.message)) {
-        queueWrite('scores', 'insert', payload)
+        await queueWrite('scores', 'insert', payload)
         return { ok: true, queued: true }
       }
       return { ok: false, error: friendlyError(error.message) }
@@ -521,7 +521,7 @@ export async function saveScore(
 
     return { ok: true }
   } catch (err: any) {
-    queueWrite('scores', 'insert', payload)
+    await queueWrite('scores', 'insert', payload)
     return { ok: true, queued: true }
   }
 }
@@ -609,13 +609,82 @@ export async function unapproveScores(params: {
   }
 }
 
+// ─── Read pending (queued-but-unsynced) writes ─────────────────────────────
+
+/**
+ * Returns queued score writes for one subject/session/term scope, keyed the
+ * same way as buildScoreMap() ("${studentId}|${scoreComponentId}").
+ *
+ * Same reasoning as attendanceService.getPendingAttendanceForDate(): a score
+ * saved while offline never reaches the `scores` table until
+ * flushScoresQueue() successfully runs — until then it only exists in the
+ * local offline queue. loadScores() can't see it, so without this a score
+ * entered offline shows correctly right up until the next reload, at which
+ * point it silently disappears from the grid even though the write itself
+ * is still safely queued and will sync once flushed.
+ *
+ * Filtered by subjectId/sessionId/termId (not classNodeId — the queued
+ * payload has no class_node_id, since `scores` doesn't store one; loadScores()
+ * only joins through `students` to filter by class). This is still the
+ * correct scope: ResultsModule loads one subject+session+term at a time, and
+ * a stray queued score for a different student in the same subject/term but
+ * a different class would simply not match any row currently rendered in
+ * the grid, so merging it in has no visible effect there.
+ */
+export async function getPendingScoresForScope(params: {
+  subjectId: string
+  sessionId: string
+  termId: string | null
+}): Promise<ScoreMap> {
+  const pending = (await getQueue()).filter(item => item.table === 'scores')
+  const map: ScoreMap = new Map()
+
+  for (const item of pending) {
+    const payload = item.payload as {
+      student_id?: string
+      subject_id?: string
+      term_id?: string | null
+      session_id?: string
+      score_component_id?: string
+      value?: number
+      entered_by?: string
+      approved_by?: string | null
+      approved_at?: string | null
+    }
+    if (
+      !payload.student_id ||
+      !payload.score_component_id ||
+      payload.subject_id !== params.subjectId ||
+      payload.session_id !== params.sessionId ||
+      (payload.term_id ?? null) !== params.termId
+    ) {
+      continue
+    }
+
+    map.set(`${payload.student_id}|${payload.score_component_id}`, {
+      id: item.id, // no server id yet — the queue item's own id stands in
+      student_id: payload.student_id,
+      subject_id: payload.subject_id,
+      term_id: payload.term_id ?? null,
+      session_id: payload.session_id,
+      score_component_id: payload.score_component_id,
+      value: Number(payload.value ?? 0),
+      entered_by: payload.entered_by ?? '',
+      approved_by: payload.approved_by ?? null,
+      approved_at: payload.approved_at ?? null,
+    })
+  }
+
+  return map
+}
+
 // ─── Flush offline queue ──────────────────────────────────────────────────────
 
 export async function flushScoresQueue(): Promise<{
   flushed: number
   failed: Array<{ payload: Record<string, unknown>; error: string }>
 }> {
-  const pending = getQueue().filter(item => item.table === 'scores')
+  const pending = (await getQueue()).filter(item => item.table === 'scores')
   let flushed = 0
   const failed: Array<{ payload: Record<string, unknown>; error: string }> = []
 
@@ -630,7 +699,7 @@ export async function flushScoresQueue(): Promise<{
       if (error) {
         failed.push({ payload: item.payload, error: friendlyError(error.message) })
       } else {
-        clearFromQueue(item.id)
+        await clearFromQueue(item.id)
         flushed++
       }
     } catch {

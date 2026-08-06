@@ -38,8 +38,9 @@ import {
 } from '../services/settingsService'
 import {
   loadStudentPlacement, loadRegistrableCourses, loadOutstandingCarryover,
-  loadExistingRegistrations, checkCreditLoad, registerStudent,
+  loadExistingRegistrations, loadCurrentRegistration, checkCreditLoad, registerStudent,
   type StudentCurrentPlacement, type RegistrableCourse, type CarryoverCourse,
+  type ExistingRegistration, type CurrentRegistrationRow,
 } from '../services/courseRegistrationService'
 
 // Duplicated intentionally from SettingsModule.tsx's own private
@@ -168,10 +169,22 @@ function StudentSearchStep({ schoolId, onPick }: {
 // here (registerStudent()'s withdraw-diff behavior is only safe when the
 // caller has first seen and edited the existing registration set, which
 // this component's own mount effect already guarantees).
-export function RegistrationStep({ schoolId, student, onBack }: {
+//
+// PRD Tier 9 / Problem 9.6: this component now forks on mount between two
+// views once a placement is resolved — a "Currently registered" summary
+// (default, whenever loadCurrentRegistration() returns any active rows)
+// and the original curriculum-picker form (first-time registration, or
+// reached via the summary's own "Add course" entry point). readOnly hides
+// every write control (Drop/Add) for the student self-service caller —
+// GuardianPortal's RegistrationTab passes readOnly, plus an optional
+// coreAcceptBanner slot it renders above the summary for the one
+// student-side additive exception (see that file for the banner itself).
+export function RegistrationStep({ schoolId, student, onBack, readOnly = false, renderAboveSummary }: {
   schoolId: string
   student: StudentSearchResult
   onBack: () => void
+  readOnly?: boolean
+  renderAboveSummary?: (ctx: { onCourseAdded: () => void }) => React.ReactNode
 }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -190,6 +203,23 @@ export function RegistrationStep({ schoolId, student, onBack }: {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+
+  // Currently-registered summary state (Problem 9.6). currentRegistration
+  // is null while unresolved, [] once resolved with no active rows (first-
+  // time registration — go straight to the picker), non-empty once an
+  // active registration exists (show the summary first). view toggles
+  // between the summary and the picker form for the admin's "Add course"
+  // entry point; readOnly callers never leave 'summary' since they have
+  // no write path into the picker at all.
+  //
+  // CurrentRegistrationRow (not ExistingRegistration) — this summary is
+  // session-scoped only, not term-scoped, per the fix below.
+  const [currentRegistration, setCurrentRegistration] = useState<CurrentRegistrationRow[] | null>(null)
+  const [registrationLoading, setRegistrationLoading] = useState(false)
+  const [view, setView] = useState<'summary' | 'picker'>('summary')
+  const [dropTarget, setDropTarget] = useState<CurrentRegistrationRow | null>(null)
+  const [dropping, setDropping] = useState(false)
+  const [dropError, setDropError] = useState<string | null>(null)
 
   // Load placement + session + terms once, on mount.
   useEffect(() => {
@@ -253,6 +283,112 @@ export function RegistrationStep({ schoolId, student, onBack }: {
   }, [placement, terms.length, selectedTermId, student.id])
 
   useEffect(() => { loadForTerm() }, [loadForTerm])
+
+  // Load the "currently registered" summary once we know the placement.
+  // Deliberately session-scoped only (no term dependency, no readiness
+  // gate on selectedTermId) — this is the fix for the real on-device bug
+  // traced via direct SQL: a student can have active course_registrations
+  // rows spread across more than one term_id (including null) for the
+  // same session, because registerStudent()'s withdraw-diff only
+  // reconciles within the exact term it's called with. Gating this on
+  // selectedTermId (as the term-scoped picker/curriculum load must) would
+  // silently re-introduce the same bug — showing only whichever term the
+  // admin happens to have selected, hiding the rest. loadCurrentRegistration()
+  // itself now loads every active row for student+session regardless of
+  // term, so this effect only needs to wait on placement.
+  const refreshCurrentRegistration = useCallback(async () => {
+    if (!placement) return
+    setRegistrationLoading(true)
+    const res = await loadCurrentRegistration(student.id, placement.session_id)
+    if (!res.error) setCurrentRegistration(res.data)
+    setRegistrationLoading(false)
+  }, [placement, student.id])
+
+  useEffect(() => { refreshCurrentRegistration() }, [refreshCurrentRegistration])
+
+  // Admin-only: drop one course from the active registration. Per the
+  // design-fork decision (see courseRegistrationService.ts's
+  // registerStudent() header), this is a full-set resubmit, not a
+  // surgical delete — but registerStudent() reconciles within exactly one
+  // (session_id, term_id) at a time, and currentRegistration can now
+  // legitimately span MULTIPLE term_id values for the same student+session
+  // (the real data-integrity gap this whole fix traces back to — see
+  // loadCurrentRegistration()'s header). Resubmitting every remaining row
+  // under a single term_id (e.g. whatever the admin's picker term happens
+  // to be) would silently REWRITE the term_id of rows that belong to a
+  // different term — real data corruption, not a drop. So this groups the
+  // remaining rows by their own term_id and issues one registerStudent()
+  // call per group, each under its own real term_id, leaving every other
+  // term's rows genuinely untouched.
+  async function confirmDrop() {
+    if (!dropTarget || !placement) return
+    setDropping(true)
+    setDropError(null)
+    const remaining = (currentRegistration ?? []).filter(r => r.id !== dropTarget.id)
+
+    const groups = new Map<string | null, CurrentRegistrationRow[]>()
+    for (const row of remaining) {
+      const key = row.term_id
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)!.push(row)
+    }
+    // The dropped course's own term must still be resubmitted even if it
+    // ends up empty after removal — an empty group for that one term_id
+    // is what actually withdraws it; a group that simply never appears in
+    // `groups` (because every row under that term_id was just removed)
+    // needs an explicit empty-resubmit, not a skip.
+    if (!groups.has(dropTarget.term_id)) groups.set(dropTarget.term_id, [])
+
+    let sawError: string | null = null
+    for (const [termId, rows] of groups) {
+      const coursesToSave = rows.map(r => ({
+        course_id: r.course_id,
+        is_carryover_reregistration: null as string | null,
+      }))
+      // registerStudent() requires at least one course — dropping the
+      // last remaining course under a given term is a real, valid admin
+      // action, so route that case through a hard withdraw-all for just
+      // that term's rows instead of a call the function itself would
+      // reject.
+      const res = coursesToSave.length > 0
+        ? await registerStudent({
+            school_id: schoolId,
+            student_id: student.id,
+            session_id: placement.session_id,
+            term_id: termId,
+            courses: coursesToSave,
+          })
+        : await withdrawAllActiveForTerm(termId)
+      if (res.error) { sawError = res.error; break }
+    }
+
+    setDropping(false)
+    if (sawError) { setDropError(sawError); return }
+    setDropTarget(null)
+    await refreshCurrentRegistration()
+    await loadForTerm()
+  }
+
+  // Withdraws every currently-active row under one specific term_id only
+  // (never all of currentRegistration — that would cross the same
+  // per-term boundary confirmDrop's grouping exists to respect). Used
+  // when a drop empties out one term's group entirely; registerStudent()
+  // refuses an empty course list outright (it exists to save a
+  // registration, not clear one), so the last-course-in-a-term case is
+  // handled here directly against the same soft-withdraw convention
+  // registerStudent() itself uses.
+  async function withdrawAllActiveForTerm(termId: string | null): Promise<{ error: string | null }> {
+    const ids = (currentRegistration ?? [])
+      .filter(r => r.term_id === termId)
+      .map(r => r.id)
+    if (ids.length === 0) return { error: null }
+    const { supabase } = await import('../lib/supabase')
+    const { error } = await supabase
+      .from('course_registrations')
+      .update({ status: 'withdrawn', updated_at: new Date().toISOString() })
+      .in('id', ids)
+    return { error: error?.message ?? null }
+  }
 
   if (loading) return <div className="reg-tab-content"><p className="reg-hint-text">Loading…</p></div>
   if (error) {
@@ -322,20 +458,119 @@ export function RegistrationStep({ schoolId, student, onBack }: {
     if (res.error) { setSaveError(res.error); return }
     setSaved(true)
     await loadForTerm()
+    await refreshCurrentRegistration()
+    // Admin "Add course" flow returns to the summary after a successful
+    // save, matching progressive-disclosure (§4.3) — the picker is the
+    // deeper, occasional action, the summary is what the screen should
+    // settle back on. First-time registration (no readOnly, no prior
+    // summary to return to) has no summary to bounce to yet, so this is a
+    // no-op there — refreshCurrentRegistration() above will populate one
+    // on the next render, and the summary fork below picks it up
+    // naturally without an explicit view change being required.
+    setView('summary')
   }
 
   const readyToShowCurriculum = terms.length === 0 || !!selectedTermId
+
+  const studentBanner = (
+    <div className="reg-student-banner">
+      <p className="reg-list-row-name">{placement.student_name}</p>
+      <p className="reg-list-row-meta">
+        {placement.student_matric_number ?? 'No matric number'} · {placement.programme_name} · Level {placement.level_label}
+      </p>
+    </div>
+  )
+
+  // ─── "Currently registered" summary (Problem 9.6) ───────────────────────
+  // Shown whenever an active registration exists for the resolved
+  // session+term and we're not in the picker view. registrationLoading
+  // covers the same term-selection gate loadForTerm() uses (terms.length
+  // > 0 && !selectedTermId means currentRegistration is deliberately []
+  // without having actually resolved anything yet) — but that state
+  // already renders its own "choose a semester" hint further down via
+  // readyToShowCurriculum, so the summary fork only activates once a term
+  // is genuinely resolved one way or the other.
+  const hasActiveRegistration = (currentRegistration?.length ?? 0) > 0
+  if (readyToShowCurriculum && view === 'summary' && (registrationLoading || hasActiveRegistration)) {
+    const totalUnits = (currentRegistration ?? []).reduce((sum, r) => sum + r.credit_units, 0)
+    return (
+      <div className="reg-tab-content">
+        <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+        {studentBanner}
+
+        {renderAboveSummary?.({ onCourseAdded: async () => { await refreshCurrentRegistration(); await loadForTerm() } })}
+
+        <p className="reg-section-label">Currently registered</p>
+
+        {registrationLoading && <p className="reg-hint-text">Loading…</p>}
+
+        {!registrationLoading && (currentRegistration ?? []).map(r => (
+          <div key={r.id}>
+            <div className="reg-list-row">
+              <div className="reg-list-row-info">
+                <p className="reg-list-row-name">{r.course_code} — {r.course_title}</p>
+                <p className="reg-list-row-meta">
+                  {r.credit_units} unit{r.credit_units === 1 ? '' : 's'}
+                  {r.term_name ? ` · ${r.term_name}` : ''}
+                  {r.is_carryover ? ' · Carryover' : ''}
+                </p>
+              </div>
+              {!readOnly && dropTarget?.id !== r.id && (
+                <button
+                  className="reg-drop-btn"
+                  onClick={() => { setDropTarget(r); setDropError(null) }}
+                >
+                  Drop
+                </button>
+              )}
+            </div>
+            {/* Drop confirmation — same inline-banner shape as StudentsModule.tsx's
+                stu-confirm-banner (this codebase's established destructive-confirm
+                pattern), rendered directly below the row it targets rather than as
+                an overlay/modal, which nothing else in this project uses. */}
+            {dropTarget?.id === r.id && (
+              <div className="reg-drop-confirm-banner">
+                <p className="reg-drop-confirm-text">
+                  Drop {dropTarget.course_code} — {dropTarget.course_title} ({dropTarget.credit_units} unit{dropTarget.credit_units === 1 ? '' : 's'})? This does not affect any other registered course.
+                </p>
+                {dropError && <p className="reg-form-error">{dropError}</p>}
+                <div className="reg-drop-confirm-actions">
+                  <button className="reg-drop-confirm-cancel" onClick={() => { setDropTarget(null); setDropError(null) }} disabled={dropping}>
+                    Keep
+                  </button>
+                  <button className="reg-drop-confirm-danger" onClick={confirmDrop} disabled={dropping}>
+                    {dropping ? 'Dropping…' : 'Drop course'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {!registrationLoading && (
+          <div className="reg-summary-bar">
+            <p className="reg-summary-ok">{totalUnits} total credit units</p>
+          </div>
+        )}
+
+        {!readOnly && !registrationLoading && (
+          <button className="reg-save-btn" onClick={() => setView('picker')}>
+            + Add course
+          </button>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="reg-tab-content">
       <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
 
-      <div className="reg-student-banner">
-        <p className="reg-list-row-name">{placement.student_name}</p>
-        <p className="reg-list-row-meta">
-          {placement.student_matric_number ?? 'No matric number'} · {placement.programme_name} · Level {placement.level_label}
-        </p>
-      </div>
+      {studentBanner}
+
+      {!readOnly && hasActiveRegistration && (
+        <button className="reg-back-btn" onClick={() => setView('summary')}>← Back to current registration</button>
+      )}
 
       {/* SESSION 67 follow-up: "Semester" not "Term" — this module only
           ever renders for a higher-ed school (gated by
