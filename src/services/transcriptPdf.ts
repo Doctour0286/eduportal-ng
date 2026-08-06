@@ -40,7 +40,7 @@
  */
 
 import jsPDF from 'jspdf'
-import autoTable from 'jspdf-autotable'
+import autoTable, { type CellHookData } from 'jspdf-autotable'
 import type { StudentTranscript, TranscriptSemester } from './courseResultsService'
 
 // ─── Brand color resolution (same approach as printStudentIdCards.ts) ─────
@@ -232,7 +232,7 @@ function drawSemesterTable(
     // excluded from the calculation") is a display instruction, not a
     // filter; the CGPA math these rows are excluded from already happened
     // upstream in gpaService.ts, this table just needs to say so.
-    didParseCell: (data) => {
+    didParseCell: (data: CellHookData) => {
       const rowIndex = data.row.index
       if (data.section === 'body' && semester.courses[rowIndex]?.is_superseded) {
         data.cell.styles.textColor = [156, 163, 175]

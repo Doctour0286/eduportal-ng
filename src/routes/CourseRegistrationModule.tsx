@@ -40,7 +40,7 @@ import {
   loadStudentPlacement, loadRegistrableCourses, loadOutstandingCarryover,
   loadExistingRegistrations, loadCurrentRegistration, checkCreditLoad, registerStudent,
   type StudentCurrentPlacement, type RegistrableCourse, type CarryoverCourse,
-  type ExistingRegistration, type CurrentRegistrationRow,
+  type CurrentRegistrationRow,
 } from '../services/courseRegistrationService'
 
 // Duplicated intentionally from SettingsModule.tsx's own private
