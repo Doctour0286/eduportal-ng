@@ -1010,6 +1010,22 @@ function RegistrationTab({
   // this comment silently papering over a real mismatch.
   const selfAsStudent: StudentSearchResult = { id: child.id, full_name: child.full_name, matric_number: null }
 
+  // Mirrors RegistrationStep's own summary semester filter (owner-
+  // requested, 2026-08-06) so the download button below can respect
+  // whichever semester the student is currently looking at, rather than
+  // always downloading every active row regardless of what's on screen.
+  // useCallback here is load-bearing, not just tidy — RegistrationStep's
+  // own effect that calls this depends on it for identity stability (see
+  // that component's onSummaryTermFilterChange prop comment).
+  const [summaryFilter, setSummaryFilter] = useState<{ termId: string | null; termName: string | null }>({
+    termId: null,
+    termName: null,
+  })
+  const handleSummaryTermFilterChange = useCallback(
+    (filter: { termId: string | null; termName: string | null }) => setSummaryFilter(filter),
+    [],
+  )
+
   return (
     <div className="port-registration">
       <RegistrationStep
@@ -1020,8 +1036,14 @@ function RegistrationTab({
         renderAboveSummary={({ onCourseAdded }) => (
           <NewCoreCourseBanner schoolId={schoolId} studentId={child.id} onAccepted={onCourseAdded} />
         )}
+        onSummaryTermFilterChange={handleSummaryTermFilterChange}
       />
-      <StudentRegistrationDownload schoolId={schoolId} studentId={child.id} studentName={child.full_name} />
+      <StudentRegistrationDownload
+        schoolId={schoolId}
+        studentId={child.id}
+        studentName={child.full_name}
+        termFilter={summaryFilter}
+      />
     </div>
   )
 }
@@ -1098,12 +1120,11 @@ function NewCoreCourseBanner({ schoolId, studentId, onAccepted }: {
   // registerStudent() reconciles within exactly one (session_id, term_id)
   // at a time, and this student's active rows can legitimately span
   // multiple term_id values. Resubmitting every active row under a single
-  // termId (as an earlier pass here did) would silently rewrite the
-  // term_id of any row belonging to a different term — real data
-  // corruption, not an add. So this only resubmits the rows that already
-  // share the new course's own target term (termId, the resolved "latest"
-  // term this new core course is being added under), leaving every other
-  // term's rows completely untouched.
+  // termId would silently rewrite the term_id of any row belonging to a
+  // different term — real data corruption, not an add. So this only
+  // resubmits the rows that already share the new course's own target
+  // term (termId, the resolved "latest" term this new core course is
+  // being added under), leaving every other term's rows untouched.
   async function accept(courseId: string) {
     if (!placement) return
     setAcceptingId(courseId)
@@ -1158,10 +1179,15 @@ function NewCoreCourseBanner({ schoolId, studentId, onAccepted }: {
 // admin, never guardian-viewing-a-child" scoping enforced by simply never
 // being rendered from CourseRegistrationModule.tsx at all, rather than a
 // prop-gated conditional that could be flipped on by mistake later.
-function StudentRegistrationDownload({ schoolId, studentId, studentName }: {
+function StudentRegistrationDownload({ schoolId, studentId, studentName, termFilter }: {
   schoolId: string
   studentId: string
   studentName: string
+  // Mirrors RegistrationStep's own summary semester filter (see that
+  // component's onSummaryTermFilterChange prop) — null termId means "All
+  // semesters" (download everything active), a real termId scopes the
+  // PDF to just that semester's rows, same as the on-screen summary.
+  termFilter: { termId: string | null; termName: string | null }
 }) {
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1175,36 +1201,47 @@ function StudentRegistrationDownload({ schoolId, studentId, studentName }: {
       setDownloading(false)
       return
     }
-    // Deliberately session-wide, not term-scoped — matches the summary's
-    // own fix (see loadCurrentRegistration()'s header in
+    // Session-wide, not term-scoped at the query level — matches the
+    // summary's own fix (see loadCurrentRegistration()'s header in
     // courseRegistrationService.ts): a student can have active rows under
-    // more than one term_id in the same session, and the download should
-    // show the same "true current state" the on-screen summary now shows,
-    // not a guessed single term that could hide some of it (the exact bug
-    // reported: "No active registration to download yet." next to a
-    // populated summary, traced via direct SQL to a 3-row registration
-    // split across two term_id values). No term resolution needed here
-    // at all now — sessionName still comes from the school's current
-    // session for the PDF header, but only display metadata, not a query
-    // filter.
+    // more than one term_id in the same session. Filtering to just the
+    // selected semester happens client-side below, using the exact same
+    // rule the on-screen summary applies (a null-term row is unscoped,
+    // not "wrong semester," so it's always included regardless of which
+    // semester is picked) — see RegistrationStep's own filteredRegistration
+    // for the rule this mirrors.
     const schoolSessionRes = await loadSettingsCurrentSession(schoolId)
     const sessionName = schoolSessionRes.data?.id === placementRes.data.session_id
       ? schoolSessionRes.data.name
       : null
     const regRes = await loadCurrentRegistration(studentId, placementRes.data.session_id)
     if (regRes.error) { setError(regRes.error); setDownloading(false); return }
-    if (regRes.data.length === 0) {
-      setError('No active registration to download yet.')
+
+    const filteredRows = termFilter.termId === null
+      ? regRes.data
+      : regRes.data.filter(r => r.term_id === termFilter.termId || r.term_id === null)
+
+    if (filteredRows.length === 0) {
+      setError(
+        termFilter.termId === null
+          ? 'No active registration to download yet.'
+          : `No courses registered for ${termFilter.termName ?? 'this semester'} yet.`,
+      )
       setDownloading(false)
       return
     }
-    // Multiple distinct terms can legitimately appear across the rows
-    // (the same condition this whole fix is for) — join them for the PDF
-    // header rather than picking one arbitrarily; per-course term is also
-    // available via each row's own term_name if a future revision wants
-    // it broken out in the table itself.
-    const distinctTermNames = [...new Set(regRes.data.map(r => r.term_name).filter((n): n is string => !!n))]
-    const termName = distinctTermNames.length > 0 ? distinctTermNames.join(', ') : null
+    // termName for the PDF header: the selected filter's own name when a
+    // specific semester is chosen; otherwise every distinct term actually
+    // present across the (unfiltered) rows, joined — same "don't pick one
+    // arbitrarily" reasoning as before, now only reached in the "All
+    // semesters" case since a specific selection already has an
+    // unambiguous name.
+    const termName = termFilter.termId !== null
+      ? termFilter.termName
+      : (() => {
+          const distinct = [...new Set(filteredRows.map(r => r.term_name).filter((n): n is string => !!n))]
+          return distinct.length > 0 ? distinct.join(', ') : null
+        })()
     downloadRegistrationSlipPdf({
       studentName,
       matricNumber: placementRes.data.student_matric_number,
@@ -1212,7 +1249,7 @@ function StudentRegistrationDownload({ schoolId, studentId, studentName }: {
       levelLabel: placementRes.data.level_label,
       sessionName,
       termName,
-      courses: regRes.data.map(r => ({
+      courses: filteredRows.map(r => ({
         course_code: r.course_code,
         course_title: r.course_title,
         credit_units: r.credit_units,

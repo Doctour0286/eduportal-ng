@@ -287,6 +287,17 @@ export async function loadExistingRegistrations(
   return { data: mapped as ExistingRegistration[], error: null }
 }
 
+// ─── Currently-registered summary (PRD Tier 9 / Problem 9.6) ──────────────
+
+// Deliberately a thin wrapper over loadExistingRegistrations() rather than
+// a new query — that function's ExistingRegistration shape (code, title,
+// units, status, is_carryover) is already exactly what the "Currently
+// registered" summary view needs to render. Kept as its own named export
+// (rather than calling loadExistingRegistrations() directly from the UI)
+// so the summary view's intent — "does this student already have an
+// active registration for this term" — reads clearly at the call site,
+// and so a future divergence in what the summary needs vs. what the
+// picker's pre-check needs has a natural seam to split from.
 export interface CurrentRegistrationRow {
   id: string
   course_id: string
@@ -301,30 +312,28 @@ export interface CurrentRegistrationRow {
 // ─── Currently-registered summary (PRD Tier 9 / Problem 9.6) ──────────────
 
 // Deliberately its OWN query, not a call-through to loadExistingRegistrations()
-// (which this function originally was — see git history/prior session).
-// Reason for the split, found while tracing a real on-device bug: a
-// student can end up with active course_registrations rows spread across
-// more than one term_id for the same session — confirmed directly via SQL
-// on a real student (two rows with term_id null, one with a real term_id,
-// all status='registered', same session_id). This happens because
-// registerStudent()'s withdraw-diff only ever reconciles rows within the
-// exact (session_id, term_id) it's called with — it has no way to know
-// about, and so never withdraws, that same student's active rows sitting
-// under a DIFFERENT term_id in the same session. loadExistingRegistrations()
-// being exact-term-scoped (by design, for the picker's own pre-check
-// purpose) meant the "Currently registered" summary — which is supposed to
-// answer "what does this student currently have active, full stop" — could
-// only ever see whichever single term the caller happened to resolve,
-// silently hiding the rest. This function instead loads every active row
-// for the student+session regardless of term, and returns each row's own
-// term_id/term_name so the UI can label multi-term registrations clearly
-// rather than pretending they don't exist.
+// (which this function originally was). Reason for the split, found while
+// tracing a real on-device bug: a student can end up with active
+// course_registrations rows spread across more than one term_id for the
+// same session — confirmed directly via SQL on a real student (two rows
+// with term_id null, one with a real term_id, all status='registered',
+// same session_id). This happens because registerStudent()'s withdraw-diff
+// only ever reconciles rows within the exact (session_id, term_id) it's
+// called with — it has no way to know about, and so never withdraws, that
+// same student's active rows sitting under a DIFFERENT term_id in the same
+// session. loadExistingRegistrations() being exact-term-scoped (by design,
+// for the picker's own pre-check purpose) meant the "Currently registered"
+// summary — which is supposed to answer "what does this student currently
+// have active, full stop" — could only ever see whichever single term the
+// caller happened to resolve, silently hiding the rest. This function
+// instead loads every active row for the student+session regardless of
+// term, and returns each row's own term_id/term_name so the UI can label
+// multi-term registrations clearly rather than pretending they don't exist.
 //
 // This does NOT change registerStudent()'s own save/withdraw behavior —
-// that per-term reconciliation gap is a separate, flagged decision (see
-// Problem 9.6 follow-up notes) requiring its own sign-off before touching
-// the write path. This is a read-side fix only: show the true current
-// state accurately, whatever it is.
+// that per-term reconciliation gap is a separate, flagged decision
+// requiring its own sign-off before touching the write path. This is a
+// read-side fix only: show the true current state accurately, whatever it is.
 export async function loadCurrentRegistration(
   studentId: string,
   sessionId: string,

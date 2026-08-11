@@ -46,16 +46,26 @@
  * in users (school-scoped, `is_public = true`, excludes expired unless
  * asked) — this file does not build a second, parallel announcements query
  * with different filtering rules; see loadPublicAnnouncements() below.
- *
- * Homepage posts (2026-07-11 follow-up, PRD Row 34 / Problem 7.1): a new
- * school_homepage_posts table (see add_school_homepage_posts_table.sql)
- * holds several ordered, expandable posts per school — a genuine
- * one-to-many relationship, deliberately separate from the singleton
- * welcome_post above. Same public-read / school-admin-write RLS shape as
- * every other table this file touches. See loadPublicHomepagePosts() below.
  */
 
 import { supabase } from '../lib/supabase'
+import {
+  normalizeBlocks,
+  type WelcomePostBlock,
+  type WelcomePostTextRun,
+  type WelcomePostTextLevel,
+} from './settingsService'
+
+// Re-exported so PublicHomepage.tsx can import the block/run/level shapes
+// from this file alone, without also reaching into settingsService.ts
+// directly — this file is the anonymous-read boundary for the public page,
+// settingsService.ts is the authenticated-admin editor for the same
+// underlying data. Both sides share one shape (not a second, parallel
+// type) because they render/produce the exact same jsonb blocks column;
+// see normalizeBlocks' own doc comment in settingsService.ts for why a
+// shared normalizer matters (old posts saved before the rich-text/level
+// upgrade must still render, on this page too, not just in Settings).
+export type { WelcomePostBlock, WelcomePostTextRun, WelcomePostTextLevel }
 
 // ─── Result type (consistent with every other service in this app) ────────
 
@@ -80,53 +90,11 @@ export interface ContactInfo {
 }
 
 // ─── Welcome post (owner request, 2026-07-11) ──────────────────────────────
-// Mirrors settingsService.ts's own WelcomePost/WelcomePostBlock shape
-// exactly — this is a read-only view of the same admin-written data, not a
-// second, independently-evolving type. See add_welcome_post_column.sql.
-
-export interface WelcomePostTextRun {
-  text: string
-  bold?: boolean
-  italic?: boolean
-}
-
-export type WelcomePostTextLevel = 'p' | 'h2' | 'h3' | 'h4'
-
-export interface WelcomePostTextBlock {
-  type: 'text'
-  level: WelcomePostTextLevel
-  runs: WelcomePostTextRun[]
-}
-
-export interface WelcomePostImageBlock {
-  type: 'image'
-  url: string
-  caption?: string
-}
-
-export type WelcomePostBlock = WelcomePostTextBlock | WelcomePostImageBlock
-
-interface LegacyParagraphBlock {
-  type: 'paragraph'
-  text: string
-}
-
-/** Same normalization as settingsService.ts's own copy — a block saved
- *  before the rich-text upgrade (2026-07-11 follow-up #3) still reads
- *  correctly as a plain, unstyled paragraph, no migration script or data
- *  loss required. */
-export function normalizeBlock(raw: WelcomePostBlock | LegacyParagraphBlock): WelcomePostBlock {
-  if ((raw as LegacyParagraphBlock).type === 'paragraph') {
-    const legacy = raw as LegacyParagraphBlock
-    return { type: 'text', level: 'p', runs: [{ text: legacy.text }] }
-  }
-  return raw as WelcomePostBlock
-}
-
-export function normalizeBlocks(raw: unknown): WelcomePostBlock[] {
-  if (!Array.isArray(raw)) return []
-  return raw.map(normalizeBlock)
-}
+// WelcomePost's own `blocks` field uses the shared WelcomePostBlock shape
+// imported above (heading-level text blocks + image blocks, matching
+// exactly what settingsService.ts's editor writes) — this is a read-only
+// view of the same admin-written data, not a second, independently-
+// evolving type. See add_welcome_post_column.sql.
 
 export interface WelcomePost {
   heading: string
@@ -153,6 +121,22 @@ export interface PublicAnnouncement {
   title: string
   body: string
   posted_at: string
+}
+
+// ─── Homepage posts (owner request, 2026-07-11 follow-up) ─────────────────
+// Anonymous-read view of settingsService.ts's own HomepagePost — same
+// school_homepage_posts table, same shared WelcomePostBlock shape for
+// `blocks`, but without the school_id/created_at/updated_at fields this
+// page's own components never read. Kept as a distinct type (not an
+// import of HomepagePost itself) so this file's public surface doesn't
+// widen every time the authenticated editor's own row shape grows a new
+// admin-only field.
+
+export interface PublicHomepagePost {
+  id: string
+  heading: string
+  blocks: WelcomePostBlock[]
+  always_expanded: boolean
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -205,13 +189,16 @@ export async function loadPublicSchoolData(
     // error (configErr set) is still surfaced, distinct from "no row."
     if (configErr) return { ok: false, error: friendlyError(configErr, 'Failed to load school page config') }
 
-    const rawWelcomePost = config?.welcome_post as { heading?: string; blocks?: unknown } | null | undefined
-
     const resolvedConfig: PublicSchoolConfig = config
       ? {
           school_id:          config.school_id as string,
           welcome_message:    config.welcome_message as string | null,
-          welcome_post:       rawWelcomePost ? { heading: rawWelcomePost.heading ?? '', blocks: normalizeBlocks(rawWelcomePost.blocks) } : null,
+          welcome_post:       config.welcome_post
+            ? {
+                heading: (config.welcome_post as { heading?: string }).heading ?? '',
+                blocks:  normalizeBlocks((config.welcome_post as { blocks?: unknown }).blocks),
+              }
+            : null,
           contact_info:       (config.contact_info as ContactInfo | null) ?? null,
           show_announcements: (config.show_announcements as boolean | null) ?? false,
           custom_fields:      (config.custom_fields as Record<string, unknown> | null) ?? null,
@@ -240,6 +227,47 @@ export async function loadPublicSchoolData(
     }
   } catch (e) {
     return { ok: false, error: `Failed to load school: ${(e as Error).message}` }
+  }
+}
+
+// ─── Load homepage posts ────────────────────────────────────────────────────
+
+/**
+ * Anonymous-read counterpart to settingsService.ts's own loadHomepagePosts —
+ * same school_homepage_posts table, same sort_order ascending order, same
+ * normalizeBlocks() pass on the way out so a post saved before the rich-
+ * text/level upgrade still renders correctly here too, not just in
+ * Settings. Deliberately re-implemented rather than calling
+ * loadHomepagePosts() directly, same reasoning as loadPublicAnnouncements()
+ * below: that function's own error shape ({ data, error: string | null })
+ * isn't this file's Result<T> convention, and re-running the same
+ * school_id-scoped select here keeps this file's own anonymous-read
+ * surface self-contained and auditable without a cross-file trust
+ * assumption about a function written for an authenticated caller.
+ */
+export async function loadPublicHomepagePosts(
+  schoolId: string
+): Promise<Result<PublicHomepagePost[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('school_homepage_posts')
+      .select('id, heading, blocks, always_expanded')
+      .eq('school_id', schoolId)
+      .order('sort_order', { ascending: true })
+
+    if (error) return { ok: false, error: friendlyError(error, 'Failed to load homepage posts') }
+
+    return {
+      ok: true,
+      data: (data ?? []).map((row: Record<string, unknown>) => ({
+        id:              row.id as string,
+        heading:         row.heading as string,
+        blocks:          normalizeBlocks(row.blocks),
+        always_expanded: (row.always_expanded as boolean | null) ?? false,
+      })),
+    }
+  } catch (e) {
+    return { ok: false, error: `Failed to load homepage posts: ${(e as Error).message}` }
   }
 }
 
@@ -283,47 +311,5 @@ export async function loadPublicAnnouncements(
     }
   } catch (e) {
     return { ok: false, error: `Failed to load announcements: ${(e as Error).message}` }
-  }
-}
-
-// ─── Load homepage posts ───────────────────────────────────────────────────
-// PRD Row 34 / Problem 7.1 follow-up #2 (owner request 2026-07-11). Public,
-// anonymous read of the school's ordered post list — mirrors
-// settingsService.ts's own HomepagePost shape exactly (read-side view of
-// the same admin-written table), same "each service owns its own
-// read/write types" convention already used for WelcomePost above.
-
-export interface PublicHomepagePost {
-  id: string
-  heading: string
-  blocks: WelcomePostBlock[]
-  always_expanded: boolean
-  sort_order: number
-}
-
-export async function loadPublicHomepagePosts(
-  schoolId: string
-): Promise<Result<PublicHomepagePost[]>> {
-  try {
-    const { data, error } = await supabase
-      .from('school_homepage_posts')
-      .select('id, heading, blocks, always_expanded, sort_order')
-      .eq('school_id', schoolId)
-      .order('sort_order', { ascending: true })
-
-    if (error) return { ok: false, error: friendlyError(error, 'Failed to load posts') }
-
-    return {
-      ok: true,
-      data: (data ?? []).map((r: Record<string, unknown>) => ({
-        id:              r.id as string,
-        heading:         r.heading as string,
-        blocks:          normalizeBlocks(r.blocks),
-        always_expanded: r.always_expanded as boolean,
-        sort_order:      r.sort_order as number,
-      })),
-    }
-  } catch (e) {
-    return { ok: false, error: `Failed to load posts: ${(e as Error).message}` }
   }
 }

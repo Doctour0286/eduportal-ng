@@ -179,12 +179,24 @@ function StudentSearchStep({ schoolId, onPick }: {
 // GuardianPortal's RegistrationTab passes readOnly, plus an optional
 // coreAcceptBanner slot it renders above the summary for the one
 // student-side additive exception (see that file for the banner itself).
-export function RegistrationStep({ schoolId, student, onBack, readOnly = false, renderAboveSummary }: {
+export function RegistrationStep({ schoolId, student, onBack, readOnly = false, renderAboveSummary, onSummaryTermFilterChange }: {
   schoolId: string
   student: StudentSearchResult
   onBack: () => void
   readOnly?: boolean
   renderAboveSummary?: (ctx: { onCourseAdded: () => void }) => React.ReactNode
+  // Owner-requested (2026-08-06): lets a caller (GuardianPortal.tsx's
+  // RegistrationTab) mirror the summary's own semester filter into its
+  // own separate download button, so "download PDF" respects whatever
+  // semester the student is currently looking at rather than always
+  // downloading everything. Fired with the resolved term's id+name (or
+  // null for "All semesters") on every change, including the initial
+  // mount default. Deliberately a callback, not a lifted/controlled
+  // prop — CourseRegistrationModule.tsx's own admin usage of this same
+  // component doesn't want this filter at all, so keeping the state
+  // internal here and only reporting it outward avoids forcing every
+  // caller to manage state it doesn't need.
+  onSummaryTermFilterChange?: (filter: { termId: string | null; termName: string | null }) => void
 }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -220,6 +232,28 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
   const [dropTarget, setDropTarget] = useState<CurrentRegistrationRow | null>(null)
   const [dropping, setDropping] = useState(false)
   const [dropError, setDropError] = useState<string | null>(null)
+
+  // Summary-view semester filter (owner-requested, 2026-08-06) — separate
+  // from selectedTermId above on purpose. selectedTermId drives the
+  // PICKER (which term's curriculum to register a student INTO — a
+  // write-path concern), while this drives which of the student's already-
+  // saved rows the summary/PDF actually DISPLAY — a pure read-side filter.
+  // Conflating the two would mean opening "Add course" for one term could
+  // silently change what the summary shows, or vice versa; kept
+  // independent so each screen's term choice only affects that screen.
+  // null = "All semesters" (default — show everything, matching how the
+  // summary behaved before this filter existed).
+  const [summaryTermFilter, setSummaryTermFilter] = useState<string | null>(null)
+
+  // Caller (GuardianPortal.tsx) is expected to pass a useCallback-memoized
+  // onSummaryTermFilterChange — see that file's own usage — so this effect
+  // can safely include it in its dependency array without an infinite
+  // refire loop from a fresh inline function identity every render.
+  useEffect(() => {
+    if (!onSummaryTermFilterChange) return
+    const termName = terms.find(t => t.id === summaryTermFilter)?.name ?? null
+    onSummaryTermFilterChange({ termId: summaryTermFilter, termName })
+  }, [summaryTermFilter, terms, onSummaryTermFilterChange])
 
   // Load placement + session + terms once, on mount.
   useEffect(() => {
@@ -394,7 +428,14 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
   if (error) {
     return (
       <div className="reg-tab-content">
-        <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+        {/* No back button for the readOnly (student self-service) caller —
+            this screen has no "search" step to return to for a student
+            (it's reached via the portal's own top tab bar, which is
+            already the navigation), and onBack is wired as a genuine
+            no-op from GuardianPortal.tsx for that caller. A visible
+            button with no real destination reads as broken, so it's
+            simply not rendered rather than shown disabled or dead. */}
+        {!readOnly && <button className="reg-back-btn" onClick={onBack}>← Back to search</button>}
         <p className="reg-form-error">{error}</p>
       </div>
     )
@@ -482,29 +523,114 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
   )
 
   // ─── "Currently registered" summary (Problem 9.6) ───────────────────────
-  // Shown whenever an active registration exists for the resolved
-  // session+term and we're not in the picker view. registrationLoading
-  // covers the same term-selection gate loadForTerm() uses (terms.length
-  // > 0 && !selectedTermId means currentRegistration is deliberately []
-  // without having actually resolved anything yet) — but that state
-  // already renders its own "choose a semester" hint further down via
-  // readyToShowCurriculum, so the summary fork only activates once a term
-  // is genuinely resolved one way or the other.
+  // Shown whenever an active registration exists for the student+session,
+  // regardless of term selection — and regardless of whether the school
+  // uses terms at all.
+  //
+  // BUG FOUND on-device, 2026-08-06 (owner report: a student with a real,
+  // saved registration was landing on the picker instead of the summary
+  // whenever the school uses terms): this condition used to also require
+  // readyToShowCurriculum (terms.length === 0 || !!selectedTermId).
+  // readyToShowCurriculum exists to gate the CURRICULUM fetch (loadForTerm
+  // is genuinely term-scoped, correctly refuses to run until a term is
+  // picked) — but reusing it here coupled the summary's visibility to
+  // term selection too, even though loadCurrentRegistration() was
+  // deliberately rewritten to be session-only, not term-scoped (see that
+  // function's own header in courseRegistrationService.ts). Since
+  // selectedTermId starts null and no term is pre-selected on mount, any
+  // school that uses terms had readyToShowCurriculum=false on first
+  // render — which forced EVERY returning student straight into the
+  // picker, no matter how many active courses they already had, because
+  // the summary branch could never even be reached to check
+  // hasActiveRegistration in the first place. Confirmed directly via SQL
+  // against a real student with 3 active current-session rows whose
+  // placement/summary state should have shown him the summary and did not.
+  //
+  // Fix: drop readyToShowCurriculum from this gate entirely. The summary
+  // only depends on currentRegistration, which is already independently
+  // loaded (see refreshCurrentRegistration above, gated only on
+  // `placement`, not on any term selection).
   const hasActiveRegistration = (currentRegistration?.length ?? 0) > 0
-  if (readyToShowCurriculum && view === 'summary' && (registrationLoading || hasActiveRegistration)) {
-    const totalUnits = (currentRegistration ?? []).reduce((sum, r) => sum + r.credit_units, 0)
+
+  // ─── Summary semester filter — selectable options + filtered rows ───────
+  // "Ahead of current" terms are excluded from the filter entirely
+  // (owner-specified, 2026-08-06): a term is filterable if it has already
+  // started (start_date <= today) — past AND current terms both qualify,
+  // only genuinely future terms are excluded. This is a display-only
+  // exclusion (which options the dropdown OFFERS); it does not hide any
+  // row a student actually has — see nullTermRowsExist below for why
+  // null-term rows are never excluded by this filter regardless of which
+  // option is picked.
+  //
+  // Deliberately built from `terms` (the school's full term list for the
+  // resolved session) rather than only terms actually present in
+  // currentRegistration — a student might have zero rows in the current
+  // term yet (e.g. hasn't registered this semester yet) and should still
+  // be able to select it to see that it's empty, not have it silently
+  // absent from the list.
+  const today = new Date().toISOString().slice(0, 10) // 'YYYY-MM-DD', matches DATE column comparison
+  const selectableSummaryTerms = terms.filter(t => t.start_date <= today)
+
+  // Rows with term_id === null are a known, pre-existing data gap (see
+  // loadCurrentRegistration()'s header in courseRegistrationService.ts) —
+  // they aren't "ahead of current," they're simply unscoped, so they stay
+  // visible under every filter selection including a specific term,
+  // rather than being hideable by picking a term they don't belong to.
+  const filteredRegistration = (currentRegistration ?? []).filter(r =>
+    summaryTermFilter === null || r.term_id === summaryTermFilter || r.term_id === null,
+  )
+
+  if (view === 'summary' && (registrationLoading || hasActiveRegistration)) {
+    const totalUnits = filteredRegistration.reduce((sum, r) => sum + r.credit_units, 0)
     return (
       <div className="reg-tab-content">
-        <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+        {/* Same reasoning as the error-state return above: no back button
+            for the readOnly student caller — nothing to go "back" to. */}
+        {!readOnly && (
+          <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+        )}
         {studentBanner}
 
         {renderAboveSummary?.({ onCourseAdded: async () => { await refreshCurrentRegistration(); await loadForTerm() } })}
 
         <p className="reg-section-label">Currently registered</p>
 
+        {/* Owner-requested (2026-08-06): a semester filter for the summary
+            itself, separate from selectedTermId (the picker's own term
+            choice — see summaryTermFilter's declaration above for why
+            these are deliberately independent state). Only rendered when
+            the school actually uses terms, matching every other term-
+            related control in this component (the picker's own Semester
+            field, CurriculumTab's own convention) — a termless school
+            never sees term UI anywhere. Future terms (start_date after
+            today) are intentionally absent from the option list — a
+            student can look back at a past semester's registration but
+            can't select a semester that hasn't started yet, since it can
+            only ever be empty. */}
+        {terms.length > 0 && (
+          <FieldRow label="Semester">
+            <select
+              className="reg-select"
+              value={summaryTermFilter ?? ''}
+              onChange={e => setSummaryTermFilter(e.target.value || null)}
+            >
+              <option value="">All semesters</option>
+              {selectableSummaryTerms.map(t => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </FieldRow>
+        )}
+
         {registrationLoading && <p className="reg-hint-text">Loading…</p>}
 
-        {!registrationLoading && (currentRegistration ?? []).map(r => (
+        {!registrationLoading && filteredRegistration.length === 0 && (
+          <p className="reg-empty-hint">
+            No courses registered for {selectableSummaryTerms.find(t => t.id === summaryTermFilter)?.name ?? 'this semester'} yet.
+          </p>
+        )}
+
+        {!registrationLoading && filteredRegistration.map(r => (
           <div key={r.id}>
             <div className="reg-list-row">
               <div className="reg-list-row-info">
@@ -549,7 +675,10 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
 
         {!registrationLoading && (
           <div className="reg-summary-bar">
-            <p className="reg-summary-ok">{totalUnits} total credit units</p>
+            <p className="reg-summary-ok">
+              {totalUnits} total credit units
+              {summaryTermFilter ? ` · ${selectableSummaryTerms.find(t => t.id === summaryTermFilter)?.name ?? ''}` : ''}
+            </p>
           </div>
         )}
 
@@ -564,7 +693,9 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
 
   return (
     <div className="reg-tab-content">
-      <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+      {!readOnly && (
+        <button className="reg-back-btn" onClick={onBack}>← Back to search</button>
+      )}
 
       {studentBanner}
 
@@ -597,10 +728,22 @@ export function RegistrationStep({ schoolId, student, onBack, readOnly = false, 
 
       {readyToShowCurriculum && curriculumLoading && <p className="reg-hint-text">Loading curriculum…</p>}
 
+      {/* PRD Tier 9 follow-up (owner-reported, 2026-08-05): the original
+          message here ("...define it in the Curriculum tab first") is
+          admin-facing instruction language — it tells the reader to go
+          configure something, which is meaningless and confusing to a
+          student self-service caller who has no access to a Curriculum
+          tab at all and isn't the person who could act on it anyway.
+          readOnly (this component's own student-vs-admin signal, already
+          used throughout this file for write-control gating) is reused
+          here for copy, not just permissions — a student sees a plain
+          status statement, an admin still sees the actionable instruction
+          aimed at them. */}
       {readyToShowCurriculum && !curriculumLoading && curriculum.length === 0 && carryover.length === 0 && (
         <p className="reg-empty-hint">
-          No curriculum defined yet for {placement.programme_name} / Level {placement.level_label}
-          {terms.length > 0 ? ' for this semester' : ''} — define it in the Curriculum tab first.
+          {readOnly
+            ? <>Course registration for {placement.programme_name} / Level {placement.level_label}{terms.length > 0 ? ' this semester' : ''} hasn't been set up yet. Check back later, or contact your school.</>
+            : <>No curriculum defined yet for {placement.programme_name} / Level {placement.level_label}{terms.length > 0 ? ' for this semester' : ''} — define it in the Curriculum tab first.</>}
         </p>
       )}
 

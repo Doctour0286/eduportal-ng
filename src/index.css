@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
   /* Brand */
@@ -1001,30 +1002,41 @@ body {
    PUBLIC HOMEPAGE — PRD Row 34 / Problem 7.1
    Pre-login, no-auth page shown before LoginPage.
 
-   Layout revised 2026-07-11 (owner follow-up): the original version
-   centered a single narrow (560px) card on the page — reasonable on a
-   phone, but on any wider screen it read as "just a card" floating in
-   a sea of empty background, not a real page. This version makes the
-   page genuinely fill the viewport at any width:
-     - .public-home-header becomes a full-bleed brand band (own
-       background, full width) rather than plain page padding — this is
-       what makes the page read as "a page" rather than "a card's
-       header," and gives the school's brand color/logo real presence
-       on a wide screen instead of shrinking into a corner.
-     - .public-home-main drops the card treatment (surface/border/
-       shadow) at ≥1024px and becomes a wide, centered content column
-       with generous side margins instead — content-width-limited for
-       readability (max-width caps line length, same reasoning browsers
-       use for article text) but the *page* itself fills the screen.
-     - Below 1024px the original card-on-neutral-background treatment
-       is kept as-is (still reuses .login-shell/.login-card's visual
-       language per the original design note below) since that's the
-       phone-first pattern already proven to work.
+   Visual redesign (2026-08-06): same DOM, same class names, same
+   breakpoint (1024px) and column structure as before — only the visual
+   treatment changed, so PublicHomepage.tsx required no edits. Every
+   color still resolves through the same brand/neutral/text custom
+   properties themeService.ts sets per school (light AND dark mode),
+   so a school brand color, logo, and dark-mode preference all behave
+   exactly as before; this file only changes how those same values
+   are composed.
 
-   Original design note, still true: still shares .login-shell's
-   min-height-100dvh convention and .login-card's surface/border/
-   radius/shadow language at the size where a card treatment applies,
-   since these two screens sit back-to-back in the same visit.
+   Design direction: this page is a school real front door — the first
+   thing a prospective parent sees. The old layout was a plain card on
+   a gray field; this version gives the header genuine presence (a
+   full-bleed brand gradient with a quiet pennant-line texture, rather
+   than a thin white strip) and gives the body content a calmer,
+   editorial rhythm (Sora for headings/name, generous measure, real
+   card depth) instead of boxy flat panels. Sora is not a new font
+   dependency, it is the same face already loaded for the marketing
+   homepage (.ph, further down this file); reusing it here keeps one
+   display face across the product instead of introducing a third.
+
+   Original structural note, still true: shares the login-shell
+   min-height-100dvh convention at the size where a card treatment
+   applies, since these two screens sit back-to-back in the same visit.
+
+   Sora font: loaded once at the top of this file (see the @import
+   directly below the Tailwind import at line 1) rather than here.
+   CSS requires @import to precede all other rules in the file (aside
+   from @charset) to be valid — the existing .ph section further down
+   already had its own copy of this same import mid-file, which is out
+   of spec and is exactly the kind of construct a strict bundler-based
+   CSS parser (as opposed to a browser, which just ignores an invalid
+   mid-file @import) can fail on. Consolidating both usages into one
+   valid top-of-file @import fixes that for this page without touching
+   the .ph page own separate Inter-family request, which is preserved
+   below as-is.
 ═══════════════════════════════════════════════════════════════════ */
 
 .public-home {
@@ -1034,31 +1046,80 @@ body {
   background: var(--color-neutral-50, #f9fafb);
 }
 
+/* Full-bleed brand hero. Gradient runs 600→700 (both already derived
+   per-school by themeService.ts) so the band has real depth instead of
+   a flat fill, and the quiet diagonal pennant-line texture behind the
+   logo/name gives the page a single, restrained signature motif — an
+   institutional field pattern, not literal clip-art iconography. All
+   text on the band uses --color-brand-on, the same per-school computed
+   contrast color already used for the login button elsewhere on this
+   page, so legibility holds for any brand hue a school has picked. */
 .public-home-header {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-3, 0.75rem);
+  gap: var(--space-4, 1rem);
   text-align: center;
-  padding: 40px 16px 28px;
-  background: var(--color-surface, #ffffff);
-  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  padding: 52px 20px 44px;
+  background:
+    linear-gradient(135deg, var(--color-brand-600, #2563eb), var(--color-brand-700, var(--color-brand-600, #1d4ed8)));
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.public-home-header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.10;
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--color-brand-on, #ffffff) 0px,
+    var(--color-brand-on, #ffffff) 1px,
+    transparent 1px,
+    transparent 22px
+  );
 }
 
 .public-home-logo {
-  width: 88px;
-  height: 88px;
+  width: 84px;
+  height: 84px;
   border-radius: var(--radius-lg, 0.75rem);
   object-fit: cover;
-  border: 2px solid var(--color-brand-200, var(--color-border, #e2e8f0));
-  background: var(--color-surface, #ffffff);
+  border: 3px solid var(--color-brand-on, #ffffff);
+  background: var(--color-brand-on, #ffffff);
+  box-shadow: var(--shadow-lg, 0 10px 15px -3px rgb(0 0 0 / 0.1));
+}
+
+/* Loading-state skeletons sit directly on the brand gradient band (the
+   real logo/name are not known yet, so the fallback placeholder color
+   shows briefly) — the shared gray .skeleton fill from elsewhere in
+   this file would be low-contrast there, so these two are light-on-
+   brand instead. Same shimmer keyframe/timing as .skeleton, just a
+   different fill pair. */
+.public-home-logo-skel,
+.public-home-name-skel {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-brand-on, #fff) 30%, transparent) 25%,
+    color-mix(in srgb, var(--color-brand-on, #fff) 45%, transparent) 50%,
+    color-mix(in srgb, var(--color-brand-on, #fff) 30%, transparent) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
 }
 
 .public-home-school-name {
+  font-family: 'Sora', var(--font-sans, 'Inter'), system-ui, sans-serif;
   font-size: var(--text-2xl, 1.5rem);
   font-weight: 800;
-  color: var(--color-text-primary, #111827);
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: var(--color-brand-on, #ffffff);
   margin: 0;
+  text-wrap: balance;
 }
 
 /* .public-home-main is a full-width region at every breakpoint — it no
@@ -1071,7 +1132,7 @@ body {
 .public-home-main {
   width: 100%;
   box-sizing: border-box;
-  padding: 24px 16px 56px;
+  padding: 0 16px 56px;
 }
 
 .public-home-layout {
@@ -1080,11 +1141,12 @@ body {
   gap: var(--space-6, 1.5rem);
   width: 100%;
   max-width: 560px;
-  margin: 0 auto;
+  margin: -28px auto 0;
+  position: relative;
   background: var(--color-surface, #ffffff);
   border: 1px solid var(--color-border, #e2e8f0);
   border-radius: var(--radius-xl, 1rem);
-  box-shadow: var(--shadow-md, 0 4px 6px -1px rgb(0 0 0 / 0.1));
+  box-shadow: var(--shadow-lg, 0 10px 15px -3px rgb(0 0 0 / 0.1));
   padding: var(--space-8, 2rem) var(--space-6, 1.5rem);
 }
 
@@ -1103,12 +1165,12 @@ body {
    breakpoint used consistently elsewhere in this file. */
 @media (min-width: 1024px) {
   .public-home-header {
-    padding: 56px 48px 40px;
+    padding: 76px 48px 96px;
   }
 
   .public-home-logo {
-    width: 108px;
-    height: 108px;
+    width: 112px;
+    height: 112px;
   }
 
   .public-home-school-name {
@@ -1116,13 +1178,14 @@ body {
   }
 
   .public-home-main {
-    padding: 56px 48px 80px;
+    padding: 0 48px 80px;
   }
 
   .public-home-layout {
     flex-direction: row;
     align-items: flex-start;
     max-width: 1160px;
+    margin-top: -56px;
     background: transparent;
     border: none;
     box-shadow: none;
@@ -1133,6 +1196,11 @@ body {
   .public-home-primary {
     flex: 1 1 auto;
     min-width: 0;
+    background: var(--color-surface, #ffffff);
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: var(--radius-xl, 1rem);
+    box-shadow: var(--shadow-lg, 0 10px 15px -3px rgb(0 0 0 / 0.1));
+    padding: var(--space-8, 2rem);
   }
 
   .public-home-sidebar {
@@ -1145,7 +1213,6 @@ body {
   /* Individual sections get their own real surface/border now that the
      single outer card is gone — same card language as before, just
      per-section instead of once around everything. */
-  .public-home-post,
   .public-home-post-card,
   .public-home-contact,
   .public-home-announcements {
@@ -1156,8 +1223,13 @@ body {
     padding-top: var(--space-6, 1.5rem);
   }
 
+  .public-home-contact,
+  .public-home-announcements {
+    box-shadow: var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05));
+  }
+
   .public-home-post-body--clamped::after {
-    background: linear-gradient(to bottom, transparent, var(--color-surface, #ffffff));
+    background: linear-gradient(to bottom, transparent, var(--color-bg-subtle, #f9fafb));
   }
 
   .public-home-login-btn {
@@ -1168,7 +1240,7 @@ body {
 
 .public-home-welcome {
   font-size: var(--text-base, 1rem);
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--color-text-primary, #111827);
   margin: 0;
   white-space: pre-wrap;
@@ -1192,15 +1264,17 @@ body {
 }
 
 .public-home-post-heading {
+  font-family: 'Sora', var(--font-sans, 'Inter'), system-ui, sans-serif;
   font-size: var(--text-xl, 1.25rem);
   font-weight: 700;
+  letter-spacing: -0.005em;
   color: var(--color-text-primary, #111827);
   margin: 0;
 }
 
 .public-home-post-paragraph {
   font-size: var(--text-base, 1rem);
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--color-text-primary, #111827);
   margin: 0;
   white-space: pre-wrap;
@@ -1275,8 +1349,14 @@ body {
   padding: var(--space-5, 1.25rem);
   background: var(--color-bg-subtle, #f9fafb);
   border: 1px solid var(--color-border, #e2e8f0);
-  border-left: 3px solid var(--color-brand-300, var(--color-brand-600, #93c5fd));
+  border-left: 3px solid var(--color-brand-400, var(--color-brand-600, #60a5fa));
   border-radius: var(--radius-lg, 0.75rem);
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.public-home-post-card:hover {
+  border-left-color: var(--color-brand-600, #2563eb);
+  box-shadow: var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05));
 }
 
 .public-home-post-body {
@@ -1367,7 +1447,7 @@ body {
 .public-home-contact-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-3, 0.75rem);
   list-style: none;
   margin: 0;
   padding: 0;
@@ -1376,15 +1456,18 @@ body {
 .public-home-contact-row {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-3, 0.75rem);
   font-size: var(--text-sm, 0.875rem);
 }
 
 .public-home-contact-label {
   flex: 0 0 auto;
   min-width: 60px;
-  color: var(--color-text-secondary, #6b7280);
-  font-weight: 600;
+  color: var(--color-brand-700, var(--color-brand-600, #1d4ed8));
+  font-weight: 700;
+  font-size: var(--text-xs, 0.75rem);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .public-home-contact-value {
@@ -1409,10 +1492,16 @@ body {
 }
 
 .public-home-ann-row {
-  padding: var(--space-3, 0.75rem);
+  padding: var(--space-3, 0.75rem) var(--space-3, 0.75rem) var(--space-3, 0.75rem) var(--space-4, 1rem);
   background: var(--color-bg-subtle, #f9fafb);
   border: 1px solid var(--color-border, #e2e8f0);
+  border-left: 3px solid var(--color-brand-500, var(--color-brand-600, #3b82f6));
   border-radius: var(--radius-md, 0.5rem);
+  transition: box-shadow 0.15s;
+}
+
+.public-home-ann-row:hover {
+  box-shadow: var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05));
 }
 
 .public-home-ann-title {
@@ -1440,23 +1529,28 @@ body {
 .public-home-login-btn {
   align-self: center;
   margin-top: var(--space-2, 0.5rem);
-  padding: 12px 32px;
-  min-height: 48px;
+  padding: 14px 32px;
+  min-height: 50px;
   font-size: var(--text-base, 1rem);
   font-weight: 700;
+  letter-spacing: 0.01em;
   color: var(--color-brand-on, #ffffff);
   background: var(--color-brand-600, #2563eb);
   border: none;
   border-radius: var(--radius-lg, 0.75rem);
   cursor: pointer;
-  transition: background 0.15s, box-shadow 0.15s;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  transition: background 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 
 .public-home-login-btn:hover {
   background: var(--color-brand-700, var(--color-brand-600));
+  box-shadow: var(--shadow-md, 0 4px 6px -1px rgb(0 0 0 / 0.1));
+  transform: translateY(-1px);
 }
 
 .public-home-login-btn:active {
+  transform: translateY(0);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand-600, #2563eb) 25%, transparent);
 }
 
@@ -1477,6 +1571,7 @@ body {
 }
 
 .public-home-status-inner h1 {
+  font-family: 'Sora', var(--font-sans, 'Inter'), system-ui, sans-serif;
   font-size: var(--text-xl, 1.25rem);
   font-weight: 800;
   color: var(--color-text-primary, #111827);
@@ -19486,7 +19581,11 @@ body {
  * document.documentElement.
  * ─────────────────────────────────────────────────────────────────────── */
 
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+/* Sora + Inter are loaded once at the top of this file now (see the
+   @import directly below "tailwindcss" at the top) — this used to be a
+   separate mid-file @import duplicating the same two families, which
+   is invalid per spec (an @import must precede all other rules) and
+   was silently tolerated by browsers but not by every CSS bundler. */
 
 .ph {
   --ph-teal-deep: #0F5C52;
