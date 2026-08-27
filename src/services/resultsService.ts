@@ -58,6 +58,9 @@ export interface ScoreComponent {
   id: string
   name: string
   weight_pct: number
+  /** Tier 8 / Problem 8.4: teachers enter "out of max_score" directly
+   *  (e.g. 16 out of 20); weighting normalizes value/max_score × weight_pct. */
+  max_score: number
   sort_order: number
 }
 
@@ -245,33 +248,11 @@ async function _loadAssignments(opts: {
 }
 
 // ─── Score components ─────────────────────────────────────────────────────────
-
-/**
- * CA components for the school, sorted by sort_order.
- * These are school-wide (not per class or subject).
- * Used to build the score entry grid columns.
- */
-export async function loadScoreComponents(): Promise<Result<ScoreComponent[]>> {
-  try {
-    const { data, error } = await supabase
-      .from('score_components')
-      .select('id, name, weight_pct, sort_order')
-      .order('sort_order')
-
-    if (error) return { ok: false, error: error.message }
-    return {
-      ok: true,
-      data: (data ?? []).map((c: any) => ({
-        id: c.id,
-        name: c.name,
-        weight_pct: Number(c.weight_pct),
-        sort_order: c.sort_order,
-      })),
-    }
-  } catch (err: any) {
-    return { ok: false, error: err?.message ?? 'Failed to load score components' }
-  }
-}
+// Tier 8 / Problem 8.4: components are now PROFILE-scoped (per window, per
+// class weighting) — the old school-wide loadScoreComponents() is gone.
+// Resolution lives in assessmentService.resolveWindowForClass() +
+// assessmentService.loadComponents(); ResultsModule wires them per selected
+// class + term.
 
 // ─── Students ─────────────────────────────────────────────────────────────────
 
@@ -725,8 +706,9 @@ export function buildScoreMap(scores: Score[]): ScoreMap {
 }
 
 /**
- * Computes a weighted total for one student from the score map.
- * Returns null if the student has no scores at all.
+ * Computes a weighted total (out of 100) for one student from the score map.
+ * Each component contributes value / max_score × weight_pct — so a 16/20 CA
+ * worth 30% adds exactly 24. Returns null if the student has no scores at all.
  */
 export function computeWeightedTotal(
   studentId: string,
@@ -738,7 +720,8 @@ export function computeWeightedTotal(
   for (const comp of components) {
     const score = scoreMap.get(`${studentId}|${comp.id}`)
     if (score) {
-      total += score.value * (comp.weight_pct / 100)
+      const max = comp.max_score > 0 ? comp.max_score : 100
+      total += (score.value / max) * comp.weight_pct
       hasAny = true
     }
   }
@@ -812,6 +795,11 @@ function isNetworkError(message: string): boolean {
 }
 
 function friendlyError(message: string): string {
+  // Tier 8 window-gating trigger raises plain-English messages by design —
+  // surface them verbatim instead of burying them under a generic line.
+  if (message.includes('assessment window') || message.includes('Score entry for')) {
+    return message
+  }
   if (message.includes('violates row-level security')) {
     return "You don't have permission to enter scores for this subject or class."
   }

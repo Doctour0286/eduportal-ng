@@ -104,6 +104,11 @@ import {
   type ProgrammePromotionRule,
   type CourseOffering,
 } from '../services/settingsService'
+// Tier 8 / Problem 8.4 (Sessions 46–50): assessment-window configuration and
+// the secondary-school promotion flow are substantial standalone CRUD screens
+// with their own domain services — they live in AssessmentsSettings.tsx (see
+// that file's header for why), imported here as tab bodies only.
+import { AssessmentsTab, PromotionTabSecondary } from './AssessmentsSettings'
 // SESSION 65c — admission pipeline/field-settings/master-switch authoring.
 // Deliberately a separate import from admissionService.ts, not folded into
 // the block above: that file's own header comment (added in 65b) explains
@@ -198,7 +203,7 @@ const SCHOOL_TYPE_DISPLAY_LABELS: Record<string, string> = {
 
 // ─── Tab definition ───────────────────────────────────────────────────────────
 
-type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'promotion' | 'admission' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
+type SettingsTab = 'school' | 'homepage' | 'calendar' | 'schedule' | 'classes' | 'assessments' | 'institution' | 'curriculum' | 'offerings' | 'grading' | 'standing' | 'promotion' | 'admission' | 'subjects' | 'roles' | 'student-roles' | 'staff' | 'audit'
 
 // Institution tab is hidden entirely when school_type is not a
 // higher-institution type — per SESSION 55 §0 instruction 5 — so TABS is
@@ -258,6 +263,12 @@ function buildTabs(schoolType: string | null | undefined): { id: SettingsTab; la
     tabs.push({ id: 'promotion', label: 'Promotion', icon: <Icon name="graduation-cap" size={18} /> })
   } else {
     tabs.push({ id: 'classes', label: 'Classes', icon: <Icon name="tag" size={18} /> })
+    // Tier 8 / Problem 8.4 (Sessions 46–50): assessment windows + secondary
+    // promotion are secondary-school configuration. Components live in
+    // AssessmentsSettings.tsx; this is pure tab registration, same as every
+    // other entry in this function.
+    tabs.push({ id: 'assessments', label: 'Assessments', icon: <Icon name="clipboard-list" size={18} /> })
+    tabs.push({ id: 'promotion',   label: 'Promotion',   icon: <Icon name="graduation-cap" size={18} /> })
   }
   // Admission (SESSION 65c, redesign proposal §7/§8) — not gated to
   // isHigherEd: admission intake applies to any school type (secondary
@@ -352,12 +363,17 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
         {safeActiveTab === 'calendar'    && <CalendarTab    schoolId={schoolId} schoolType={schoolType} />}
         {safeActiveTab === 'schedule'    && <ScheduleTab    schoolId={schoolId} schoolType={schoolType} />}
         {safeActiveTab === 'classes'     && <ClassesTab     schoolId={schoolId} />}
+        {safeActiveTab === 'assessments' && <AssessmentsTab schoolId={schoolId} />}
         {safeActiveTab === 'institution' && <InstitutionTab schoolId={schoolId} />}
         {safeActiveTab === 'curriculum'  && <CurriculumTab  schoolId={schoolId} />}
         {safeActiveTab === 'offerings'    && <OfferingsTab    schoolId={schoolId} />}
         {safeActiveTab === 'grading'      && <GradingTab      schoolId={schoolId} />}
         {safeActiveTab === 'standing'     && <StandingTab     schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
-        {safeActiveTab === 'promotion'    && <PromotionTab    schoolId={schoolId} actorRecordId={actorRecordId ?? null} />}
+        {safeActiveTab === 'promotion'    && (
+          isHigherInstitutionSchoolType(schoolType)
+            ? <PromotionTab schoolId={schoolId} actorRecordId={actorRecordId ?? null} />
+            : <PromotionTabSecondary schoolId={schoolId} actorRecordId={actorRecordId ?? null} />
+        )}
         {safeActiveTab === 'admission'    && <AdmissionSettingsTab schoolId={schoolId} />}
         {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}
         {safeActiveTab === 'roles'         && <RolesTab        schoolId={schoolId} />}

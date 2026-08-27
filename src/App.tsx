@@ -34,7 +34,7 @@ import { Icon } from './components/icons'
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
 // but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
-type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance' | 'admission'
+type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance' | 'admission' | 'punctuality'
 
 // Intent payload — carried from dashboard quick actions into target modules.
 // Only the three intents that open a form on arrival are defined here.
@@ -80,7 +80,7 @@ const ACTIVE_TAB_STORAGE_KEY = 'activeTab'
 const VALID_NAV_TABS = new Set<NavTab>([
   'home', 'results', 'hr', 'library', 'announcements', 'settings',
   'guardians', 'account_preferences', 'course_registration',
-  'course_attendance', 'admission',
+  'course_attendance', 'admission', 'punctuality',
   'timetable', 'attendance', 'students', 'finance', 'more',
 ])
 
@@ -129,6 +129,7 @@ import AnnouncementsModule from './routes/AnnouncementsModule'
 import GuardianPortal from './routes/GuardianPortal'
 import SettingsModule from './routes/SettingsModule'
 import AdmissionModule from './routes/AdmissionModule'
+import PunctualityModule from './routes/PunctualityModule'
 import CourseRegistrationModule from './routes/CourseRegistrationModule'
 import CourseAttendanceModule from './routes/CourseAttendanceModule'
 import GuardianModule from './routes/GuardianModule'
@@ -1363,6 +1364,10 @@ function TabContent({
     return <AdmissionModule schoolId={schoolId} />
   }
 
+  if (tab === 'punctuality') {
+    return <PunctualityModule schoolId={schoolId} isAdmin={isAdmin} />
+  }
+
   if (tab === 'course_registration') {
     // Higher-institution-only, same as SettingsModule's Institution/
     // Curriculum tabs — CourseRegistrationModule itself also gates on
@@ -1487,6 +1492,7 @@ function MoreSheetContent({
   // it; until that row exists, only isAdmin unlocks this entry. See the SQL
   // provided alongside this change.
   const canViewAdmission = can('academics.admission.manage') || isAdmin
+  const canViewPunctuality = can('academics.punctuality.view') || can('academics.punctuality.record') || isAdmin
   // Duplicated from SettingsModule.tsx's own private (unexported) list —
   // see CourseRegistrationModule.tsx's header note on the same
   // duplication. Course registration is a higher-institution-only concept
@@ -1557,6 +1563,16 @@ function MoreSheetContent({
             <div>
               <p className="more-menu-item-label">Admission</p>
               <p className="more-menu-item-desc">Admit students, generate matric numbers, set the format</p>
+            </div>
+            <span className="more-menu-item-arrow">›</span>
+          </button>
+        )}
+        {canViewPunctuality && (
+          <button className="more-menu-item" onClick={() => onNavigate('punctuality')}>
+            <span className="more-menu-item-icon"><Icon name="clipboard-list" /></span>
+            <div>
+              <p className="more-menu-item-label">Teacher Punctuality</p>
+              <p className="more-menu-item-desc">Track teacher presence during scheduled periods</p>
             </div>
             <span className="more-menu-item-arrow">›</span>
           </button>

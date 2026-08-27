@@ -1000,7 +1000,114 @@ group by s.student_id, s.subject_id, s.term_id, s.session_id, s.school_id;
 
 ---
 
-### 7.15 Report cards and promotion
+### 7.14a Assessment Windows (Tier 8 / Problem 8.4 — Sessions 45–49; migrations s46/s48/s49 confirmed run live)
+
+Net-new secondary-school assessment layer, designed with the owner 2026-07-12 (Problem 8.4's spec block) and built across Sessions 46–50. `score_components` is re-scoped from school-wide to **profile-scoped** (the table was confirmed empty platform-wide before altering, so nothing was lost); every grid/report number normalizes by each component's own `max_score`.
+
+```sql
+-- The shell: one round of assessment ("First Term 2026/2027").
+create table assessment_windows (
+  id uuid primary key default gen_random_uuid(),
+  school_id uuid not null references schools(id),
+  session_id uuid not null references sessions(id),
+  term_id uuid references terms(id),          -- null = whole session (§3.6 duality)
+  name text not null,
+  scope text not null default 'whole_school' check (scope in ('whole_school','selected_classes')),
+  status text not null default 'draft' check (status in ('draft','open','closed','finalized')),
+  scores_open_at timestamptz, scores_submission_deadline timestamptz, scores_close_at timestamptz,
+  created_by uuid references auth.users(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+-- Per-window weighting formulas ("Primary weighting", "Secondary weighting").
+create table score_component_profiles (
+  id uuid primary key default gen_random_uuid(),
+  assessment_window_id uuid not null references assessment_windows(id) on delete cascade,
+  name text not null,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (assessment_window_id, name)
+);
+
+-- Which classes a window covers + per-class overrides.
+create table assessment_window_classes (
+  id uuid primary key default gen_random_uuid(),
+  assessment_window_id uuid not null references assessment_windows(id) on delete cascade,
+  class_node_id uuid not null references class_nodes(id),
+  score_component_profile_id uuid not null references score_component_profiles(id),
+  is_promotional boolean not null default true,
+  sits_exam boolean not null default false,
+  scores_open_at timestamptz, scores_submission_deadline timestamptz, scores_close_at timestamptz,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (assessment_window_id, class_node_id)
+);
+```
+
+**`score_components` amendment (altered in place):** added `score_component_profile_id uuid NOT NULL references score_component_profiles(id)`, `max_score numeric(5,2) NOT NULL DEFAULT 100`, and `updated_at` (the Phase-2 row lacked it against § conventions). RLS: reads `[STD]`; writes admin-or-`academics.assessment_windows.manage`. Known residual flagged in the migration header: Phase-2-era policies on this table were left untouched (permissive policies OR together; the trigger below is the operative gate) — owner follow-up to review `pg_policies` and drop stale write policies if any exist.
+
+**`subject_results` recreated** with max_score normalization — weighted contribution is now `value * weight_pct / COALESCE(max_score, 100)` (identical numbers while max_score = 100, which is every row). Column set preserved exactly; all consumers verified against the seven documented columns.
+
+**Scores gating trigger** `enforce_assessment_window_scores()` (BEFORE INSERT OR UPDATE on `scores`, security definer): schools with ZERO windows keep legacy behavior; otherwise INSERT/value-changing UPDATE requires an OPEN window covering the student's class+session+term (whole_school scope covers everything; selected_classes requires an attach row); approval-only updates are permitted while open OR closed; draft/finalized reject all writes. Plain-English exception messages surface verbatim in the UI.
+
+```sql
+-- Session 48 additions.
+create table venues (
+  id uuid primary key default gen_random_uuid(),
+  school_id uuid not null references schools(id),
+  name text not null, capacity int not null default 0,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (school_id, name)
+);
+
+create table exam_timetable_entries (
+  id uuid primary key default gen_random_uuid(),
+  assessment_window_id uuid not null references assessment_windows(id) on delete cascade,
+  class_node_id uuid not null references class_nodes(id),
+  subject_id uuid not null references subjects(id),
+  exam_date date not null,
+  start_time time not null, end_time time not null, check (end_time > start_time),
+  venue_id uuid references venues(id),
+  created_by uuid references auth.users(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table exam_invigilators (
+  id uuid primary key default gen_random_uuid(),
+  exam_timetable_entry_id uuid not null references exam_timetable_entries(id) on delete cascade,
+  staff_id uuid not null references staff(id),
+  role text not null default 'assistant' check (role in ('lead','assistant')),
+  created_at timestamptz not null default now(),
+  unique (exam_timetable_entry_id, staff_id)
+);
+```
+
+Exam clash detection (class / venue / invigilator double-booked) is checked at save time client-side for v1, exactly per Problem 8.4's own scoping — no DB constraints.
+
+```sql
+-- Session 49 additions.
+create table aggregate_remark_bands (
+  id uuid primary key default gen_random_uuid(),
+  school_id uuid not null references schools(id),
+  min_average numeric(5,2) not null, max_average numeric(5,2) not null check (max_average >= min_average),
+  remark text not null, sort_order int not null default 0,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+-- Class teacher's remark: ONE field per student per window (§12 D4a).
+create table assessment_window_student_remarks (
+  id uuid primary key default gen_random_uuid(),
+  school_id uuid not null references schools(id),
+  assessment_window_id uuid not null references assessment_windows(id) on delete cascade,
+  student_id uuid not null references students(id),
+  remark text not null default '',
+  entered_by uuid references staff(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (assessment_window_id, student_id)
+);
+```
+
+**New permission keys (inserted by s46):** `academics.assessment_windows.manage`, `academics.exam_timetable.manage`, `academics.remarks.manage`, `academics.promotion.run`.
+
+---
 
 ```sql
 create table report_card_templates (
@@ -1017,7 +1124,7 @@ create table promotion_rules (
   id                 uuid primary key default gen_random_uuid(),
   school_id          uuid not null references schools(id),
   from_class_node_id uuid not null references class_nodes(id),
-  to_class_node_id   uuid not null references class_nodes(id),
+  to_class_node_id   uuid references class_nodes(id),   -- Tier 8 s50: NULL destination = graduating rule (students → 'alumni')
   min_average_pct    numeric(5,2),   -- null = always promote at session end
   created_at         timestamptz not null default now()
 );
@@ -1029,13 +1136,16 @@ create table promotion_history (
   session_id         uuid not null references sessions(id),
   from_class_node_id uuid references class_nodes(id),
   to_class_node_id   uuid references class_nodes(id),
-  decision           text not null check (decision in ('promoted','repeated','manual_override')),
+  decision           text not null check (decision in ('promoted','repeated','manual_override',
+                                                       -- Tier 8 s50 vocabulary (legacy values kept valid):
+                                                       'auto_promoted','manually_promoted','manually_retained','demoted')),
   decided_by         uuid references staff(id),
   reason             text,
   created_at         timestamptz not null default now()
 );
 ```
 - **RLS:** `[STD]` on all.
+- **Tier 8 (Session 50) promotion engine:** two SECURITY DEFINER RPCs (`preview_secondary_promotion`, `apply_secondary_promotions` — migration `migration_tier8_s50_promotion.sql`) compute averages server-side from `subject_results` (approved scores only), enforce the owner-specified top-down sequencing gate (a destination class must have a recorded decision for every active student still sitting in it before anyone may promote INTO it), and apply whole-class decisions + `promotion_history` audit rows in ONE transaction. Graduation only fires via a real rule whose destination is deliberately NULL — a missing rule blocks loudly.
 
 ---
 
@@ -3386,8 +3496,14 @@ Do not skip ahead while earlier items remain unchecked.
 | Academic calendar? | Completely custom; term concept is optional (switchable per school) |
 | Staff roles? | Fully custom — admin defines role names and permissions per school |
 | Timetable views? | Both (class view + teacher view) derived from one source table |
-| Student promotion? | Automatic by grade; admin can override |
-| Score entry permissions? | Only the teacher assigned to that specific subject+class can enter scores (DB-level) |
+| Student promotion? | Automatic by grade; admin can override. **Tier 8 refinement (s50, 2026-08-26):** auto = at/above the class rule's `min_average_pct`, computed server-side from approved `subject_results`; below-cutoff students always land in an explicit manual-review list (never silently retained); top-down sequencing gate enforced by `apply_secondary_promotions()`; graduation only via a deliberately-NULL destination rule. |
+| Score entry permissions? | Only the teacher assigned to that specific subject+class can enter scores (DB-level). **Tier 8 addition (s46):** entry additionally requires an OPEN assessment window covering that class+session+term (`enforce_assessment_window_scores()` trigger; legacy-tolerant while a school has zero windows). **Hotfix (owner report, 2026-08-26, §12-locked): admins are unrestricted on `scores`** — additive permissive policy `scores_admin_full` (`current_is_admin() or is_platform_admin()`) ORs in alongside the legacy assignment-only policy, which stays untouched as the teacher-path gate. Rationale: the Phase-2 policy had no admin carve-out and admins hold no teaching assignments, so approval was DB-blocked for exactly the role expected to perform it; permissive policies OR-combine, so the additive grant needs no knowledge of the legacy policy's text. The window-lifecycle trigger still applies to admins (a finalized window stays locked even for them — reopening is a deliberate lifecycle action they control). |
+| Assessment Window lifecycle (Tier 8 s46, decided during build per owner's delegated authority)? | `draft → open → closed → finalized`, advanced manually from Settings > Assessments. `status` is what gates score entry; the three timestamp columns are displayed context, not enforcement. Legacy tolerance: a school with zero windows ever keeps pre-window behavior until it creates its first one. Overlapping windows covering the same class+term are an admin misconfiguration; resolution picks newest-first client-side and is otherwise undefined server-side (flagged, not silently blessed). |
+| Class-teacher remark placement (Problem 8.4 left open "at build time")? | Own table `assessment_window_student_remarks`, keyed unique(window, student), school_id retained for simple [STD] RLS. Written by admins or holders of `academics.remarks.manage`. No form-teacher concept exists in this schema yet — modeling one is separate future scope, not silently built here. |
+| Report card format (Session 49)? | jsPDF real-download (transcriptPdf precedent, not print-dialog). WAEC-style: brand band, student block with position + attendance summary, subjects table with dynamic per-component columns ("1st CA (20)") + total + grade + subject position, overall-average box with aggregate remark band, class teacher's remark paragraph, signature lines. Every number read off `loadReportCardData()` — no recomputation in the PDF layer. |
+| Exam timetable surface (Session 48)? | Read-only inside `TimetableModuleSecondary` as a current-week banner strip + tap-for-detail modal (Problem 8.4 required visibility inside the module itself); authoring lives Settings-side (Assessments > Exams & venues). Per-day-column grid annotation deferred — needs TimetableGrid prop/date-mapping changes, flagged not silently dropped. Clash checks run client-side at save (class/venue/invigilator overlap blocks save), matching Problem 8.4's "checked at save rather than hard schema constraints for v1". |
+| Secondary grade bands vs higher-ed bands (Session 49)? | Same `grade_scales` table; secondary rows keep `grade_point`/`scale_max`/`is_passing` NULL. New secondary-safe write pair (`assessmentService.saveGradeBand`) writes ONLY the five secondary columns — never reuses `upsertHigherEdGradeBand`, whose payload would corrupt semantics of those columns on secondary rows. |
+
 | Class-scoped permissions architecture (PRD Tier 3 / Session 8, decided 2026-07-01)? | General mechanism, not a `students.edit`-only special case. Two layers: `role_permission_class_scope` (role-level default class restriction for a granted key) and `staff_permission_class_scope` (per-staff independent override — **can grant a key the staff member's role doesn't hold at all**, by explicit owner decision). Staff-level override, if any row exists for that staff+key, fully replaces the role-level scope for that person (never merges/unions). A `class_id IS NULL` row in either table means "unrestricted." Resolution order: staff override first (stop if found) → role grant + role-level scope → not granted. |
 | Attendance mark vs. edit — one permission key or two (PRD Tier 3 / Session 9, decided 2026-07-01)? | One key, `academics.attendance.mark`, covers every status tap and batch mark, whether first-time or a correction. `academics.attendance.edit` is not used in Session 9 — the code has no "already marked vs not" distinction to hang a second key on without new detection logic. |
 | Attendance class-list filtering scope (PRD Tier 3 / Session 9, decided 2026-07-01)? | Deferred. `loadAllLeafClasses()` stays unfiltered this session — every staff member sees every class. `academics.attendance.view_all` and `canForClass`-based class-list filtering are logged as a known gap (§11), not wired in Session 9. Revisit in a future session once prioritized. |
@@ -3554,6 +3670,12 @@ Do not skip ahead while earlier items remain unchecked.
 | `courseResultsService.ts` (new, Session 60, PRD Tier 8 / Problem 8.7; extended Session 60a/60b) | `src/services/courseResultsService.ts` | Data-access layer for higher-ed scoring/GPA. `{data, error}` return shape throughout, matching `courseRegistrationService.ts`'s own convention (this file is the same higher-ed domain, not `resultsService.ts`'s `Result<T>` shape — deliberately not folded into `resultsService.ts` at all, since that file is entirely secondary-school-shaped and `course_results` is a structurally different anchor object, same "different anchor, not a variation" reasoning `courseRegistrationService.ts`'s own header already gives for why it isn't folded into `settingsService.ts`). `loadScorableRegistrations()` joins `course_registrations` → `courses(code,title,credit_units)` + `students(full_name,matric_number)` + `course_results` for a given offering, mirroring `loadExistingRegistrations()`'s exact join-and-cast pattern. `loadCgpaPolicy()` returns `{data: null}` for "not configured yet," not an error — same convention `settingsService.ts`'s own `loadCgpaPolicy` already established in Session 59; this file's version re-reads the same table for the scoring UI's own use. `saveCourseResult()` upserts one `course_results` row per registration and sets `finalized_at`. `loadFinalizedAttemptsForStudent()` loads every finalized attempt across every session for one student (deliberately not session-scoped — CGPA needs full history) for `gpaService.ts` to consume. `saveGpaSnapshots()` replaces (delete-then-insert, not a keyed upsert) a student's `student_gpa_snapshots` rows on every recompute — delete-then-insert chosen specifically because the resolved row set can shrink under `'replacement'` (a superseded semester can lose its only counted attempt), which a keyed upsert could leave stale. Writes `term_id` (uuid, references `terms(id)`), not the schema's originally-written `semester text` column — see this table's own progress-log entry below for why that migration was needed and run. **New (SESSION 62pre, 2026-07-16):** `saveCourseResult()`/`finalizeWeightedCourseResult()` gain a required `isPassing` param (the caller's already-resolved grade band, never re-derived internally) and call the new `apply_carryover_status(registrationId, isPassing)` RPC after the `course_results` write succeeds — non-fatal on failure, since a carryover-flag write failing shouldn't roll back an otherwise-successful score finalize. Both `ScoredAttempt[]` construction sites in this file (the finalize-time recompute and the separate admin-view live-CGPA computation for `StudentsModule.tsx`'s `includeUnpublished=true` branch — the latter found only via a real `npm run build` failure, not anticipated by the original plan) now read the real persisted `course_results.is_passing` instead of re-deriving `gradePoint > 0`, with an identical pre-migration null-fallback at both sites so the two can never disagree over how an old row is treated. No browser-only APIs — React Native safe. | ☑ **Isolated `tsc` typecheck (real sibling files, stubbed `supabase`) confirmed zero errors — see Session 60 progress-log entry for the verification method. `npm run build` confirmed clean by owner, 2026-07-15.** ☑ **Session 60b (`loadStudentTranscript`, `publishCourseResult`/`unpublishCourseResult`, live-compute admin CGPA/GPA path, `includeUnpublished` parameter) — real `TS2589` build failure found, misdiagnosed as fixed once, then genuinely fixed and reverified against the real `@supabase/supabase-js` package; `npm run build` and full on-device testing (guardian view, admin view, publish/unpublish both directions, PDF export) confirmed clean by owner, 2026-07-16 — see Session 60b progress-log entry.** ☑ **SESSION 62pre (carryover auto-flag/un-flag on finalize) — `npm run build` confirmed clean by owner after two real build-time gaps were found and fixed (the initial missing `isPassing` field, then the second, independently-hardcoded `ScoredAttempt` construction site the same build run caught); on-device testing confirmed clean by owner, including the positive-grade-point-still-fails case.** |
 | `CourseResultsModule.tsx` (new, Session 60, PRD Tier 8 / Problem 8.7) | `src/routes/CourseResultsModule.tsx` | Lecturer-facing scoring UI + GPA/CGPA recompute-on-finalize for higher-institution schools. Mounted by `ResultsModule.tsx`'s dispatcher — see that file's own updated row above. Staff identity resolved via `authStore.actorRecordId` (Problem 8.1's fix, reused as-is per this session's own instruction, not re-derived). Boot sequence: current session → higher-ed grade scale (`grade_scales`' higher-ed columns, read locally here rather than importing `settingsService.ts`'s own `GradeScaleBand` type, since `gpaService.ts`'s `GradeBand` is intentionally a decoupled minimal subset) → `cgpa_policy` → terms (if `uses_terms`) → this staff's course offerings for the session/term (`loadCourseOfferings()`, filtered client-side to `staff_id === staffId` unless `isAdmin`, mirroring `loadMyTeachingAssignments()`/`loadAllTeachingAssignments()`'s own mine-vs-all split in the secondary path). Selecting an offering loads its scorable registrations via `courseResultsService.ts`. `finalizeScore()`: validates 0–100, looks up the grade band, blocks finalizing entirely if no `cgpa_policy` row exists yet (explicit inline warning shown, not a silent no-op), persists via `saveCourseResult()`, then calls the local `recomputeAndCacheGpa()` helper — loads every finalized attempt for that student, re-derives `ScoredAttempt[]` using each attempt's already-persisted `grade_point` (not re-looked-up against the *current* grade scale, so a finalized result's grade point can't silently drift if the scale is edited later), resolves session ordering via real `sessions.start_date` (not creation order, since `resolveAttemptsForCalculation()`'s "most recent attempt" needs true chronological order), and calls into `gpaService.ts`'s pure functions before writing the result via `saveGpaSnapshots()`. `recomputeAndCacheGpa()` deliberately kept as its own function rather than inlined, since SESSION 61/62's evaluation flow will likely need to trigger the same recompute from session-end evaluation, a different call site. No CA/exam component breakdown — `course_results.score` is a single final number by this session's own schema; see SESSION 60a's card for the scoped (not yet built) follow-up. | ☑ **Session 60/60a/60c scoring UI confirmed on-device (see those sessions' own entries). ☑ Session 60b addition — per-row Publish/Unpublish + bulk-publish action, gated on `academics.results.publish`, kept as a separate key from Finalize/Update (deliberate — preserves scorer/reviewer separation of duties). One real stale-closure bug found and fixed (toggle required two taps to register the correct state). Brand-color fixes applied to four pre-existing `.crs-*` rules that were still hardcoded to `--color-primary` instead of the per-school `--color-brand-600` token. `npm run build` and on-device testing confirmed clean by owner, 2026-07-16.** |
 | `transcriptPdf.ts` (new, Session 60b, PRD Tier 8 / Problem 8.7) | `src/services/transcriptPdf.ts` | Generates a real, downloadable PDF transcript (course/grade/GP/CGPA only, per Session 60b's own scope) via `jsPDF` + `jspdf-autotable` — a genuinely new dependency, confirmed no PDF-generation library existed anywhere in the codebase before this session (report cards/receipts/invoices are all print-dialog-based), flagged rather than added silently. Deliberate departure from `printTimetable.ts`/`printStudentIdCards.ts`'s `window.open()`-then-browser-print-dialog pattern, per owner instruction — this file renders directly to PDF bytes and triggers a real one-tap browser download, no print dialog, no intermediate HTML document. Brand-color resolution reuses `printStudentIdCards.ts`'s exact approach: reads the live, already-injected `--color-brand-600`/`--color-brand-on` custom properties off `document.documentElement` at call time, same fallback blue if unset. No new computation performed — every number is read straight off the `StudentTranscript` object `courseResultsService.ts`'s `loadStudentTranscript()` already assembled. Superseded course rows shown greyed rather than omitted (a display instruction per §7.27.4, not a filter — the CGPA math those rows are excluded from already happened upstream in `gpaService.ts`). No browser-only APIs in the document-assembly logic itself — only `resolveBrandColors()`'s `getComputedStyle()` read and the final `doc.save()` call are DOM-dependent, both flagged in the file's own header as the two things a future React Native port would need to replace. | ☑ **PDF export confirmed on-device by owner, 2026-07-16, as part of Session 60b's full arc — produces a document with matching course/grade/GP/CGPA numbers.** |
+
+| `assessmentService.ts` (new, Tier 8 / Problem 8.4, Sessions 46–49) | `src/services/assessmentService.ts` | Data layer for the Assessment Window system per §7.14a: windows CRUD + lifecycle transitions; `resolveWindowForClass()` (the client-side twin of the scores-gating trigger's matching rule — whole_school covers everything, selected_classes needs an attach row, newest-first on overlap); attached-classes CRUD with per-class profile/promotional/exam overrides; weight-profile and score-component CRUD (profile-scoped); venues; exam timetable entries + invigilator replace-all; `findExamClashes()` (class/venue/staff overlap, client-side v1 per §12); aggregate remark bands; secondary-safe grade-band pair (`saveGradeBand` writes ONLY the five secondary columns — never the higher-ed payload); per-student window remarks; `loadReportCardData()` assembling every figure the PDF renders (subject rows off `subject_results`, raw component values, peer-ranked overall position, attendance summary within term/session dates). Result<T> conventions, no browser-only APIs. | ☑ Migrations confirmed live via owner-run SQL verification (s46/s48/s49). ☑ `npm run build` clean. ☐ On-device Done Checks outstanding (PRD Log rows 71–74). |
+| `promotionService.ts` (new, Tier 8 / Problem 8.4, Session 50) | `src/services/promotionService.ts` | Thin client over `preview_secondary_promotion()` / `apply_secondary_promotions()` RPCs — all promotion math and safety rails server-side by design (client never computes or supplies averages). Secondary promotion-rule CRUD with a two-step embed fallback for PostgREST FK-hint drift. Plain-English RPC exceptions passed through verbatim (§4.3). | ☑ Migration s50 confirmed live via owner-run SQL verification. ☑ `npm run build` clean. ☐ On-device Done Check outstanding (PRD Log row 75). |
+| `reportCardPdf.ts` (new, Tier 8 / Problem 8.4, Session 49) | `src/services/reportCardPdf.ts` | Real-download PDF terminal report via jsPDF + jspdf-autotable (transcriptPdf precedent, not print-dialog). WAEC-style layout: brand band, student block (position of graded peers, attendance %), subjects table with dynamic per-component columns ("1st CA (20)") + weighted total + grade + subject position, overall-average box with aggregate band remark, class teacher's remark paragraph, signature lines, generated-at footer. Zero recomputation — reads only `ReportCardData`. DOM-bound only in `resolveBrandColors()`/`doc.save()`, same RN-port note as transcriptPdf. | ☑ `npm run build` clean. ☐ On-device Done Check outstanding (PRD Log row 74). |
+| `ReportCardsPanel.tsx` (new, Tier 8 / Problem 8.4, Session 49) | `src/routes/ReportCardsPanel.tsx` | Report-cards mode inside ResultsModule's secondary path (admins + `academics.remarks.manage`). Per-class list (one light subject_results read) with average/overall position, inline class-teacher remarks saved on blur against the covering window, one-tap PDF per student. Actionable empty states when no assignment selected or no window covers the class. | ☑ `npm run build` clean. ☐ On-device Done Check outstanding (PRD Log row 74). |
+| `AssessmentsSettings.tsx` (new, Tier 8 / Problem 8.4, Sessions 46–50) | `src/routes/AssessmentsSettings.tsx` | Two Settings tab bodies kept out of the already-huge SettingsModule: `AssessmentsTab` (sub-nav Windows | Exams & venues | Grading & remarks — window lifecycle manager, class-attach sheet with per-class weighting/promotional/exam overrides, weighting profiles + component editor with live weight-sum check, exam authoring with named clash blocks, venue CRUD, secondary grade bands + aggregate bands) and `PromotionTabSecondary` (rules manager incl. graduating rules + cutoff, run flow: session/term/class → server preview → per-student override incl. demote-with-destination → confirm-gated atomic apply). Mirrors SettingsModule's private primitives locally rather than widening that file's internals. | ☑ Registered in SettingsModule for secondary schools only ('assessments' new tab; 'promotion' branches by school type). ☑ `npm run build` clean. ☐ On-device Done Checks outstanding (PRD Log rows 71–75). |
 
 **Edge Functions manifest** (all live in Supabase Dashboard → Edge Functions):
 

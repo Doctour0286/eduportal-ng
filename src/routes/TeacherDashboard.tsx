@@ -104,6 +104,14 @@ import {
 } from '../services/courseAttendanceService';
 import { loadAnnouncements, type Announcement as ServiceAnnouncement } from '../services/announcementsService';
 import { loadTermProgress, type TermProgress } from '../services/portalService';
+import {
+  loadScheduledTeachersForDate,
+  markPeriodRecord,
+  todayDateString,
+  type ScheduledTeacher,
+  type ScheduledEntry,
+  type PunctualityStatus,
+} from '../services/punctualityService';
 import { TermProgressCard } from '../components/TermProgressCard';
 
 // Same narrow, amended school_type branch precedent as App.tsx's own
@@ -347,7 +355,7 @@ function countdownLabel(period: Period, now: Date): string {
 // union this component actually navigates to — same rationale/comment as
 // AdminDashboard.tsx's own DashboardNavTarget, kept independently rather than
 // imported to avoid a circular dependency back into App.tsx.
-type DashboardNavTarget = 'timetable' | 'attendance' | 'results' | 'announcements' | 'hr'
+type DashboardNavTarget = 'timetable' | 'attendance' | 'results' | 'announcements' | 'hr' | 'punctuality'
 
 export default function TeacherDashboard({
   staffId,
@@ -421,6 +429,13 @@ export default function TeacherDashboard({
   // to fail silently to null, same convention as every other card here.
   const [termProgress, setTermProgress] = useState<TermProgress | null>(null);
 
+  // Punctuality widget state (for staff with academics.punctuality.record)
+  const [dashTeachers, setDashTeachers] = useState<ScheduledTeacher[]>([]);
+  const [activePeriod, setActivePeriod] = useState<{ id: string; label: string; end: string; start: string } | null>(null);
+  const [countdown, setCountdown] = useState('');
+  const [countdownPct, setCountdownPct] = useState(100);
+  const dashTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // A tick counter, re-rendered once a minute, purely to keep the countdown
   // label fresh while "My Schedule Today" is expanded — no network calls
   // fire from this, matching §4.1 / the LivePeriodWidget.tsx spec's own
@@ -470,8 +485,90 @@ export default function TeacherDashboard({
     loadAnns();
     loadPayslipVisibility();
     loadTermProgress(school.id).then(setTermProgress).catch(() => setTermProgress(null));
+    // Load today's teachers for punctuality quick-mark widget (if user has permission)
+    if (useAuthStore.getState().can('academics.punctuality.record')) {
+      loadCurrentSession()
+        .then(sres => { if (sres.ok && sres.sessionId) {
+          loadScheduledTeachersForDate(sres.sessionId, todayDateString())
+            .then(tres => { if (tres.ok) setDashTeachers(tres.data) })
+            .catch(() => {})
+        }})
+        .catch(() => {})
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [school?.id, staffId, isHigherEd]);
+
+  // Detect active period + countdown for punctuality widget
+  useEffect(() => {
+    function tick() {
+      const now = new Date()
+      const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+
+      let found: { id: string; label: string; end: string; start: string } | null = null
+      for (const t of dashTeachers) {
+        for (const e of t.entries) {
+          const start = e.period_start?.slice(0, 5) ?? ''
+          const end = e.period_end?.slice(0, 5) ?? ''
+          if (hhmm >= start && hhmm < end) {
+            found = { id: e.period_id, label: e.period_label, end, start }
+            break
+          }
+        }
+        if (found) break
+      }
+      setActivePeriod(found)
+
+      if (found) {
+        const [eh, em] = found.end.split(':').map(Number)
+        const endMs = new Date(now)
+        endMs.setHours(eh, em, 0, 0)
+        const diffMs = endMs.getTime() - now.getTime()
+        const diffMin = Math.max(0, Math.floor(diffMs / 60000))
+        const diffSec = Math.max(0, Math.floor((diffMs % 60000) / 1000))
+        setCountdown(`${diffMin}m ${diffSec}s`)
+
+        const [sh, sm] = found.start.split(':').map(Number)
+        const startMs = new Date(now)
+        startMs.setHours(sh, sm, 0, 0)
+        const totalMs = endMs.getTime() - startMs.getTime()
+        const elapsedMs = now.getTime() - startMs.getTime()
+        const pct = Math.max(0, Math.min(100, Math.round((1 - elapsedMs / totalMs) * 100)))
+        setCountdownPct(pct)
+      }
+    }
+
+    tick()
+    dashTimerRef.current = setInterval(tick, 1000)
+    return () => { if (dashTimerRef.current) clearInterval(dashTimerRef.current) }
+  }, [dashTeachers])
+
+  // Quick-mark a teacher's current period from the dashboard widget
+  async function handleDashMark(entry: ScheduledEntry, staffId: string, status: PunctualityStatus) {
+    const actorRecordId = useAuthStore.getState().actorRecordId
+    const currentSchool = useSchoolStore.getState().school
+    if (!actorRecordId || !currentSchool) return
+    const today = todayDateString()
+    const res = await markPeriodRecord({
+      schoolId: currentSchool.id,
+      timetableEntryId: entry.timetable_entry_id,
+      staffId,
+      status,
+      recordedBy: actorRecordId,
+      date: today,
+      source: 'period_override',
+    })
+    if (res.ok) {
+      setDashTeachers(prev => prev.map(t => {
+        if (t.staff_id !== staffId) return t
+        const entries = t.entries.map(e =>
+          e.timetable_entry_id === entry.timetable_entry_id
+            ? { ...e, record: { id: e.record?.id ?? crypto.randomUUID(), status, record_date: today, recording_source: 'period_override' as const } as any }
+            : e
+        )
+        return { ...t, entries, recordedCount: entries.filter(e => e.record !== null).length }
+      }))
+    }
+  }
 
   async function loadDashboardData() {
     setDataLoading(true);
@@ -1394,6 +1491,89 @@ export default function TeacherDashboard({
           />
         </div>
       </div>
+
+      {/* ── Active Period Punctuality (quick mark) ───────────────────────────── */}
+      {useAuthStore.getState().can('academics.punctuality.record') && activePeriod && (
+        <div className="dash-section">
+          <div className="dash-section-header">
+            <div className="dash-section-label">
+              {activePeriod.label} — ends in {countdown}
+            </div>
+            <button className="dash-compose-btn" type="button" onClick={() => onNavigate('punctuality')}>
+              Full view
+            </button>
+          </div>
+          <div className="dash-punc-strip">
+            <div
+              className="dash-punc-strip-fill"
+              style={{
+                width: `${countdownPct}%`,
+                background: countdownPct > 50 ? '#22c55e' : countdownPct > 20 ? '#eab308' : '#ef4444',
+              }}
+            />
+          </div>
+          <div className="dash-punc-list">
+            {(() => {
+              const currentEntries: Array<{
+                staffId: string
+                staffName: string
+                entry: ScheduledEntry
+              }> = []
+              for (const t of dashTeachers) {
+                const entry = t.entries.find(e => e.period_id === activePeriod.id)
+                if (entry) {
+                  currentEntries.push({ staffId: t.staff_id, staffName: t.staff_name, entry })
+                }
+              }
+              if (currentEntries.length === 0) {
+                return (
+                  <div className="dash-punc-empty">No teachers scheduled for this period</div>
+                )
+              }
+              return currentEntries.map(item => {
+                const rec = item.entry.record?.status
+                return (
+                  <div key={`${item.staffId}-${item.entry.timetable_entry_id}`} className="dash-punc-row">
+                    <div className="dash-punc-info">
+                      <span className={`dash-punc-dot${rec === 'present' ? ' dash-punc-dot--green' : rec === 'absent' ? ' dash-punc-dot--red' : ''}`} />
+                      <div className="dash-punc-text">
+                        <span className="dash-punc-name">{item.staffName}</span>
+                        <span className="dash-punc-detail">
+                          {item.entry.subject_name ?? 'No subject'} · {item.entry.class_node_name}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="dash-punc-actions">
+                      {rec ? (
+                        <span className={`dash-punc-badge${rec === 'present' ? ' dash-punc-badge--present' : ' dash-punc-badge--absent'}`}>
+                          {rec === 'present' ? 'Present' : 'Absent'}
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            className="dash-punc-btn dash-punc-btn--present"
+                            onClick={() => handleDashMark(item.entry, item.staffId, 'present')}
+                            title="Mark present"
+                          >
+                            <Icon name="circle-check" size={14} />
+                          </button>
+                          <button
+                            className="dash-punc-btn dash-punc-btn--absent"
+                            onClick={() => handleDashMark(item.entry, item.staffId, 'absent')}
+                            title="Mark absent"
+                          >
+                            <Icon name="alert-triangle" size={14} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })
+            })()}
+          </div>
+        </div>
+      )}
 
       {/* ── Announcements ───────────────────────────────────────────────────── */}
       <div className="dash-section dash-section--last">

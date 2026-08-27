@@ -88,6 +88,8 @@ import {
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
 import { loadStaffPreferences, type StaffPreferences } from '../services/settingsService'
+// Tier 8 / Problem 8.4 (Session 48): exam timetable surfaces read-only here.
+import { loadExamEntries, type ExamEntry } from '../services/assessmentService'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/icons'
 import { LivePeriodWidget } from '../components/LivePeriodWidget'
@@ -173,6 +175,36 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   // treats null the same as "alarms off," never as an error to surface
   // here — a failed preferences read shouldn't block the timetable itself.
   const [staffPrefs, setStaffPrefs] = useState<StaffPreferences | null>(null)
+
+  // ── Exam overlay (Tier 8 / Problem 8.4, Session 48) ─────────────────────
+  // Exam timetable entries falling inside the CURRENT CALENDAR WEEK surface
+  // as a read-only banner strip above the grid (Problem 8.4: exams must be
+  // visible inside the Timetable module itself, not a standalone screen;
+  // authoring lives in Settings > Assessments). Tapping a chip opens the
+  // shared modal with full detail incl. invigilators. Deliberately NOT
+  // annotated per-day-column in v1 — that needs TimetableGrid prop changes
+  // and a date↔weekday mapping the weekly template doesn't inherently have;
+  // flagged in §12 rather than built silently.
+  const [examEntries, setExamEntries] = useState<ExamEntry[]>([])
+  const [examDetail, setExamDetail] = useState<ExamEntry | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadWeek() {
+      const now = new Date()
+      // Monday-start week containing today.
+      const dow = (now.getDay() + 6) % 7
+      const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow)
+      const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6)
+      const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      const res = await loadExamEntries({ schoolId, fromDate: iso(monday), toDate: iso(sunday) })
+      if (!cancelled && res.ok) setExamEntries(res.data)
+      // A failed exam read must never break the timetable itself — same
+      // posture as the staff-preferences read below/above.
+    }
+    loadWeek()
+    return () => { cancelled = true }
+  }, [schoolId])
 
   useEffect(() => {
     let cancelled = false
@@ -631,6 +663,29 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
         />
       )}
 
+      {/* ── Exam overlay (Tier 8 / Session 48) ─────────────────────────────── */}
+      {/* Read-only banner of this week's exams; hidden in edit mode so the
+          authoring surface stays Settings-side and the editing grid stays
+          uncluttered. Tapping a chip opens the full detail modal. */}
+      {!editMode && examEntries.length > 0 && (
+        <div className="tt-exam-strip" role="region" aria-label="Exams this week">
+          <span className="tt-exam-label"><Icon name="clipboard-list" size={14} /> Exams this week</span>
+          <div className="tt-exam-chips">
+            {examEntries.map(en => (
+              <button key={en.id} className="tt-exam-chip" onClick={() => setExamDetail(en)}>
+                <span className="tt-exam-date">{formatExamDateShort(en.exam_date)}</span>
+                <span className="tt-exam-what">
+                  {en.subject_name} · {en.class_node_name}
+                </span>
+                <span className="tt-exam-meta">
+                  {en.start_time}{en.venue_name ? ` · ${en.venue_name}` : ''}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Grid ────────────────────────────────────────────────────────────── */}
       <div className="tt-grid-wrapper" ref={scrollRef}>
         <TimetableGrid
@@ -668,8 +723,41 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
           />
         )}
       </Modal>
+
+      {/* ── Exam detail popup (Tier 8 / Session 48) ─────────────────────────── */}
+      <Modal
+        open={examDetail !== null}
+        onClose={() => setExamDetail(null)}
+        title={examDetail ? `${examDetail.subject_name} — ${examDetail.class_node_name}` : ''}
+      >
+        {examDetail && (
+          <div className="tt-exam-detail">
+            <p className="tt-exam-detail-row"><strong>Date:</strong> {formatExamDateLong(examDetail.exam_date)}</p>
+            <p className="tt-exam-detail-row"><strong>Time:</strong> {examDetail.start_time} – {examDetail.end_time}</p>
+            <p className="tt-exam-detail-row"><strong>Venue:</strong> {examDetail.venue_name ?? 'Not set'}</p>
+            <p className="tt-exam-detail-row">
+              <strong>Invigilators:</strong>
+              {' '}{examDetail.invigilators.length === 0
+                ? 'None assigned'
+                : examDetail.invigilators.map(i => i.staff_name || 'Staff').join(', ')}
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   )
+}
+
+// ─── Exam date formatting (local, no locale-data dependency) ────────────────
+
+function formatExamDateShort(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`)
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+function formatExamDateLong(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`)
+  return d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 }
 
 // ─── Lesson detail popup content ───────────────────────────────────────────

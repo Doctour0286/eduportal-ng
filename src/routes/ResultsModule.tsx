@@ -69,7 +69,6 @@ import {
   loadTermsForSession,
   loadMyTeachingAssignments,
   loadAllTeachingAssignments,
-  loadScoreComponents,
   loadStudentsForClass,
   loadScores,
   loadGradeScale,
@@ -92,7 +91,14 @@ import {
   type GradeBand,
   type ScoreMap,
 } from '../services/resultsService'
+import {
+  resolveWindowForClass,
+  loadComponents,
+  type AssessmentWindow,
+  type AssessmentWindowClassRow,
+} from '../services/assessmentService'
 import CourseResultsModule from './CourseResultsModule'
+import ReportCardsPanel from './ReportCardsPanel'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -126,8 +132,10 @@ export default function ResultsModule({ schoolId, isAdmin, schoolType }: Results
   // Session 60: higher-ed schools get a completely separate component, not a
   // rendering-time fork lower down. This is deliberate — the secondary path's
   // boot effect (below) unconditionally calls loadMyTeachingAssignments/
-  // loadScoreComponents/loadGradeScale, which are meaningless (and wasteful)
-  // queries for a higher-ed school. Branching here, before that effect ever
+  // loadGradeScale, which are meaningless (and wasteful) queries for a
+  // higher-ed school. (Tier 8 note: window/component resolution moved INTO
+  // the per-class grid load — see loadGrid — so there is nothing school-wide
+  // to preload here anymore.) Branching here, before that effect ever
   // runs, avoids firing them at all — same reasoning CourseRegistrationModule/
   // CourseAttendanceModule already apply by being their own top-level modules
   // rather than branches inside a shared one.
@@ -173,8 +181,15 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const [terms,         setTerms]         = useState<Term[]>([])
   const [selectedTerm,  setSelectedTerm]  = useState<Term | null>(null)
 
-  // ── Score components ──────────────────────────────────────────────────────
+  // ── Score components + window (resolved per class+term, Tier 8 / 8.4) ─────
   const [components, setComponents] = useState<ScoreComponent[]>([])
+  const [winInfo, setWinInfo] = useState<{ window: AssessmentWindow; windowClass: AssessmentWindowClassRow | null } | null>(null)
+  const [resState, setResState] = useState<LoadState>('booting')
+  const [resError, setResError] = useState('')
+
+  // ── Mode: score entry vs report cards (Session 49 surface) ────────────────
+  const canManageRemarks = useAuthStore((s) => s.can('academics.remarks.manage'))
+  const [mode, setMode] = useState<'scores' | 'reports'>('scores')
 
   // ── Students + scores ─────────────────────────────────────────────────────
   const [students,   setStudents]   = useState<Student[]>([])
@@ -217,21 +232,18 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
       }
       setSession(sessionRes.data)
 
-      const [assignRes, compRes, gradeRes] = await Promise.all([
+      const [assignRes, gradeRes] = await Promise.all([
         (canViewAllAssignments || isAdmin)
           ? loadAllTeachingAssignments(sessionRes.data.id)
           : loadMyTeachingAssignments(staffId || '__pending__', sessionRes.data.id),
-        loadScoreComponents(),
         loadGradeScale(),
       ])
       if (cancelled) return
 
       if (!assignRes.ok) { setBootError(assignRes.error); setBootState('error'); return }
-      if (!compRes.ok)   { setBootError(compRes.error);   setBootState('error'); return }
       if (!gradeRes.ok)  { setBootError(gradeRes.error);  setBootState('error'); return }
 
       setAssignments(assignRes.data)
-      setComponents(compRes.data)
       setGradeBands(gradeRes.data)
 
       if (sessionRes.data.uses_terms) {
@@ -255,8 +267,30 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const loadGrid = useCallback(async () => {
     if (!selectedAssign || !session) return
     setGridState('loading')
+    setResState('loading')
     setStudents([])
     setScoreMap(new Map())
+
+    // Tier 8 / Problem 8.4: resolve THE window covering this class+term and
+    // load its class-specific component columns. Components are profile-
+    // scoped now — there is no school-wide set anymore.
+    const winRes = await resolveWindowForClass({
+      sessionId: session.id,
+      termId:    selectedTerm?.id ?? null,
+      classNodeId: selectedAssign.class_node_id,
+    })
+    if (!winRes.ok) { setResError(winRes.error); setResState('error'); return }
+    setWinInfo(winRes.data)
+
+    let comps: ScoreComponent[] = []
+    const profileId = winRes.data?.windowClass?.score_component_profile_id
+    if (winRes.data && profileId) {
+      const compRes = await loadComponents(profileId)
+      if (!compRes.ok) { setResError(compRes.error); setResState('error'); return }
+      comps = compRes.data
+    }
+    setComponents(comps)
+    setResState('ready')
 
     const [studentsRes, scoresRes] = await Promise.all([
       loadStudentsForClass(selectedAssign.class_node_id),
@@ -364,7 +398,24 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
     }
 
     const numValue = parseFloat(rawValue)
-    if (isNaN(numValue) || numValue < 0 || numValue > 100) return
+    if (isNaN(numValue) || numValue < 0 || numValue > component.max_score) return
+
+    // Tier 8: entry is only permitted while the covering window is open —
+    // mirrored server-side by the scores trigger; this guard just avoids
+    // a doomed round trip and shows the reason immediately.
+    if (winInfo && winInfo.window.status !== 'open') {
+      setErrorKeys(prev => new Map(prev).set(key,
+        winInfo.window.status === 'draft'
+          ? 'Score entry has not opened yet for this assessment.'
+          : 'Score entry is closed for this assessment.'))
+      const timer = setTimeout(() => {
+        setErrorKeys(prev => { const n = new Map(prev); n.delete(key); return n })
+        errorTimers.current.delete(key)
+      }, 3000)
+      if (errorTimers.current.has(key)) clearTimeout(errorTimers.current.get(key)!)
+      errorTimers.current.set(key, timer)
+      return
+    }
 
     const existing = scoreMap.get(key)
 
@@ -424,7 +475,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
       if (errorTimers.current.has(key)) clearTimeout(errorTimers.current.get(key)!)
       errorTimers.current.set(key, timer)
     }
-  }, [selectedAssign, session, selectedTerm, staffId, schoolId, scoreMap, canForClass])
+  }, [selectedAssign, session, selectedTerm, staffId, schoolId, scoreMap, canForClass, winInfo])
 
   // ─── Approval ──────────────────────────────────────────────────────────────
 
@@ -475,6 +526,10 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const allApproved      = students.length > 0 && students.every(s =>
     components.every(c => scoreMap.get(`${s.id}|${c.id}`)?.approved_at)
   )
+  // Entry is only possible while the covering window is open — the DB trigger
+  // enforces it; this drives the read-only rendering and banner copy.
+  const windowOpen       = winInfo?.window.status === 'open'
+  const canUseApproveBar = !!winInfo && (winInfo.window.status === 'open' || winInfo.window.status === 'closed')
 
   // ─── Render helpers ────────────────────────────────────────────────────────
 
@@ -546,6 +601,9 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   function renderApproveBar() {
     if (!selectedAssign || gridState !== 'ready' || students.length === 0) return null
     if (!canApproveScores) return null
+    // No covering window, or one that is draft/finalized: the server trigger
+    // refuses approval writes — don't render a control that cannot work.
+    if (!canUseApproveBar) return null
 
     return (
       <div className="res-approve-bar">
@@ -592,14 +650,18 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
               isSaving    ? 'res-score-input--saving'  : '',
             ].join(' ')}
             min={0}
-            max={100}
+            max={component.max_score}
             step={0.5}
             defaultValue={score?.value ?? ''}
-            readOnly={isLocked || isSaving || !canEdit}
+            readOnly={isLocked || isSaving || !canEdit || !windowOpen}
             onBlur={e  => handleScoreSave(student, component, e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
             aria-label={`${student.full_name} — ${component.name}`}
-            title={!canEdit ? 'You do not have permission to enter scores for this class' : undefined}
+            title={!windowOpen
+              ? (winInfo?.window.status === 'draft'
+                  ? 'Score entry has not opened yet for this assessment'
+                  : 'Score entry is closed for this assessment')
+              : !canEdit ? 'You do not have permission to enter scores for this class' : undefined}
           />
           {isLocked && <span className="res-lock-icon" role="img" aria-label="Approved, locked" title="Approved — locked"><Icon name="lock" size={14} /></span>}
         </div>
@@ -621,6 +683,86 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
           <span className="res-total-empty">—</span>
         )}
       </td>
+    )
+  }
+
+  function renderWindowBanner() {
+    if (!selectedAssign || resState === 'booting') return null
+    if (resState === 'loading') {
+      return <div className="res-win-banner-skel skeleton" />
+    }
+    if (resState === 'error') {
+      return (
+        <div className="res-error-state">
+          <span className="res-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
+          <p className="res-error-msg">{resError}</p>
+          <button className="res-retry-btn" onClick={loadGrid}>Retry</button>
+        </div>
+      )
+    }
+
+    // No covering window at all — the actionable empty state (§4.3). This is
+    // exactly Problem 8.3's original symptom, now explained instead of silent.
+    if (!winInfo) {
+      return (
+        <div className="res-win-banner res-win-banner--none">
+          <span className="res-win-icon"><Icon name="calendar" size={16} /></span>
+          <div className="res-win-copy">
+            <p className="res-win-title">
+              No assessment window covers {selectedAssign.class_node_name}{selectedTerm ? ` — ${selectedTerm.name}` : ''} yet.
+            </p>
+            <p className="res-win-sub">
+              {isAdmin
+                ? 'Create one in Settings > Assessments to open score entry for this class.'
+                : 'Ask your administrator to set up an assessment window first.'}
+            </p>
+          </div>
+        </div>
+      )
+    }
+
+    const w = winInfo.window
+    if (w.status !== 'open') {
+      return (
+        <div className={`res-win-banner res-win-banner--${w.status}`}>
+          <span className="res-win-icon"><Icon name={w.status === 'draft' ? 'clock' : 'lock'} size={16} /></span>
+          <div className="res-win-copy">
+            <p className="res-win-title">{w.name} · {w.status}</p>
+            <p className="res-win-sub">
+              {w.status === 'draft'
+                ? 'Score entry opens once this assessment is opened.'
+                : w.status === 'closed'
+                  ? 'Score entry has closed. Results can still be approved, then finalized.'
+                  : 'This assessment is finalized — scores are read-only.'}
+            </p>
+          </div>
+        </div>
+      )
+    }
+
+    // Open — but surface a misconfigured weighting rather than letting bad
+    // totals ship silently (the old schema comment's "app enforces = 100").
+    const weightSum = components.reduce((acc, c) => acc + c.weight_pct, 0)
+    return (
+      <div>
+        <div className="res-win-banner res-win-banner--open">
+          <span className="res-win-icon"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /></span>
+          <div className="res-win-copy">
+            <p className="res-win-title">{w.name} · open</p>
+            <p className="res-win-sub">
+              {components.length === 0
+                ? 'No score columns configured yet for this class.'
+                : `Score entry is open${winInfo.windowClass && winInfo.window.scope === 'selected_classes' ? '' : ''}.`}
+            </p>
+          </div>
+        </div>
+        {components.length > 0 && Math.abs(weightSum - 100) > 0.01 && (
+          <p className="res-weight-warn">
+            <Icon name="alert-triangle" size={13} style={{ color: 'var(--color-warning, #d97706)' }} />
+            {' '}Component weights total {weightSum}% — expected 100%.
+          </p>
+        )}
+      </div>
     )
   }
 
@@ -664,8 +806,13 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
       )
     }
 
+    // Window not open → render the grid read-only (values visible, nothing
+    // editable) rather than hiding it — admins reviewing a closed window
+    // still need to see what was entered.
+    const gridReadonly = !windowOpen
+
     return (
-      <div className="res-table-wrap">
+      <div className={['res-table-wrap', gridReadonly ? 'res-table-wrap--readonly' : ''].join(' ')}>
         <table className="res-table">
           <thead>
             <tr>
@@ -673,7 +820,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
               {components.map(c => (
                 <th key={c.id} className="res-th res-th--component">
                   <span className="res-th-name">{c.name}</span>
-                  <span className="res-th-weight">{c.weight_pct}%</span>
+                  <span className="res-th-weight">{c.weight_pct}% · /{c.max_score}</span>
                 </th>
               ))}
               <th className="res-th res-th--total">Total</th>
@@ -711,13 +858,50 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
         {/* Term tabs — only when school uses terms */}
         {selectedAssign && renderTermSelector()}
 
-        {/* Approve / un-approve bar */}
-        {renderApproveBar()}
+        {/* Mode switcher — report cards need a window + remark permission */}
+        {(isAdmin || canManageRemarks) && (
+          <div className="res-mode-tabs" role="tablist">
+            <button
+              role="tab"
+              aria-selected={mode === 'scores'}
+              className={['res-mode-tab', mode === 'scores' ? 'res-mode-tab--active' : ''].join(' ')}
+              onClick={() => setMode('scores')}
+            >
+              <Icon name="pencil" size={14} /> Enter scores
+            </button>
+            <button
+              role="tab"
+              aria-selected={mode === 'reports'}
+              className={['res-mode-tab', mode === 'reports' ? 'res-mode-tab--active' : ''].join(' ')}
+              onClick={() => setMode('reports')}
+            >
+              <Icon name="file-text" size={14} /> Report cards
+            </button>
+          </div>
+        )}
+
+        {/* Approve / un-approve bar (scores mode only) */}
+        {mode === 'scores' && renderApproveBar()}
       </div>
 
-      {/* Score entry grid */}
+      {/* Body */}
       <div className="res-body">
-        {renderGrid()}
+        {mode === 'reports' && (isAdmin || canManageRemarks) ? (
+          <ReportCardsPanel
+            schoolId={schoolId}
+            isAdmin={isAdmin}
+            session={session}
+            selectedTerm={selectedTerm}
+            selectedAssign={selectedAssign}
+            winInfo={winInfo}
+          />
+        ) : (
+          <>
+            {/* Window state banner — explains WHY the grid is/isn't editable */}
+            {renderWindowBanner()}
+            {renderGrid()}
+          </>
+        )}
       </div>
     </div>
   )
