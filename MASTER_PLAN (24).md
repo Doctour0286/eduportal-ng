@@ -4597,3 +4597,60 @@ Do not skip ahead while earlier items remain unchecked.
 | SESSION 65a (PRD Problem 8.7a, items 1/7 — correction, owner walkthrough 2026-07-17): should application fields (JAMB/O'Level/Direct-Entry data) be one shared field set for the whole school, or can different pipelines define their own distinct field set (owner decision)? | **One shared, school-wide field set — not per-pipeline.** `admission_field_settings` is a single row per school (enable/required per field, plus a `custom_fields` extension array), not one row per pipeline. A Direct-Entry-specific field simply sits unused/hidden for a UTME applicant rather than needing a second field-configuration surface per pipeline — avoids the same "one concern, N places" duplication this codebase has already caught itself on more than once (SESSION 62pre's `is_passing` gap, the `current_staff_id()`/`current_actor_id()` duplication, and SESSION 65's own admission/settings file-split reasoning). |
 | SESSION 65a (PRD Problem 8.7a, items 1/7 — correction, owner walkthrough 2026-07-17): can a pipeline stage (e.g. Screening) be enabled with zero of its components checked, or must at least one component be checked for a stage to be considered "on" (owner decision)? | **At least one component required — a stage with zero components checked is not a valid enabled state.** Enforced at two levels, not just the settings UI: the Admission Settings form (SESSION 65c) must not allow saving a stage checked "on" with nothing under it selected, and the stage-advance function itself (SESSION 65a) treats a component-less stage as absent from the pipeline rather than as a pass-through no-op — the same "don't let the DB and the UI silently disagree about what's enforced" discipline already applied to the matric-format soft-lock (UI warns, DB is the real gate). |
 | SESSION 65a (PRD Problem 8.7a, items 1/7 — correction, owner walkthrough 2026-07-17): should a pipeline's stage order be author-configurable per pipeline, or fixed for every pipeline (owner decision, resolving Claude's own flagged recommendation)? | **Fixed order for every pipeline: Application → Screening → Decision → Clearance.** Schools only choose which stages *appear* (by enabling/disabling them per pipeline), never their sequence. No real institutional precedent was found for running Clearance (confirming documents/fees for someone who already has an offer) before a Decision has been made — the flexibility would add real schema/UI/stage-advance-function complexity (an authored `sequence` column, reordering UI, out-of-order-transition validation) for a case that doesn't correspond to any actual admissions workflow. Reflected directly in schema: `admission_pipeline_stages` carries no `sequence` column — order is encoded once, in the stage-advance function itself, not authored per pipeline. |
+
+---
+
+### Feature 1: Teacher Punctuality Tracker — ✅ Complete (2026-08-27)
+
+**Status:** Built, migrated, owner-confirmed working. All files committed.
+
+**What was built:**
+- `migration_punctuality_tracker.sql` — table `teacher_punctuality_records` + RLS (ptr_select/ptr_insert/ptr_update) + 3 permission keys + indexes + updated_at trigger
+- `src/services/punctualityService.ts` — `loadScheduledTeachersForDate()`, `markTeacherFullDay()`, `markPeriodRecord()`, `loadPunctualityReport()`, `getPunctualitySummary()`, `todayDateString()`
+- `src/routes/PunctualityModule.tsx` — Two record views (Grid with current-period highlighting, List with expandable cards), Report tab with scope pills, date picker
+- `src/routes/AdminDashboard.tsx` — Active-period punctuality widget with countdown color strip, per-period marking, permission-gated
+- `src/routes/TeacherDashboard.tsx` — Same active-period widget for staff with `academics.punctuality.record` permission
+- `src/App.tsx` — NavTab, VALID_NAV_TABS, import, route, More sheet entry
+- `src/index.css` — `punc-*` and `dash-punc-*` CSS classes
+
+**Key decisions locked:**
+- RLS admin bypass via `current_is_admin()` — acceptable per codebase convention
+- Teachers see only their own schemes (for Feature 2); "own only" for now
+- Dashboard cards go in existing `dash-stat-grid`
+- Both features get their own entries in More sheet / Sidebar
+- Punctuality privacy is hard requirement: teachers must not see data via UI, network, or DB
+- Unrecorded periods visually distinct from absent (grey dash vs red X)
+- Day-level shortcut writes to same table as individual period records
+
+---
+
+### Feature 2: Scheme of Work — 🔄 In Progress (started 2026-08-27)
+
+**Status:** Design complete (NEW_FEATURES_PLAN.md §Feature 2), implementation starting.
+
+**Design summary (from PRD §7.15a, Problem 8.6):**
+- Teachers create/submit a scheme of work (structured term plan, broken down by week/topic, per subject and class)
+- Teachers can adopt/adapt a standardized curriculum template (NERDC/WAEC placeholders) as a starting point
+- Admins track each teacher's actual progress against their submitted/adopted scheme over the term
+- Submit → approve/return workflow required, not self-publish
+- Weekly coverage tracking in scope for first launch
+
+**3 new tables:**
+- `schemes_of_work` — per-teacher, per-assignment scheme (draft → submitted → approved/returned)
+- `scheme_of_work_weeks` — weekly/topic breakdown (week number, topic, objectives, activities, resources, coverage status)
+- `curriculum_templates` — platform-level reusable templates (NERDC/WAEC placeholders)
+
+**3 permission keys:**
+- `academics.scheme_of_work.view_all` — admin/HOD see all schemes
+- `academics.scheme_of_work.manage` — teachers create/edit/submit own schemes
+- `academics.scheme_of_work.approve` — admin approve/return
+
+**Files to create:**
+- `migration_scheme_of_work.sql`
+- `src/services/schemeOfWorkService.ts`
+- `src/routes/SchemeOfWorkModule.tsx`
+
+**Files to modify:**
+- `src/App.tsx` — route + More sheet entry
+- `src/routes/AdminDashboard.tsx` — summary card
+- `src/index.css` — `sow-*` CSS classes

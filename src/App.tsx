@@ -34,7 +34,7 @@ import { Icon } from './components/icons'
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
 // but App.tsx needs 'home' as the initial landing tab for the admin dashboard.
-type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance' | 'admission' | 'punctuality'
+type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announcements' | 'settings' | 'guardians' | 'account_preferences' | 'course_registration' | 'course_attendance' | 'admission' | 'punctuality' | 'scheme_of_work'
 
 // Intent payload — carried from dashboard quick actions into target modules.
 // Only the three intents that open a form on arrival are defined here.
@@ -80,7 +80,7 @@ const ACTIVE_TAB_STORAGE_KEY = 'activeTab'
 const VALID_NAV_TABS = new Set<NavTab>([
   'home', 'results', 'hr', 'library', 'announcements', 'settings',
   'guardians', 'account_preferences', 'course_registration',
-  'course_attendance', 'admission', 'punctuality',
+  'course_attendance', 'admission', 'punctuality', 'scheme_of_work',
   'timetable', 'attendance', 'students', 'finance', 'more',
 ])
 
@@ -130,6 +130,7 @@ import GuardianPortal from './routes/GuardianPortal'
 import SettingsModule from './routes/SettingsModule'
 import AdmissionModule from './routes/AdmissionModule'
 import PunctualityModule from './routes/PunctualityModule'
+import SchemeOfWorkModule from './routes/SchemeOfWorkModule'
 import CourseRegistrationModule from './routes/CourseRegistrationModule'
 import CourseAttendanceModule from './routes/CourseAttendanceModule'
 import GuardianModule from './routes/GuardianModule'
@@ -1368,6 +1369,10 @@ function TabContent({
     return <PunctualityModule schoolId={schoolId} isAdmin={isAdmin} />
   }
 
+  if (tab === 'scheme_of_work') {
+    return <SchemeOfWorkModule schoolId={schoolId} isAdmin={isAdmin} />
+  }
+
   if (tab === 'course_registration') {
     // Higher-institution-only, same as SettingsModule's Institution/
     // Curriculum tabs — CourseRegistrationModule itself also gates on
@@ -1493,6 +1498,7 @@ function MoreSheetContent({
   // provided alongside this change.
   const canViewAdmission = can('academics.admission.manage') || isAdmin
   const canViewPunctuality = can('academics.punctuality.view') || can('academics.punctuality.record') || isAdmin
+  const canViewSchemeOfWork = can('academics.scheme_of_work.view_all') || can('academics.scheme_of_work.manage') || can('academics.scheme_of_work.approve') || isAdmin
   // Duplicated from SettingsModule.tsx's own private (unexported) list —
   // see CourseRegistrationModule.tsx's header note on the same
   // duplication. Course registration is a higher-institution-only concept
@@ -1573,6 +1579,16 @@ function MoreSheetContent({
             <div>
               <p className="more-menu-item-label">Teacher Punctuality</p>
               <p className="more-menu-item-desc">Track teacher presence during scheduled periods</p>
+            </div>
+            <span className="more-menu-item-arrow">›</span>
+          </button>
+        )}
+        {canViewSchemeOfWork && (
+          <button className="more-menu-item" onClick={() => onNavigate('scheme_of_work')}>
+            <span className="more-menu-item-icon"><Icon name="file-text" /></span>
+            <div>
+              <p className="more-menu-item-label">Scheme of Work</p>
+              <p className="more-menu-item-desc">Teacher term planning and weekly coverage</p>
             </div>
             <span className="more-menu-item-arrow">›</span>
           </button>

@@ -6630,6 +6630,211 @@ body {
 .punc-empty-msg { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); margin: 0; }
 .punc-empty-sub { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; max-width: 280px; }
 
+/* ─── Scheme of Work (sow-*) ─────────────────────────────────────────────────
+   Feature 2 — Teacher term planning with weekly coverage.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.sow-module { display: flex; flex-direction: column; min-height: 100%; background: var(--color-bg); }
+
+.sow-header {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  background: var(--color-surface); border-bottom: 1px solid var(--color-border);
+}
+.sow-header h2 { font-size: var(--text-lg); font-weight: 700; color: var(--color-text); margin: 0; flex: 1; }
+
+.sow-back {
+  display: flex; align-items: center; gap: var(--space-1);
+  background: none; border: none; color: var(--color-primary); font-size: var(--text-sm);
+  font-weight: 600; cursor: pointer; padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+}
+.sow-back:active { background: var(--color-bg); }
+
+/* ── Buttons ───────────────────────────────────────────────────────────────── */
+
+.sow-btn {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md); border: 1px solid transparent;
+  font-size: var(--text-sm); font-weight: 600; cursor: pointer;
+  transition: background 0.15s;
+}
+.sow-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sow-btn--primary { background: var(--color-primary); color: #fff; }
+.sow-btn--primary:hover:not(:disabled) { opacity: 0.9; }
+.sow-btn--secondary { background: var(--color-surface); border-color: var(--color-border); color: var(--color-text); }
+.sow-btn--secondary:hover:not(:disabled) { background: var(--color-bg); }
+.sow-btn--success { background: #16a34a; color: #fff; }
+.sow-btn--success:hover:not(:disabled) { background: #15803d; }
+.sow-btn--warning { background: #ea580c; color: #fff; }
+.sow-btn--warning:hover:not(:disabled) { background: #c2410c; }
+
+/* ── Filters / Pills ───────────────────────────────────────────────────────── */
+
+.sow-filters { display: flex; gap: var(--space-2); padding: var(--space-3) var(--space-4); flex-wrap: wrap; }
+.sow-pill {
+  padding: var(--space-1) var(--space-3); border-radius: 999px; border: 1px solid var(--color-border);
+  background: var(--color-surface); font-size: var(--text-xs); font-weight: 600;
+  color: var(--color-text-muted); cursor: pointer; transition: all 0.15s;
+}
+.sow-pill--active { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+.sow-pill:active { opacity: 0.8; }
+
+/* ── List ──────────────────────────────────────────────────────────────────── */
+
+.sow-list { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
+.sow-card {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  padding: var(--space-3) var(--space-4); background: var(--color-surface);
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  cursor: pointer; transition: box-shadow 0.15s;
+}
+.sow-card:active { box-shadow: 0 1px 3px rgba(15,23,42,0.08); }
+.sow-card-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.sow-card-subject { font-size: var(--text-sm); font-weight: 700; color: var(--color-text); }
+.sow-card-class { font-size: var(--text-xs); color: var(--color-text-muted); }
+.sow-card-teacher { font-size: var(--text-xs); color: var(--color-text-muted); }
+.sow-card-note {
+  display: flex; align-items: center; gap: var(--space-1);
+  font-size: var(--text-xs); color: #ea580c; margin-top: var(--space-1);
+}
+
+/* ── Badges ────────────────────────────────────────────────────────────────── */
+
+.sow-badge {
+  display: inline-block; padding: 2px var(--space-2); border-radius: 999px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.sow-badge--draft     { background: #f3f4f6; color: #6b7280; }
+.sow-badge--submitted { background: #dbeafe; color: #1e40af; }
+.sow-badge--approved  { background: #dcfce7; color: #166534; }
+.sow-badge--returned  { background: #fee2e2; color: #991b1b; }
+
+/* ── Detail view ───────────────────────────────────────────────────────────── */
+
+.sow-detail-teacher { padding: 0 var(--space-4); font-size: var(--text-xs); color: var(--color-text-muted); }
+.sow-return-note {
+  display: flex; align-items: center; gap: var(--space-2);
+  margin: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-3);
+  background: #fff7ed; border: 1px solid #fed7aa; border-radius: var(--radius-md);
+  font-size: var(--text-xs); color: #9a3412;
+}
+.sow-weeks-header {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+}
+.sow-weeks-header h3 { font-size: var(--text-sm); font-weight: 700; color: var(--color-text); margin: 0; }
+.sow-weeks-actions { display: flex; gap: var(--space-2); }
+
+.sow-weeks-list { display: flex; flex-direction: column; gap: var(--space-2); padding: 0 var(--space-4) var(--space-3); }
+.sow-week-card {
+  background: var(--color-surface); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: var(--space-3);
+}
+.sow-week-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2);
+}
+.sow-week-num { font-size: var(--text-xs); font-weight: 700; color: var(--color-text); }
+.sow-coverage {
+  font-size: 10px; font-weight: 600; padding: 1px var(--space-2);
+  border-radius: 999px; text-transform: capitalize;
+}
+.sow-coverage--planned     { background: #f3f4f6; color: #6b7280; }
+.sow-coverage--in_progress { background: #dbeafe; color: #1e40af; }
+.sow-coverage--completed   { background: #dcfce7; color: #166534; }
+.sow-coverage--not_covered { background: #fee2e2; color: #991b1b; }
+
+.sow-week-edit { display: flex; flex-direction: column; gap: var(--space-2); }
+.sow-week-view { display: flex; flex-direction: column; gap: var(--space-1); }
+.sow-week-topic { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+.sow-week-detail { font-size: var(--text-xs); color: var(--color-text-muted); line-height: 1.4; }
+
+.sow-remove-week {
+  display: flex; align-items: center; gap: var(--space-1);
+  background: none; border: none; color: #ea580c; font-size: var(--text-xs);
+  font-weight: 600; cursor: pointer; padding: 0;
+}
+.sow-remove-week:active { opacity: 0.7; }
+
+.sow-empty-weeks {
+  padding: var(--space-4); text-align: center; color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+/* ── Inputs ────────────────────────────────────────────────────────────────── */
+
+.sow-input, .sow-select, .sow-textarea {
+  width: 100%; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-bg); font-size: var(--text-sm); color: var(--color-text);
+  font-family: inherit; box-sizing: border-box;
+}
+.sow-input:focus, .sow-select:focus, .sow-textarea:focus {
+  outline: none; border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+}
+.sow-textarea { resize: vertical; min-height: 48px; }
+
+.sow-form-group { display: flex; flex-direction: column; gap: var(--space-1); padding: 0 var(--space-4); }
+.sow-form-group label { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); }
+
+.sow-create-form { display: flex; flex-direction: column; gap: var(--space-3); padding-top: var(--space-3); }
+
+/* ── Actions row ───────────────────────────────────────────────────────────── */
+
+.sow-actions {
+  display: flex; gap: var(--space-2); padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border); margin-top: auto;
+}
+
+/* ── Return form ───────────────────────────────────────────────────────────── */
+
+.sow-return-form {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-3) var(--space-4); background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+}
+.sow-return-form-actions { display: flex; gap: var(--space-2); }
+
+/* ── Modal ─────────────────────────────────────────────────────────────────── */
+
+.sow-modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.4); display: flex; align-items: flex-end; justify-content: center;
+}
+.sow-modal {
+  width: 100%; max-width: 480px; max-height: 80vh; overflow-y: auto;
+  background: var(--color-surface); border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3);
+}
+.sow-modal h3 { font-size: var(--text-base); font-weight: 700; color: var(--color-text); margin: 0; }
+.sow-modal-note { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; }
+
+.sow-template-filters { display: flex; flex-direction: column; gap: var(--space-2); }
+.sow-template-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.sow-template-card {
+  padding: var(--space-2) var(--space-3); background: var(--color-bg);
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  cursor: pointer; transition: border-color 0.15s;
+}
+.sow-template-card:active { border-color: var(--color-primary); }
+.sow-template-board { font-size: 10px; font-weight: 600; color: var(--color-text-muted); text-transform: uppercase; }
+.sow-template-subject { font-size: var(--text-xs); font-weight: 600; color: var(--color-text); }
+.sow-template-week { font-size: var(--text-xs); color: var(--color-text-muted); }
+.sow-template-detail { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; }
+
+/* ── States ────────────────────────────────────────────────────────────────── */
+
+.sow-loading { padding: var(--space-8); text-align: center; font-size: var(--text-sm); color: var(--color-text-muted); }
+.sow-error { padding: var(--space-3) var(--space-4); font-size: var(--text-sm); color: #dc2626; }
+.sow-empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--space-2);
+  padding: var(--space-8) var(--space-4); text-align: center; color: var(--color-text-muted);
+}
+.sow-empty p { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+.sow-empty-sub { font-size: var(--text-xs) !important; color: var(--color-text-muted) !important; font-weight: 400 !important; }
+
 /* ─── Phase 6: Results module (res-*) ───────────────────────────────────────
    Append to src/index.css after the phase6-attendance.css block.
    All values use Phase 0 design tokens (--color-*, --space-*, --radius-*, --text-*).
