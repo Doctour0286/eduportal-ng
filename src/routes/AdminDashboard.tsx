@@ -13,6 +13,7 @@ import { loadTermProgress, type TermProgress } from '../services/portalService';
 import { getActivePlacedStudentCount } from '../services/studentsService';
 import { getPunctualitySummary, loadScheduledTeachersForDate, markPeriodRecord, type PunctualitySummary, type ScheduledTeacher, type ScheduledEntry, type PunctualityStatus } from '../services/punctualityService';
 import { loadCurrentSession } from '../services/timetableService';
+import { getSowSummary, type SowSummary } from '../services/schemeOfWorkService';
 import { TermProgressCard } from '../components/TermProgressCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -59,11 +60,16 @@ interface StatCardProps {
   icon: ReactNode;
   loading: boolean;
   accent?: 'green' | 'blue' | 'amber' | 'purple';
+  onClick?: () => void;
 }
 
-function StatCard({ label, value, sub, icon, loading, accent = 'blue' }: StatCardProps) {
+function StatCard({ label, value, sub, icon, loading, accent = 'blue', onClick }: StatCardProps) {
   return (
-    <div className={`dash-stat-card dash-stat-card--${accent}`}>
+    <div
+      className={`dash-stat-card dash-stat-card--${accent}`}
+      onClick={onClick}
+      style={onClick ? { cursor: 'pointer' } : undefined}
+    >
       <div className="dash-stat-icon">{icon}</div>
       <div className="dash-stat-body">
         <div className="dash-stat-label">{label}</div>
@@ -164,7 +170,7 @@ function todayDateString(): string {
 // this component actually navigates to — not the full union — so this file
 // doesn't need to import App.tsx's type and create a circular dependency.
 // Every value here must stay in sync with App.tsx's NavTab values by name.
-type DashboardNavTarget = 'students' | 'finance' | 'attendance' | 'timetable' | 'results' | 'hr' | 'announcements' | 'punctuality'
+type DashboardNavTarget = 'students' | 'finance' | 'attendance' | 'timetable' | 'results' | 'hr' | 'announcements' | 'punctuality' | 'scheme_of_work'
 
 export default function AdminDashboard({
   onNavigate,
@@ -198,6 +204,7 @@ export default function AdminDashboard({
   // degrade-independently convention on this screen.
   const [termProgress, setTermProgress] = useState<TermProgress | null>(null);
   const [punctuality, setPunctuality] = useState<PunctualitySummary | null>(null);
+  const [sowSummary, setSowSummary] = useState<SowSummary | null>(null);
   const [dashTeachers, setDashTeachers] = useState<ScheduledTeacher[]>([]);
   const [dashTeachersLoading, setDashTeachersLoading] = useState(false);
   const [activePeriod, setActivePeriod] = useState<{ id: string; label: string; end: string } | null>(null);
@@ -230,13 +237,16 @@ export default function AdminDashboard({
     getPunctualitySummary({ scope: 'day', startDate: todayDateString(), endDate: todayDateString() })
       .then(res => { if (res.ok) setPunctuality(res.data) })
       .catch(() => {});
-    // Load today's teachers for quick-mark widget
+    // Load today's teachers for quick-mark widget + SOW summary (needs session)
     loadCurrentSession()
       .then(sres => { if (sres.ok && sres.sessionId) {
         setDashTeachersLoading(true)
         loadScheduledTeachersForDate(sres.sessionId, todayDateString())
           .then(tres => { if (tres.ok) setDashTeachers(tres.data); setDashTeachersLoading(false) })
           .catch(() => setDashTeachersLoading(false))
+        getSowSummary(sres.sessionId)
+          .then(res => { if (res.ok) setSowSummary(res.data) })
+          .catch(() => {});
       }})
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -643,6 +653,15 @@ export default function AdminDashboard({
             icon={<Icon name="clipboard-list" size={22} />}
             loading={false}
             accent={punctuality && punctuality.teachersScheduledToday > 0 ? (punctuality.overallRate >= 80 ? 'green' : 'amber') : undefined}
+          />
+          <StatCard
+            label="Schemes of Work"
+            value={sowSummary ? `${sowSummary.approvedCount}/${sowSummary.totalSchemes}` : '—'}
+            sub={sowSummary && sowSummary.totalSchemes > 0 ? 'approved / total' : 'no schemes yet'}
+            icon={<Icon name="file-text" size={22} />}
+            loading={false}
+            accent={sowSummary && sowSummary.submittedCount > 0 ? 'amber' : undefined}
+            onClick={() => onNavigate('scheme_of_work')}
           />
         </div>
       </div>

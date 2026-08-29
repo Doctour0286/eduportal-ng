@@ -170,13 +170,39 @@ create policy sow_weeks_select on scheme_of_work_weeks
     and scheme_of_work_id in (select id from schemes_of_work)
   );
 
--- INSERT/UPDATE: only when parent scheme is draft or returned
-drop policy if exists sow_weeks_write on scheme_of_work_weeks;
-create policy sow_weeks_write on scheme_of_work_weeks
-  for all using (
+-- INSERT: only when parent scheme is draft or returned
+drop policy if exists sow_weeks_insert_delete on scheme_of_work_weeks;
+drop policy if exists sow_weeks_insert on scheme_of_work_weeks;
+drop policy if exists sow_weeks_delete on scheme_of_work_weeks;
+create policy sow_weeks_insert on scheme_of_work_weeks
+  for insert
+  with check (
     school_id = current_school_id()
     and scheme_of_work_id in (
       select id from schemes_of_work where status in ('draft', 'returned')
+    )
+  );
+
+-- DELETE: only when parent scheme is draft or returned
+create policy sow_weeks_delete on scheme_of_work_weeks
+  for delete using (
+    school_id = current_school_id()
+    and scheme_of_work_id in (
+      select id from schemes_of_work where status in ('draft', 'returned')
+    )
+  );
+
+-- UPDATE: allowed on draft/returned schemes (full edit) or on any scheme
+-- for teachers with manage permission (coverage tracking on approved schemes)
+drop policy if exists sow_weeks_update on scheme_of_work_weeks;
+create policy sow_weeks_update on scheme_of_work_weeks
+  for update using (
+    school_id = current_school_id()
+    and (
+      scheme_of_work_id in (
+        select id from schemes_of_work where status in ('draft', 'returned')
+      )
+      or current_has_permission('academics.scheme_of_work.manage')
     )
   )
   with check (school_id = current_school_id());

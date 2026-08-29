@@ -355,7 +355,7 @@ function countdownLabel(period: Period, now: Date): string {
 // union this component actually navigates to — same rationale/comment as
 // AdminDashboard.tsx's own DashboardNavTarget, kept independently rather than
 // imported to avoid a circular dependency back into App.tsx.
-type DashboardNavTarget = 'timetable' | 'attendance' | 'results' | 'announcements' | 'hr' | 'punctuality'
+type DashboardNavTarget = 'timetable' | 'attendance' | 'results' | 'announcements' | 'hr' | 'punctuality' | 'scheme_of_work'
 
 export default function TeacherDashboard({
   staffId,
@@ -1488,6 +1488,11 @@ export default function TeacherDashboard({
             icon={<Icon name="pencil" />}
             label="Enter scores"
             onClick={() => onNavigate('results')}
+          />
+          <QuickAction
+            icon={<Icon name="file-text" />}
+            label="Scheme of Work"
+            onClick={() => onNavigate('scheme_of_work')}
           />
         </div>
       </div>
