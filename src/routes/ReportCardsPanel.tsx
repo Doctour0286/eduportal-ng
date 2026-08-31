@@ -99,6 +99,7 @@ export default function ReportCardsPanel({
       let srQuery = supabase
         .from('subject_results')
         .select('student_id, weighted_total')
+        .eq('school_id', schoolId)
         .eq('session_id', session.id)
         .in('student_id', classmates.map(s => s.id))
       srQuery = selectedTerm?.id ? srQuery.eq('term_id', selectedTerm.id) : srQuery.is('term_id', null)

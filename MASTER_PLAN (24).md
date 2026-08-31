@@ -4626,7 +4626,7 @@ Do not skip ahead while earlier items remain unchecked.
 
 ### Feature 2: Scheme of Work — 🔄 In Progress (started 2026-08-27)
 
-**Status:** Design complete (NEW_FEATURES_PLAN.md §Feature 2), implementation starting.
+**Status:** Build clean, 15 audit fixes applied, two-kind template system implemented, session/class filters added.
 
 **Design summary (from PRD §7.15a, Problem 8.6):**
 - Teachers create/submit a scheme of work (structured term plan, broken down by week/topic, per subject and class)
@@ -4635,18 +4635,45 @@ Do not skip ahead while earlier items remain unchecked.
 - Submit → approve/return workflow required, not self-publish
 - Weekly coverage tracking in scope for first launch
 
-**3 new tables:**
+**5 tables:**
 - `schemes_of_work` — per-teacher, per-assignment scheme (draft → submitted → approved/returned)
 - `scheme_of_work_weeks` — weekly/topic breakdown (week number, topic, objectives, activities, resources, coverage status)
-- `curriculum_templates` — platform-level reusable templates (NERDC/WAEC placeholders)
+- `curriculum_templates` — platform-level board templates (NERDC/WAEC), `is_placeholder` flag for unverified content
+- `school_curriculum_templates` — school-owned reusable templates (name, optional subject/level plain-text labels)
+- `school_curriculum_template_weeks` — weekly content for school-owned templates
 
 **3 permission keys:**
 - `academics.scheme_of_work.view_all` — admin/HOD see all schemes
-- `academics.scheme_of_work.manage` — teachers create/edit/submit own schemes
+- `academics.scheme_of_work.manage` — teachers create/edit/submit own schemes, manage school templates
 - `academics.scheme_of_work.approve` — admin approve/return
+
+**15 audit fixes (v2):**
+- RLS on `curriculum_templates` for writes (admin only)
+- `term_id` nullable on `schemes_of_work`
+- `submitScheme` accepts draft|returned (not just draft)
+- `loadCurriculumTemplates` accepts boardName filter
+- `loadSchemeDetail` optimized (avoids N+1)
+- Cascading dropdowns in import modal
+- Coverage tracking for scheme owner
+- Import warning for already-imported schemes
+- Manage templates UI (CRUD on board templates)
+- Real NERDC+WAEC template content (78 weeks across 6 subject sets)
+- SQL apostrophe fix in set notation string
+
+**3 migration files:**
+- `migration_scheme_of_work.sql` — original schema
+- `migration_scheme_of_work_v2.sql` — audit fixes + real template data
+- `migration_scheme_of_work_v3.sql` — school template tables + `is_placeholder`
+
+**UI (3 screens):**
+- List: status tabs, session filter, class filter
+- Templates: board templates (read-only adopt) + school templates (CRUD adopt)
+- School template builder: name + optional subject/level + weeks
 
 **Files to create:**
 - `migration_scheme_of_work.sql`
+- `migration_scheme_of_work_v2.sql`
+- `migration_scheme_of_work_v3.sql`
 - `src/services/schemeOfWorkService.ts`
 - `src/routes/SchemeOfWorkModule.tsx`
 

@@ -397,6 +397,7 @@ export async function loadGradeScale(): Promise<Result<GradeBand[]>> {
  * positions. This is expected behaviour per the schema design.
  */
 export async function loadSubjectResults(params: {
+  schoolId: string
   classNodeId: string
   subjectId: string
   sessionId: string
@@ -406,6 +407,7 @@ export async function loadSubjectResults(params: {
     let query = supabase
       .from('subject_results')
       .select('student_id, subject_id, term_id, session_id, weighted_total, grade_label, position_in_class')
+      .eq('school_id', params.schoolId)
       .eq('subject_id', params.subjectId)
       .eq('session_id', params.sessionId)
 
@@ -422,8 +424,8 @@ export async function loadSubjectResults(params: {
     // subject_results doesn't have class_node_id directly — filter client-side
     // using the student IDs we already have from loadStudentsForClass().
     // Caller is expected to pass in studentIds for filtering if needed.
-    // For simplicity we return all rows for subject+session and let the UI
-    // cross-reference with the student list it already holds.
+    // school_id is now filtered server-side via the view's WHERE clause and
+    // redundantly here as defense-in-depth (PHASE1_AUDIT C1 fix).
     return {
       ok: true,
       data: (data ?? []).map((r: any) => ({

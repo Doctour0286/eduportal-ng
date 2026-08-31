@@ -1049,6 +1049,7 @@ export async function loadReportCardData(params: {
     let srQuery = supabase
       .from('subject_results')
       .select('student_id, subject_id, weighted_total, grade_label, position_in_class')
+      .eq('school_id', params.schoolId)
       .eq('session_id', params.sessionId)
       .in('student_id', classmates.length > 0 ? classmates.map(s => s.id) : [params.studentId])
     srQuery = params.termId
