@@ -110,6 +110,33 @@ export interface CurriculumTemplate {
   objectives: string | null
   activities: string | null
   resources: string | null
+  is_placeholder: boolean
+}
+
+export interface SchoolCurriculumTemplate {
+  id: string
+  school_id: string
+  name: string
+  subject_label: string | null
+  class_level_label: string | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SchoolCurriculumTemplateWeek {
+  id: string
+  template_id: string
+  school_id: string
+  week_number: number
+  topic: string
+  objectives: string | null
+  activities: string | null
+  resources: string | null
+}
+
+export interface SchoolCurriculumTemplateDetail extends SchoolCurriculumTemplate {
+  weeks: SchoolCurriculumTemplateWeek[]
 }
 
 export interface SowSummary {
@@ -365,7 +392,7 @@ export async function loadMySchemes(sessionId: string): Promise<Result<SchemeOfW
 }
 
 export async function loadAllSchemes(params: {
-  sessionId: string
+  sessionId?: string
   status?: SchemeStatus
 }): Promise<Result<SchemeOfWork[]>> {
   try {
@@ -381,8 +408,8 @@ export async function loadAllSchemes(params: {
         ),
         terms ( name ), sessions ( name )
       `)
-      .eq('session_id', params.sessionId)
       .order('created_at', { ascending: false })
+    if (params.sessionId) query = query.eq('session_id', params.sessionId)
 
     if (params.status) query = query.eq('status', params.status)
     const { data, error } = await query
@@ -541,6 +568,7 @@ export async function loadCurriculumTemplates(params?: {
       id: r.id, board_name: r.board_name, subject_name: r.subject_name,
       level: r.level, term: r.term, week_number: r.week_number,
       topic: r.topic, objectives: r.objectives, activities: r.activities, resources: r.resources,
+      is_placeholder: r.is_placeholder,
     }))
     return { ok: true, data: templates }
   } catch (err: any) {
@@ -774,6 +802,194 @@ export async function returnScheme(schemeId: string, reviewerStaffId: string, no
     return { ok: true, data: undefined }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to return scheme' }
+  }
+}
+
+// ─── School curriculum templates ─────────────────────────────────────────────
+
+export async function loadSchoolTemplates(schoolId: string): Promise<Result<SchoolCurriculumTemplate[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('school_curriculum_templates')
+      .select('*')
+      .eq('school_id', schoolId)
+      .order('created_at', { ascending: false })
+    if (error) return { ok: false, error: error.message }
+    return { ok: true, data: (data ?? []) as SchoolCurriculumTemplate[] }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load school templates' }
+  }
+}
+
+export async function loadSchoolTemplateDetail(
+  templateId: string, schoolId: string,
+): Promise<Result<SchoolCurriculumTemplateDetail>> {
+  try {
+    const { data: tpl, error: tplErr } = await supabase
+      .from('school_curriculum_templates')
+      .select('*')
+      .eq('id', templateId)
+      .eq('school_id', schoolId)
+      .single()
+    if (tplErr) return { ok: false, error: tplErr.message }
+    if (!tpl) return { ok: false, error: 'Template not found' }
+
+    const { data: weeks, error: weeksErr } = await supabase
+      .from('school_curriculum_template_weeks')
+      .select('*')
+      .eq('template_id', templateId)
+      .order('week_number', { ascending: true })
+    if (weeksErr) return { ok: false, error: weeksErr.message }
+
+    return {
+      ok: true,
+      data: {
+        ...(tpl as SchoolCurriculumTemplate),
+        weeks: (weeks ?? []) as SchoolCurriculumTemplateWeek[],
+      },
+    }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load school template detail' }
+  }
+}
+
+export async function createSchoolTemplate(params: {
+  schoolId: string
+  name: string
+  subjectLabel?: string | null
+  classLevelLabel?: string | null
+  userId: string
+  weeks: Omit<SchoolCurriculumTemplateWeek, 'id' | 'template_id' | 'school_id'>[]
+}): Promise<Result<string>> {
+  try {
+    const { data: tpl, error: tplErr } = await supabase
+      .from('school_curriculum_templates')
+      .insert({
+        school_id: params.schoolId,
+        name: params.name,
+        subject_label: params.subjectLabel ?? null,
+        class_level_label: params.classLevelLabel ?? null,
+        created_by: params.userId,
+      })
+      .select('id').single()
+    if (tplErr) return { ok: false, error: tplErr.message }
+
+    if (params.weeks.length > 0) {
+      const weekRows = params.weeks.map(w => ({
+        template_id: tpl.id,
+        school_id: params.schoolId,
+        week_number: w.week_number,
+        topic: w.topic,
+        objectives: w.objectives,
+        activities: w.activities,
+        resources: w.resources,
+      }))
+      const { error: wErr } = await supabase.from('school_curriculum_template_weeks').insert(weekRows)
+      if (wErr) return { ok: false, error: wErr.message }
+    }
+
+    return { ok: true, data: tpl.id }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to create school template' }
+  }
+}
+
+export async function updateSchoolTemplate(params: {
+  templateId: string
+  schoolId: string
+  name: string
+  subjectLabel?: string | null
+  classLevelLabel?: string | null
+  weeks: Omit<SchoolCurriculumTemplateWeek, 'id' | 'template_id' | 'school_id'>[]
+}): Promise<Result<void>> {
+  try {
+    const { error: updErr } = await supabase
+      .from('school_curriculum_templates')
+      .update({
+        name: params.name,
+        subject_label: params.subjectLabel ?? null,
+        class_level_label: params.classLevelLabel ?? null,
+      })
+      .eq('id', params.templateId)
+      .eq('school_id', params.schoolId)
+    if (updErr) return { ok: false, error: updErr.message }
+
+    // Replace weeks: delete all, then insert new
+    const { error: delErr } = await supabase
+      .from('school_curriculum_template_weeks')
+      .delete()
+      .eq('template_id', params.templateId)
+    if (delErr) return { ok: false, error: delErr.message }
+
+    if (params.weeks.length > 0) {
+      const weekRows = params.weeks.map(w => ({
+        template_id: params.templateId,
+        school_id: params.schoolId,
+        week_number: w.week_number,
+        topic: w.topic,
+        objectives: w.objectives,
+        activities: w.activities,
+        resources: w.resources,
+      }))
+      const { error: wErr } = await supabase.from('school_curriculum_template_weeks').insert(weekRows)
+      if (wErr) return { ok: false, error: wErr.message }
+    }
+
+    return { ok: true, data: undefined }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to update school template' }
+  }
+}
+
+export async function deleteSchoolTemplate(
+  templateId: string, schoolId: string,
+): Promise<Result<void>> {
+  try {
+    const { error } = await supabase
+      .from('school_curriculum_templates')
+      .delete()
+      .eq('id', templateId)
+      .eq('school_id', schoolId)
+    if (error) return { ok: false, error: error.message }
+    return { ok: true, data: undefined }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to delete school template' }
+  }
+}
+
+/** Adopt a school template into a real scheme (same mechanism as board import). */
+export async function adoptSchoolTemplate(
+  schemeId: string, schoolId: string, templateId: string,
+): Promise<Result<number>> {
+  try {
+    const { data: weeks, error: wErr } = await supabase
+      .from('school_curriculum_template_weeks')
+      .select('*')
+      .eq('template_id', templateId)
+      .order('week_number', { ascending: true })
+    if (wErr) return { ok: false, error: wErr.message }
+    if (!weeks || weeks.length === 0) return { ok: false, error: 'No weeks found in this template' }
+
+    // Clear existing weeks
+    const { error: delErr } = await supabase.from('scheme_of_work_weeks').delete().eq('scheme_of_work_id', schemeId)
+    if (delErr) return { ok: false, error: delErr.message }
+
+    // Insert new weeks from school template
+    const rows = weeks.map((w: any) => ({
+      scheme_of_work_id: schemeId,
+      school_id: schoolId,
+      week_number: w.week_number,
+      topic: w.topic,
+      objectives: w.objectives,
+      activities: w.activities,
+      resources: w.resources,
+      coverage_status: 'planned' as CoverageStatus,
+    }))
+    const { error: insErr } = await supabase.from('scheme_of_work_weeks').insert(rows)
+    if (insErr) return { ok: false, error: insErr.message }
+    return { ok: true, data: weeks.length }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to adopt school template' }
   }
 }
 
