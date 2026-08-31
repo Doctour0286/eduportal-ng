@@ -483,7 +483,7 @@ export default function SchemeOfWorkModule({ schoolId, isAdmin }: SchemeOfWorkMo
         week_number: w.week_number, topic: w.topic,
         objectives: w.objectives, activities: w.activities, resources: w.resources,
       })))
-      setTemplateTab('create-school')
+      setTab('create-school')
     }
   }, [schoolId])
 
