@@ -341,7 +341,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     async function boot() {
       setBootState('loading')
       const [classesRes, feeHeadsRes, sessionRes, programmeLevelsRes] = await Promise.all([
-        loadLeafClasses(),
+        loadLeafClasses(schoolId),
         loadFeeHeads(),
         loadCurrentSession(),
         // Only meaningful for higher-ed — always call so hook order stays
@@ -397,6 +397,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     }
     setBalancesState('loading')
     const res = await loadStudentBalances({
+      schoolId,
       sessionId:    currentSession.id,
       classNodeId:  isHigherEd ? null : (filterClass || null),
       classPathMap,
@@ -1446,6 +1447,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
                   </div>
                 ) : (
                   <StudentSearchField
+                    schoolId={schoolId}
                     value={assignmentForm.student_search}
                     onChange={v => setAssignmentField('student_search', v)}
                     onSelect={(id, name) => setAssignmentForm(prev => ({
@@ -1936,10 +1938,12 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
  * Kept as a separate component to avoid polluting the main component's state.
  */
 function StudentSearchField({
+  schoolId,
   value,
   onChange,
   onSelect,
 }: {
+  schoolId: string
   value: string
   onChange: (v: string) => void
   onSelect: (id: string, name: string) => void
@@ -1957,6 +1961,7 @@ function StudentSearchField({
       const { data } = await supabase
         .from('students')
         .select('id, full_name')
+        .eq('school_id', schoolId)
         .ilike('full_name', `%${v.trim()}%`)
         .eq('status', 'active')
         .limit(8)

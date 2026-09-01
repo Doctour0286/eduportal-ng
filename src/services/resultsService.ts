@@ -295,6 +295,7 @@ export async function loadStudentsForClass(
  * the live schema, swap to loadStudentsForClass() + .in('student_id', ids).
  */
 export async function loadScores(params: {
+  schoolId: string
   classNodeId: string
   subjectId: string
   sessionId: string
@@ -316,6 +317,7 @@ export async function loadScores(params: {
         approved_at,
         students!inner ( class_node_id )
       `)
+      .eq('school_id', params.schoolId)
       .eq('subject_id', params.subjectId)
       .eq('session_id', params.sessionId)
       .eq('students.class_node_id', params.classNodeId)
@@ -356,11 +358,12 @@ export async function loadScores(params: {
  * Used to resolve a weighted total → grade label in the UI
  * (mirrors what the subject_results view does server-side).
  */
-export async function loadGradeScale(): Promise<Result<GradeBand[]>> {
+export async function loadGradeScale(schoolId: string): Promise<Result<GradeBand[]>> {
   try {
     const { data, error } = await supabase
       .from('grade_scales')
       .select('id, min_score, max_score, grade_label, remark, sort_order')
+      .eq('school_id', schoolId)
       .order('sort_order')
 
     if (error) return { ok: false, error: error.message }
@@ -404,31 +407,22 @@ export async function loadSubjectResults(params: {
   termId?: string | null
 }): Promise<Result<SubjectResult[]>> {
   try {
-    let query = supabase
-      .from('subject_results')
-      .select('student_id, subject_id, term_id, session_id, weighted_total, grade_label, position_in_class')
-      .eq('school_id', params.schoolId)
-      .eq('subject_id', params.subjectId)
-      .eq('session_id', params.sessionId)
+    const NULL_TERM_SENTINEL = '00000000-0000-0000-0000-000000000000'
+    const res = await supabase.rpc('get_subject_results', {
+      p_school_id: params.schoolId,
+      p_session_id: params.sessionId,
+      p_subject_id: params.subjectId,
+      p_term_id: params.termId ?? NULL_TERM_SENTINEL,
+    })
 
-    if (params.termId) {
-      query = query.eq('term_id', params.termId)
-    } else {
-      query = query.is('term_id', null)
-    }
+    if (res.error) return { ok: false, error: res.error.message }
 
-    const { data, error } = await query
-
-    if (error) return { ok: false, error: error.message }
-
-    // subject_results doesn't have class_node_id directly — filter client-side
-    // using the student IDs we already have from loadStudentsForClass().
+    // Filter client-side by class_node_id — the RPC doesn't have that param.
     // Caller is expected to pass in studentIds for filtering if needed.
-    // school_id is now filtered server-side via the view's WHERE clause and
-    // redundantly here as defense-in-depth (PHASE1_AUDIT C1 fix).
+    // school_id is enforced server-side by the function's school-membership gate.
     return {
       ok: true,
-      data: (data ?? []).map((r: any) => ({
+      data: (res.data ?? []).map((r: any) => ({
         student_id: r.student_id,
         subject_id: r.subject_id,
         term_id: r.term_id ?? null,

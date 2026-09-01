@@ -236,7 +236,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
         (canViewAllAssignments || isAdmin)
           ? loadAllTeachingAssignments(sessionRes.data.id)
           : loadMyTeachingAssignments(staffId || '__pending__', sessionRes.data.id),
-        loadGradeScale(),
+        loadGradeScale(schoolId),
       ])
       if (cancelled) return
 
@@ -295,6 +295,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
     const [studentsRes, scoresRes] = await Promise.all([
       loadStudentsForClass(selectedAssign.class_node_id),
       loadScores({
+        schoolId,
         classNodeId: selectedAssign.class_node_id,
         subjectId:   selectedAssign.subject_id,
         sessionId:   session.id,

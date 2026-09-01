@@ -485,9 +485,11 @@ export default function App() {
     let cancelled = false
 
     async function loadBadgeCount() {
+      const schoolId = school?.id
+      if (!schoolId) return
       const [scoresRes, leaveRes] = await Promise.all([
-        supabase.from('scores').select('id', { count: 'exact', head: true }).is('approved_at', null),
-        supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase.from('scores').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).is('approved_at', null),
+        supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('status', 'pending'),
       ])
       if (cancelled) return
       const total = (scoresRes.count ?? 0) + (leaveRes.count ?? 0)

@@ -979,23 +979,82 @@ create table scores (
 
 ```sql
 -- Computed view — grade and position are never stored as columns
-create view subject_results as
+-- FIXED 2026-09-01: security_invoker = true (PHASE1_AUDIT C1)
+-- RLS on underlying scores table is now enforced when querying through the view.
+-- The view itself does NOT filter by school_id — the promotion RPC
+-- (preview_secondary_promotion) is SECURITY DEFINER and needs cross-school access.
+-- For client queries, use get_subject_results(p_school_id) instead.
+create view subject_results with (security_invoker = true) as
+with calc as (
+  select
+    s.student_id, s.subject_id, s.term_id, s.session_id, s.school_id,
+    (select st.class_node_id from students st where st.id = s.student_id) as class_node_id,
+    sum(s.value * sc.weight_pct / coalesce(sc.max_score, 100)) as weighted_total
+  from scores s
+  join score_components sc on sc.id = s.score_component_id
+  where s.approved_at is not null
+  group by s.student_id, s.subject_id, s.term_id, s.session_id, s.school_id
+)
 select
-  s.student_id, s.subject_id, s.term_id, s.session_id, s.school_id,
-  sum(s.value * sc.weight_pct / 100) as weighted_total,
-  (select grade_label from grade_scales g
-     where g.school_id = s.school_id
-       and sum(s.value * sc.weight_pct / 100) between g.min_score and g.max_score
-     limit 1) as grade_label,
+  c.student_id, c.subject_id, c.term_id, c.session_id, c.school_id,
+  c.weighted_total,
+  (
+    select g.grade_label
+    from grade_scales g
+    where g.school_id = c.school_id
+      and c.weighted_total >= g.min_score
+      and c.weighted_total <= g.max_score
+    order by g.sort_order
+    limit 1
+  ) as grade_label,
   rank() over (
-    partition by s.school_id, s.subject_id, s.term_id,
-                 (select class_node_id from students st where st.id = s.student_id)
-    order by sum(s.value * sc.weight_pct / 100) desc
+    partition by c.school_id, c.subject_id, c.term_id, c.class_node_id
+    order by c.weighted_total desc
   ) as position_in_class
-from scores s
-join score_components sc on sc.id = s.score_component_id
-where s.approved_at is not null
-group by s.student_id, s.subject_id, s.term_id, s.session_id, s.school_id;
+from calc c;
+
+-- Secure access function — primary interface for client queries.
+-- SECURITY DEFINER: validates school membership, filters by p_school_id.
+-- Optional filter params: p_session_id, p_student_ids, p_subject_id, p_term_id.
+-- Grade_scales subquery in the view has no RLS and could leak labels from other
+-- schools when queried via the view directly — this function avoids that.
+create or replace function get_subject_results(
+  p_school_id    uuid,
+  p_session_id   uuid default null,
+  p_student_ids  uuid[] default null,
+  p_subject_id   uuid default null,
+  p_term_id      uuid default null
+)
+returns table (
+  student_id       uuid,
+  subject_id       uuid,
+  term_id          uuid,
+  session_id       uuid,
+  school_id        uuid,
+  weighted_total   numeric,
+  grade_label      text,
+  position_in_class bigint
+)
+language sql security definer stable
+as $$
+  select *
+  from subject_results sr
+  where sr.school_id = p_school_id
+    and exists (
+      select 1 from app_identities
+      where auth_user_id = auth.uid() and school_id = p_school_id
+    )
+    and (p_session_id is null or sr.session_id = p_session_id)
+    and (p_student_ids is null or sr.student_id = any(p_student_ids))
+    and (p_subject_id is null or sr.subject_id = p_subject_id)
+    and (
+      p_term_id is null
+      or (p_term_id = '00000000-0000-0000-0000-000000000000'::uuid and sr.term_id is null)
+      or (p_term_id != '00000000-0000-0000-0000-000000000000'::uuid and sr.term_id = p_term_id)
+    );
+$$;
+
+grant execute on function get_subject_results(uuid, uuid, uuid[], uuid, uuid) to authenticated;
 ```
 
 ---
@@ -4623,6 +4682,43 @@ Do not skip ahead while earlier items remain unchecked.
 - Day-level shortcut writes to same table as individual period records
 
 ---
+
+### 2026-09-01 — subject_results tenant isolation fix (PHASE1_AUDIT C1 + C4)
+
+**Problem:** `subject_results` view had no `security_invoker` and no `school_id` enforcement. RLS on underlying `scores` was not enforced through the view. 3 of 4 client consumers had no `school_id` filter — any direct query returned every school's approved results. The `grade_scales` subquery in the view had no RLS and could return labels from other schools.
+
+**Fix (two-pronged, 15 files, 25+ query sites):**
+
+1. **View** recreated with `security_invoker = true` — RLS on `scores` is now enforced when querying through the view. No `WHERE school_id` clause on the view itself (preserves backward compatibility with `preview_secondary_promotion()` RPC which is SECURITY DEFINER and needs cross-school access).
+
+2. **`get_subject_results(p_school_id, p_session_id, p_student_ids, p_subject_id, p_term_id)`** SECURITY DEFINER function created as primary secure access path. Validates caller belongs to requested school, returns only that school's rows. Optional filter params let callers narrow results.
+
+3. **All 4 client consumers** migrated from `.from('subject_results')` to `supabase.rpc('get_subject_results', { p_school_id: ... })`:
+   - `portalService.ts:756` — guardian/student portal results
+   - `assessmentService.ts:1051` — report card data
+   - `ReportCardsPanel.tsx:100` — staff report cards
+   - `resultsService.ts:411` — admin score review (dead code, still fixed)
+
+4. **Defense-in-depth: all school-scoped queries** now carry explicit `.eq('school_id', ...)` filters:
+   - `App.tsx` — scores + leave_requests count (pending approvals badge)
+   - `AdminDashboard.tsx` — scores, staff, students, attendance_records, sessions, payments, announcements (all dashboard stats)
+   - `TeacherDashboard.tsx` — scores (pending scores widget)
+   - `resultsService.ts` — `loadGradeScale(schoolId)`, `loadScores({schoolId,...})`
+   - `studentsService.ts` — `loadLeafClasses(schoolId)`, `loadParentClassGroups(schoolId)`, `loadStudents({schoolId,...})`, `getStudentStatusCounts({schoolId,...})`
+   - `attendanceService.ts` — `loadAllLeafClasses(schoolId)`, `loadParentClassGroups(schoolId)`
+   - `timetableService.ts` — `loadTimetableData(schoolId,...)`, `loadClassNodes(schoolId)`, `loadStaffList(schoolId)`
+   - `hrService.ts` — `loadStaffList(schoolId)`
+   - `financeService.ts` — `loadLeafClasses(schoolId)`, `loadStudentBalances({schoolId,...})`
+   - `FinanceModule.tsx` — student search
+   - `GuardianModule.tsx` — student search
+
+**Migration file:** `migration_fix_subject_results_security.sql`
+
+**Verified:** `npm run build` clean. Zero direct `.from('subject_results')` queries remain in client code. All consumers use `rpc('get_subject_results', ...)`.
+
+**Still open (not addressed here):**
+- RLS policies on `grade_scales`, `staff`, `class_nodes`, `periods`, `attendance_records`, `announcements` should be verified/extended if not already school-scoped — the explicit `school_id` filters are defense-in-depth, not a replacement for proper RLS
+- `C5` (pagination/virtualization) remains open — not addressed in this fix
 
 ### Feature 2: Scheme of Work — 🔄 In Progress (started 2026-08-27)
 

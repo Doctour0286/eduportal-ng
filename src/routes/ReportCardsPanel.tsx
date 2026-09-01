@@ -96,14 +96,13 @@ export default function ReportCardsPanel({
         return
       }
 
-      let srQuery = supabase
-        .from('subject_results')
-        .select('student_id, weighted_total')
-        .eq('school_id', schoolId)
-        .eq('session_id', session.id)
-        .in('student_id', classmates.map(s => s.id))
-      srQuery = selectedTerm?.id ? srQuery.eq('term_id', selectedTerm.id) : srQuery.is('term_id', null)
-      const srRes = await srQuery
+      const NULL_TERM_SENTINEL = '00000000-0000-0000-0000-000000000000'
+      const srRes = await supabase.rpc('get_subject_results', {
+        p_school_id: schoolId,
+        p_session_id: session.id,
+        p_student_ids: classmates.map(s => s.id),
+        p_term_id: selectedTerm?.id ?? NULL_TERM_SENTINEL,
+      })
       if (srRes.error) { setError(srRes.error.message); setState('error'); return }
 
       const sumByStudent = new Map<string, { sum: number; n: number }>()

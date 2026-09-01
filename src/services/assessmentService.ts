@@ -1046,16 +1046,14 @@ export async function loadReportCardData(params: {
 
     // Subject results for the whole class this session+term — one read feeds
     // both the student's own rows and the peer-average ranking.
-    let srQuery = supabase
-      .from('subject_results')
-      .select('student_id, subject_id, weighted_total, grade_label, position_in_class')
-      .eq('school_id', params.schoolId)
-      .eq('session_id', params.sessionId)
-      .in('student_id', classmates.length > 0 ? classmates.map(s => s.id) : [params.studentId])
-    srQuery = params.termId
-      ? srQuery.eq('term_id', params.termId)
-      : srQuery.is('term_id', null)
-    const srRes = await srQuery
+    const NULL_TERM_SENTINEL = '00000000-0000-0000-0000-000000000000'
+    const studentIds = classmates.length > 0 ? classmates.map(s => s.id) : [params.studentId]
+    const srRes = await supabase.rpc('get_subject_results', {
+      p_school_id: params.schoolId,
+      p_session_id: params.sessionId,
+      p_student_ids: studentIds,
+      p_term_id: params.termId ?? NULL_TERM_SENTINEL,
+    })
     if (srRes.error) return err(srRes.error.message)
     const srRows = (srRes.data ?? []) as Array<{
       student_id: string; subject_id: string

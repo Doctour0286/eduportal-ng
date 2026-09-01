@@ -628,6 +628,7 @@ export default function TeacherDashboard({
     const { data: pendingRows, error: scoresErr } = await supabase
       .from('scores')
       .select('id, subject_id, subjects ( name ), student_id, students ( class_node_id, class_nodes ( name ) )')
+      .eq('school_id', school?.id ?? '')
       .eq('entered_by', staffId)
       .is('approved_at', null);
 
@@ -670,7 +671,7 @@ export default function TeacherDashboard({
     //    "My Timetable" (all days) and "My Schedule Today" (today's subset)
     //    both read from this same fetch rather than two separate queries.
     if (currentSessionId) {
-      const timetableRes = await loadTimetableData(currentSessionId);
+      const timetableRes = await loadTimetableData(school?.id ?? '', currentSessionId);
       if (timetableRes.ok && timetableRes.data) {
         setPeriods(timetableRes.data.periods);
         setWeekDays(timetableRes.data.weekDays);

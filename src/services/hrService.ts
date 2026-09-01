@@ -304,7 +304,7 @@ type Result<T> = Ok<T> | Err
 
 // ─── Load staff list ──────────────────────────────────────────────────────────
 
-export async function loadStaffList(): Promise<Result<StaffMember[]>> {
+export async function loadStaffList(schoolId: string): Promise<Result<StaffMember[]>> {
   try {
     const { data, error } = await supabase
       .from('staff')
@@ -317,6 +317,7 @@ export async function loadStaffList(): Promise<Result<StaffMember[]>> {
         hire_date,
         staff_roles ( role_id, roles ( name ) )
       `)
+      .eq('school_id', schoolId)
       .order('full_name')
 
     if (error) return { ok: false, error: error.message }

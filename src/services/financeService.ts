@@ -337,6 +337,7 @@ export async function loadFeeAssignments(params: {
  * filter the rendered list for large schools (>200 students).
  */
 export async function loadStudentBalances(params: {
+  schoolId: string
   sessionId: string
   classNodeId?: string | null
   classPathMap: Map<string, string>
@@ -353,6 +354,7 @@ export async function loadStudentBalances(params: {
     let studentQuery = supabase
       .from('students')
       .select('id, full_name, class_node_id')
+      .eq('school_id', params.schoolId)
       .eq('status', 'active')
       .order('full_name')
 
@@ -662,11 +664,12 @@ export async function loadStudentDiscounts(
 
 // ─── Load leaf classes (for assignment picker) ────────────────────────────────
 
-export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
+export async function loadLeafClasses(schoolId: string): Promise<Result<ClassNode[]>> {
   try {
     const { data, error } = await supabase
       .from('class_nodes')
       .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .eq('school_id', schoolId)
       .order('sort_order')
 
     if (error) return { ok: false, error: error.message }

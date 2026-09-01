@@ -222,11 +222,12 @@ type Result<T> = Ok<T> | Err
  * Returns sorted by parent sort_order then child sort_order so the picker
  * order mirrors the school's own tree structure.
  */
-export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
+export async function loadLeafClasses(schoolId: string): Promise<Result<ClassNode[]>> {
   try {
     const { data, error } = await supabase
       .from('class_nodes')
       .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .eq('school_id', schoolId)
       .order('sort_order')
 
     if (error) return { ok: false, error: error.message }
@@ -272,11 +273,12 @@ export async function loadLeafClasses(): Promise<Result<ClassNode[]>> {
  * into each leaf's path_label string). Cheap: one query, id/name/parent_id/
  * sort_order columns only, same table as loadLeafClasses().
  */
-export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]>> {
+export async function loadParentClassGroups(schoolId: string): Promise<Result<ParentClassGroup[]>> {
   try {
     const { data, error } = await supabase
       .from('class_nodes')
       .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .eq('school_id', schoolId)
       .order('sort_order')
 
     if (error) return { ok: false, error: error.message }
@@ -337,6 +339,7 @@ export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]
  * patched over here.
  */
 export async function loadStudents(params: {
+  schoolId: string
   // Session 32 — widened from `string | null` to also accept `string[]`,
   // for the whole-parent "All of JSS 1" combined view (matches
   // attendanceService.ts's own loadStudentsForClass widening, same
@@ -411,6 +414,7 @@ export async function loadStudents(params: {
         photo_url,
         created_at
       `)
+      .eq('school_id', params.schoolId)
       .order('full_name')
 
     if (placementStudentIds) {
@@ -568,11 +572,12 @@ export interface StudentStatusCounts {
  * than cleanly separating them.
  */
 export async function getStudentStatusCounts(params: {
+  schoolId: string
   // Session 32 — widened, same reasoning as loadStudents() above.
   classNodeId: string | string[] | null
 }): Promise<Result<StudentStatusCounts>> {
   try {
-    let query = supabase.from('students').select('status')
+    let query = supabase.from('students').select('status').eq('school_id', params.schoolId)
 
     if (Array.isArray(params.classNodeId)) {
       if (params.classNodeId.length > 0) {

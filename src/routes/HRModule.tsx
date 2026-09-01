@@ -385,7 +385,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
 
   const loadStaff = useCallback(async () => {
     setStaffState('loading')
-    const res = await loadStaffList()
+    const res = await loadStaffList(schoolId)
     if (!res.ok) {
       setStaffError(res.error)
       setStaffState('error')

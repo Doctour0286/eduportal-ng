@@ -717,7 +717,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
         return
       }
 
-      const res = await loadLeafClasses()
+      const res = await loadLeafClasses(schoolId)
       if (cancelled) return
       if (!res.ok) {
         setBootError(res.error)
@@ -732,7 +732,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
       // here just means the parent-pill tier doesn't appear (flat class
       // picker, identical to pre-Session-32 behavior) rather than blocking
       // the whole list from loading over a purely additive filter feature.
-      const groupsRes = await loadParentClassGroups()
+      const groupsRes = await loadParentClassGroups(schoolId)
       if (!cancelled && groupsRes.ok) setParentGroups(groupsRes.data)
     }
     boot()
@@ -835,6 +835,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     }
 
     const res = await loadStudents({
+      schoolId,
       classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
       statusFilter,
       isHigherEd,
@@ -889,6 +890,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     const res = isHigherEd
       ? await getHigherEdStudentStatusCounts(schoolId)
       : await getStudentStatusCounts({
+          schoolId,
           classNodeId: effectiveClassIds.length === 1 ? effectiveClassIds[0] : effectiveClassIds,
         })
     if (res.ok) setStatusCounts(res.data)

@@ -208,7 +208,7 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
 
   async function doLinkSearch(q: string) {
     setLinkSearching(true)
-    const res = await searchStudentsForLink(q)
+    const res = await searchStudentsForLink(schoolId, q)
     setLinkSearching(false)
     setLinkResults(res)
   }
@@ -666,12 +666,14 @@ export default function GuardianModule({ schoolId, isAdmin: _isAdmin, authUserId
 // ─── Student search helper (used for link-student-to-guardian flow) ───────────
 
 async function searchStudentsForLink(
+  schoolId: string,
   query: string,
 ): Promise<Array<{ id: string; full_name: string; class_path_label: string | null }>> {
   if (!query.trim()) return []
   const { data } = await supabase
     .from('students')
     .select('id, full_name')
+    .eq('school_id', schoolId)
     .ilike('full_name', `%${query.trim()}%`)
     .eq('status', 'active')
     .limit(10)

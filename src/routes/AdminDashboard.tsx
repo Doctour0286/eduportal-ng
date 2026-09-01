@@ -347,11 +347,11 @@ export default function AdminDashboard({
           pendingLeaveRes,
         ] = await Promise.all([
           getActivePlacedStudentCount(school.id),
-          supabase.from('staff').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+          supabase.from('staff').select('id', { count: 'exact', head: true }).eq('school_id', school.id).eq('status', 'active'),
           // Sessions held today across every course offering (school-scoped via RLS)
-          supabase.from('course_attendance_sessions').select('id').eq('session_date', today),
-          supabase.from('scores').select('id', { count: 'exact', head: true }).is('approved_at', null),
-          supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+          supabase.from('course_attendance_sessions').select('id').eq('school_id', school.id).eq('session_date', today),
+          supabase.from('scores').select('id', { count: 'exact', head: true }).eq('school_id', school.id).is('approved_at', null),
+          supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('school_id', school.id).eq('status', 'pending'),
         ]);
         const totalStudentsHigherEd = activeStudentCountRes.ok ? activeStudentCountRes.data : 0;
 
@@ -404,24 +404,28 @@ export default function AdminDashboard({
         supabase
           .from('students')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .eq('status', 'active'),
 
         // 2. Total active staff
         supabase
           .from('staff')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .eq('status', 'active'),
 
         // 3. How many students have an attendance record today (any status)
         supabase
           .from('attendance_records')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .eq('date', today),
 
         // 4. Present count today
         supabase
           .from('attendance_records')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .eq('date', today)
           .eq('status', 'present'),
 
@@ -429,6 +433,7 @@ export default function AdminDashboard({
         supabase
           .from('sessions')
           .select('id')
+          .eq('school_id', school.id)
           .eq('is_current', true)
           .maybeSingle(),
 
@@ -436,12 +441,14 @@ export default function AdminDashboard({
         supabase
           .from('scores')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .is('approved_at', null),
 
         // 7. Pending leave requests
         supabase
           .from('leave_requests')
           .select('id', { count: 'exact', head: true })
+          .eq('school_id', school.id)
           .eq('status', 'pending'),
 
         // placeholder — resolved after session query
@@ -453,6 +460,7 @@ export default function AdminDashboard({
       const { data: allPayments } = await supabase
         .from('payments')
         .select('amount')
+        .eq('school_id', school.id)
         .eq('status', 'completed');
 
       const paymentsTotal = (allPayments ?? []).reduce(
@@ -507,11 +515,13 @@ export default function AdminDashboard({
   }
 
   async function loadAnnouncements() {
+    if (!school?.id) return
     setAnnsLoading(true);
     try {
       const { data, error: err } = await supabase
         .from('announcements')
         .select('id, title, body, audience, posted_at, is_public')
+        .eq('school_id', school.id)
         .order('posted_at', { ascending: false })
         .limit(3);
 

@@ -258,9 +258,9 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
     }
 
     const [ttRes, classRes, staffRes] = await Promise.all([
-      loadTimetableData(sessionRes.sessionId),
-      loadClassNodes(),
-      loadStaffList(),
+      loadTimetableData(schoolId, sessionRes.sessionId),
+      loadClassNodes(schoolId),
+      loadStaffList(schoolId),
     ])
 
     if (!ttRes.ok) {

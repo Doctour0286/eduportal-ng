@@ -86,7 +86,7 @@ export interface TimetableData {
 // One parallel query pair: periods+days, then entries with joins.
 // RLS scopes everything to the current school automatically.
 
-export async function loadTimetableData(sessionId: string): Promise<{
+export async function loadTimetableData(schoolId: string, sessionId: string): Promise<{
   ok: boolean
   data?: TimetableData
   error?: string
@@ -99,10 +99,12 @@ export async function loadTimetableData(sessionId: string): Promise<{
       supabase
         .from('school_week_days')
         .select('day_of_week, sort_order')
+        .eq('school_id', schoolId)
         .order('sort_order'),
       supabase
         .from('periods')
         .select('id, label, start_time, end_time, is_break, sort_order')
+        .eq('school_id', schoolId)
         .order('sort_order'),
     ])
 
@@ -160,7 +162,7 @@ export async function loadTimetableData(sessionId: string): Promise<{
 
 // ─── Load leaf class nodes (for class-view selector) ─────────────────────────
 
-export async function loadClassNodes(): Promise<{
+export async function loadClassNodes(schoolId: string): Promise<{
   ok: boolean
   data?: ClassNode[]
   error?: string
@@ -169,6 +171,7 @@ export async function loadClassNodes(): Promise<{
     const { data, error } = await supabase
       .from('class_nodes')
       .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .eq('school_id', schoolId)
       .order('sort_order')
 
     if (error) return { ok: false, error: error.message }
@@ -196,7 +199,7 @@ export async function loadClassNodes(): Promise<{
 
 // ─── Load active staff list (for teacher-view selector) ──────────────────────
 
-export async function loadStaffList(): Promise<{
+export async function loadStaffList(schoolId: string): Promise<{
   ok: boolean
   data?: StaffMember[]
   error?: string
@@ -205,6 +208,7 @@ export async function loadStaffList(): Promise<{
     const { data, error } = await supabase
       .from('staff')
       .select('id, full_name, status')
+      .eq('school_id', schoolId)
       .eq('status', 'active')
       .order('full_name')
 

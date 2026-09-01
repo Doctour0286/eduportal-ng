@@ -72,9 +72,17 @@ from calc c;
 -- ── 2. Secure access function (primary interface for client queries) ────────
 -- SECURITY DEFINER: runs with function owner privileges (bypasses view RLS).
 -- Explicitly validates school access and filters to p_school_id.
--- Returns the same column set as the view.
+-- Optional filter params let callers narrow results without fetching everything.
+-- term_id: NULL = no term filter; non-NULL UUID = exact match; the empty-string
+-- sentinel ('00000000-0000-0000-0000-000000000000') means "term_id IS NULL".
 
-create or replace function get_subject_results(p_school_id uuid)
+create or replace function get_subject_results(
+  p_school_id    uuid,
+  p_session_id   uuid default null,
+  p_student_ids  uuid[] default null,
+  p_subject_id   uuid default null,
+  p_term_id      uuid default null
+)
 returns table (
   student_id       uuid,
   subject_id       uuid,
@@ -89,7 +97,6 @@ language sql
 security definer
 stable
 as $$
-  -- Gate 1: caller must belong to the requested school
   select *
   from subject_results sr
   where sr.school_id = p_school_id
@@ -97,11 +104,22 @@ as $$
       select 1 from app_identities
       where auth_user_id = auth.uid()
         and school_id = p_school_id
+    )
+    and (p_session_id is null or sr.session_id = p_session_id)
+    and (p_student_ids is null or sr.student_id = any(p_student_ids))
+    and (p_subject_id is null or sr.subject_id = p_subject_id)
+    and (
+      p_term_id is null
+      or (
+        p_term_id = '00000000-0000-0000-0000-000000000000'::uuid
+        and sr.term_id is null
+      )
+      or (p_term_id != '00000000-0000-0000-0000-000000000000'::uuid and sr.term_id = p_term_id)
     );
 $$;
 
 -- Grant execute to authenticated role (RLS-like gate is inside the function)
-grant execute on function get_subject_results(uuid) to authenticated;
+grant execute on function get_subject_results(uuid, uuid, uuid[], uuid, uuid) to authenticated;
 
 -- ── 3. Comment documentation ───────────────────────────────────────────────
 
@@ -111,7 +129,8 @@ comment on view subject_results is
   'Does NOT filter by school_id — the promotion RPC needs cross-school access. '
   'For client queries, use get_subject_results(p_school_id) instead.';
 
-comment on function get_subject_results(uuid) is
+comment on function get_subject_results(uuid, uuid, uuid[], uuid, uuid) is
   'Secure access to subject_results with explicit school_id parameter. '
   'Validates caller belongs to the school, returns only that school''s rows. '
+  'Optional session_id, student_ids, subject_id, term_id filters. '
   'Primary interface for all client-side queries (replaces direct view access).';

@@ -752,15 +752,14 @@ export async function loadStudentResults(
   const { data: scoreRows } = await scoreQuery
   if (!scoreRows || scoreRows.length === 0) return []
 
-  let viewQuery = supabase
-    .from('subject_results')
-    .select('subject_id, weighted_total, grade_label, position_in_class')
-    .eq('school_id', schoolId)
-    .eq('student_id', studentId)
-    .eq('session_id', sessionId)
-
-  viewQuery = termId ? viewQuery.eq('term_id', termId) : viewQuery.is('term_id', null)
-  const { data: viewRows } = await viewQuery
+  const NULL_TERM_SENTINEL = '00000000-0000-0000-0000-000000000000'
+  const { data: viewRows, error: viewErr } = await supabase.rpc('get_subject_results', {
+    p_school_id: schoolId,
+    p_session_id: sessionId,
+    p_student_ids: [studentId],
+    p_term_id: termId ?? NULL_TERM_SENTINEL,
+  }) as { data: Array<{ subject_id: string; weighted_total: number; grade_label: string | null; position_in_class: number }> | null; error: any }
+  if (viewErr) return []
 
   // Class size per subject — needed so "3rd in class" has the context §4.9 requires
   // ("never show a number without context"). Resolved via the student's class_node_id.

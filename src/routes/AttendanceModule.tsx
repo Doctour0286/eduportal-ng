@@ -320,8 +320,8 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
       const [sessionRes, classRes, groupsRes] = await Promise.all([
         loadCurrentSession(),
-        loadAllLeafClasses(),
-        loadParentClassGroups(),
+        loadAllLeafClasses(schoolId),
+        loadParentClassGroups(schoolId),
       ])
 
       if (cancelled) return

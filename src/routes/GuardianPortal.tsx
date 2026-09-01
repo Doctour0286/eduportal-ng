@@ -545,7 +545,7 @@ function ChildDetail({
                   // note for the full history).
                   <HigherEdScheduleTab schoolId={schoolId} child={child} />
                 ) : (
-                  <ScheduleTab child={child} />
+                  <ScheduleTab schoolId={schoolId} child={child} />
                 )
               ) : t === 'fees' ? (
                 <FeesTab schoolId={schoolId} schoolName={schoolName} child={child} session={session} isStudentSelf={isStudentSelf} isHigherEd={isHigherEd} />
@@ -1571,7 +1571,7 @@ function AttendanceRing({ percent }: { percent: number | null }) {
 // already uses in that file. No edit chrome, no teacher-view toggle — a
 // guardian only ever sees one class's week, never the admin grid.
 
-function ScheduleTab({ child }: { child: PortalChild }) {
+function ScheduleTab({ schoolId, child }: { schoolId: string; child: PortalChild }) {
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [periods, setPeriods] = useState<Period[]>([])
   const [weekDays, setWeekDays] = useState<WeekDay[]>([])
@@ -1594,7 +1594,7 @@ function ScheduleTab({ child }: { child: PortalChild }) {
           if (!cancelled) setLoadState('ready')
           return
         }
-        const tt = await loadTimetableData(sess.sessionId)
+        const tt = await loadTimetableData(schoolId, sess.sessionId)
         if (cancelled) return
         if (!tt.ok || !tt.data) {
           setLoadState('error')

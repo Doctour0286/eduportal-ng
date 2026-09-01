@@ -280,11 +280,12 @@ function attachPathLabels(nodes: ClassNode[]): ClassNode[] {
  * back down to leaves only, so this stays a drop-in fix with no contract
  * change for existing callers.
  */
-export async function loadAllLeafClasses(): Promise<Result<ClassNode[]>> {
+export async function loadAllLeafClasses(schoolId: string): Promise<Result<ClassNode[]>> {
   try {
     const { data, error } = await supabase
       .from('class_nodes')
       .select('id, name, parent_id, sort_order, is_leaf_enrollable')
+      .eq('school_id', schoolId)
       .eq('is_leaf_enrollable', true)
       .order('sort_order')
 
@@ -353,9 +354,9 @@ export interface ParentClassGroup {
   leafIds: string[]
 }
 
-export async function loadParentClassGroups(): Promise<Result<ParentClassGroup[]>> {
+export async function loadParentClassGroups(schoolId: string): Promise<Result<ParentClassGroup[]>> {
   try {
-    const leavesRes = await loadAllLeafClasses()
+    const leavesRes = await loadAllLeafClasses(schoolId)
     if (!leavesRes.ok) return leavesRes
 
     const parentIds = [...new Set(leavesRes.data.map(l => l.parent_id).filter((id): id is string => !!id))]
