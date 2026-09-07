@@ -26,6 +26,7 @@ import {
   loadReportCardData,
   loadRemarksForWindow,
   saveStudentRemark,
+  loadGradeBands,
   type AssessmentWindow,
   type AssessmentWindowClassRow,
 } from '../services/assessmentService'
@@ -61,6 +62,7 @@ export default function ReportCardsPanel({
 }: ReportCardsPanelProps) {
   const actorRecordId = useAuthStore((s) => s.actorRecordId)
   const schoolName = useSchoolStore((s) => s.school?.name ?? '')
+  const schoolLogoUrl = useSchoolStore((s) => s.school?.logo_url ?? null)
 
   const [state, setState] = useState<LoadState>('booting')
   const [error, setError] = useState('')
@@ -161,20 +163,28 @@ export default function ReportCardsPanel({
     if (!selectedAssign || !session || !winInfo) return
     setPdfBusyFor(studentId)
     setInlineError('')
-    const res = await loadReportCardData({
-      schoolId,
-      sessionId: session.id,
-      termId: selectedTerm?.id ?? null,
-      termName: selectedTerm?.name ?? null,
-      sessionName: session.name,
-      classNodeId: selectedAssign.class_node_id,
-      className: selectedAssign.class_node_name,
-      studentId,
-      windowId: winInfo.window.id,
-    })
+    const [res, bandsRes] = await Promise.all([
+      loadReportCardData({
+        schoolId,
+        sessionId: session.id,
+        termId: selectedTerm?.id ?? null,
+        termName: selectedTerm?.name ?? null,
+        sessionName: session.name,
+        classNodeId: selectedAssign.class_node_id,
+        className: selectedAssign.class_node_name,
+        studentId,
+        windowId: winInfo.window.id,
+      }),
+      loadGradeBands(schoolId),
+    ])
     setPdfBusyFor(null)
     if (!res.ok) { setInlineError(res.error); return }
-    downloadReportCardPdf({ schoolName, data: res.data })
+    downloadReportCardPdf({
+      schoolName,
+      logoUrl: schoolLogoUrl,
+      gradeBands: bandsRes.ok ? bandsRes.data : [],
+      data: res.data,
+    })
   }
 
   if (!selectedAssign || !session) {

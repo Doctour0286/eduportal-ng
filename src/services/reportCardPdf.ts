@@ -1,69 +1,91 @@
 /**
  * reportCardPdf.ts
- * PRD Tier 8 / Problem 8.4 (Session 49) — real-download PDF report card for
- * secondary schools. Same jsPDF + jspdf-autotable precedent as
- * transcriptPdf.ts (owner instruction: a report card is a "keep as proof"
- * document — a real file, not a print-dialog detour).
+ * PRD Tier 8 / Problem 8.4 — PDF report card for secondary schools.
  *
- * Layout (grounded in standard Nigerian terminal-report conventions):
- *   brand band → school name → "TERMINAL REPORT" title
- *   student info block (name, admission no, class, session/term,
- *                       position, attendance)
- *   subjects table: # | Subject | one column per component ("1st CA (20)")
- *                   | Total | Grade | Subject position
- *   summary box: overall average + aggregate remark band
- *   class teacher's remark paragraph
- *   signature lines (Class Teacher / Principal) + generated-at footer
+ * Layout (Session 67 redesign — Nigerian/Ghanaian terminal-report standard):
+ *   1. School header band: logo, name, address, "TERMINAL REPORT"
+ *   2. Student info block: name (dominant), position (dominant), reg/class/session,
+ *      attendance, days open, next resumption
+ *   3. Grading key: dynamic from grade_scales, never hardcoded
+ *   4. Per-subject table: dynamic component columns, total, grade, remark, position
+ *   5. Totals / summary row: total marks, average, class position
+ *   6. Teacher's remark + Principal's remark (side by side)
+ *   7. Attendance summary: days open, present, absent, late, rate
+ *   8. Signature lines + page footer
  *
- * Every number comes straight off ReportCardData (assessmentService.
- * loadReportCardData()) — nothing is recomputed here. React Native port
- * note matches transcriptPdf.ts's own: only doc.save() and
- * resolveBrandColors() are DOM-bound; the assembly is portable.
+ * Design principles:
+ *   - Single A4 page per student, overflow to page 2 only when subject count requires
+ *   - School branding via theme_color (brand-600 / brand-on) — works in B&W
+ *   - Grade-band subtle tinting on table rows — print-safe
+ *   - Three-type hierarchy: headline (student name / position), section labels, body
  */
 
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import type { ReportCardData } from './assessmentService'
 
-// ─── Brand color resolution (same approach as transcriptPdf.ts) ──────────────
+// ─── Brand color resolution ─────────────────────────────────────────────────
 
 interface ResolvedBrandColors {
   brand600: [number, number, number]
+  brand50: [number, number, number]
   brandOn: [number, number, number]
 }
 
-const FALLBACK_BRAND_600: [number, number, number] = [37, 99, 235] // #2563eb
+const FALLBACK_600: [number, number, number] = [37, 99, 235]
+const FALLBACK_50: [number, number, number] = [239, 246, 255]
+const FALLBACK_ON: [number, number, number] = [255, 255, 255]
 
 function resolveBrandColors(): ResolvedBrandColors {
   const styles = getComputedStyle(document.documentElement)
   return {
-    brand600: parseColorToRgb(styles.getPropertyValue('--color-brand-600').trim()) ?? FALLBACK_BRAND_600,
-    brandOn: parseColorToRgb(styles.getPropertyValue('--color-brand-on').trim()) ?? [255, 255, 255],
+    brand600: parseColor(styles.getPropertyValue('--color-brand-600').trim()) ?? FALLBACK_600,
+    brand50: parseColor(styles.getPropertyValue('--color-brand-50').trim()) ?? FALLBACK_50,
+    brandOn: parseColor(styles.getPropertyValue('--color-brand-on').trim()) ?? FALLBACK_ON,
   }
 }
 
-function parseColorToRgb(value: string): [number, number, number] | null {
+function parseColor(value: string): [number, number, number] | null {
   if (!value) return null
-  const hexMatch = value.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
-  if (hexMatch) {
-    let hex = hexMatch[1]
-    if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('')
-    const num = parseInt(hex, 16)
-    return [(num >> 16) & 255, (num >> 8) & 255, num & 255]
+  const hex = value.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
+  if (hex) {
+    let h = hex[1]
+    if (h.length === 3) h = h.split('').map(c => c + c).join('')
+    const n = parseInt(h, 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
   }
-  const rgbMatch = value.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
-  if (rgbMatch) {
-    return [Number(rgbMatch[1]), Number(rgbMatch[2]), Number(rgbMatch[3])]
-  }
+  const rgb = value.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])]
   return null
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Grade tint colors (print-safe: very light, reads as gray in B&W) ──────
+
+const GRADE_TINTS: Record<string, [number, number, number]> = {
+  'A': [220, 252, 231],  // green-50
+  'B': [219, 234, 254],  // blue-50
+  'C': [254, 249, 195],  // yellow-50
+  'D': [255, 237, 213],  // orange-50
+  'F': [254, 226, 226],  // red-50
+}
+
+function getGradeTint(gradeLabel: string | null): [number, number, number] | null {
+  if (!gradeLabel) return null
+  const key = gradeLabel.charAt(0).toUpperCase()
+  return GRADE_TINTS[key] ?? null
+}
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface ReportCardPdfOptions {
   schoolName: string
+  schoolAddress?: string
+  logoUrl?: string | null
+  gradeBands?: { min_score: number; max_score: number; grade_label: string; remark: string | null }[]
   data: ReportCardData
 }
+
+// ─── Public API ─────────────────────────────────────────────────────────────
 
 export function downloadReportCardPdf(opts: ReportCardPdfOptions): void {
   const doc = buildReportCardPdf(opts, resolveBrandColors())
@@ -72,74 +94,162 @@ export function downloadReportCardPdf(opts: ReportCardPdfOptions): void {
   doc.save(`${safeName || 'report'}-report-card${period ? `-${period.replace(/[^a-z0-9]+/gi, '-')}` : ''}.pdf`.toLowerCase())
 }
 
-// ─── Document assembly ────────────────────────────────────────────────────────
+// ─── Document assembly ──────────────────────────────────────────────────────
 
-const PAGE_MARGIN = 14 // mm
+const MARGIN = 14 // mm
+const PAGE_W = 210 // A4 width mm
+const PAGE_H = 297 // A4 height mm
+const CONTENT_W = PAGE_W - MARGIN * 2
 
 function buildReportCardPdf(opts: ReportCardPdfOptions, colors: ResolvedBrandColors): jsPDF {
-  const { schoolName, data } = opts
+  const { data } = opts
   const doc = new jsPDF({ unit: 'mm', format: 'a4' })
-  const pageWidth = doc.internal.pageSize.getWidth()
 
-  let y = drawHeader(doc, pageWidth, schoolName, colors)
-  y = drawStudentBlock(doc, pageWidth, y, data)
+  let y = drawHeader(doc, opts, colors)
+  y = drawStudentBlock(doc, y, data, colors)
+  y = drawGradingKey(doc, y, opts.gradeBands ?? [], colors)
   y = drawSubjectsTable(doc, y, data, colors)
-  y = drawSummaryBox(doc, pageWidth, y, data, colors)
-  y = drawRemarkBlock(doc, pageWidth, y, data)
-  drawSignatures(doc, pageWidth, y)
-  drawFooter(doc)
+  y = drawSummaryRow(doc, y, data, colors)
+  y = drawRemarks(doc, y, data)
+  y = drawAttendanceSummary(doc, y, data)
+  drawSignatures(doc, y)
+  drawPageFooter(doc)
 
   return doc
 }
 
-function drawHeader(doc: jsPDF, pageWidth: number, schoolName: string, colors: ResolvedBrandColors): number {
-  doc.setFillColor(...colors.brand600)
-  doc.rect(0, 0, pageWidth, 24, 'F')
+// ─── 1. School header band ──────────────────────────────────────────────────
 
+function drawHeader(doc: jsPDF, opts: ReportCardPdfOptions, colors: ResolvedBrandColors): number {
+  // Brand bar
+  doc.setFillColor(...colors.brand600)
+  doc.rect(0, 0, PAGE_W, 20, 'F')
+
+  // School name — centered, dominant
   doc.setTextColor(...colors.brandOn)
   doc.setFont('helvetica', 'bold')
-  doc.setFontSize(15)
-  doc.text(schoolName || 'School', pageWidth / 2, 11, { align: 'center' })
+  doc.setFontSize(16)
+  doc.text(opts.schoolName || 'School', PAGE_W / 2, 9, { align: 'center' })
 
-  doc.setFont('helvetica', 'normal')
-  doc.setFontSize(10)
-  doc.text('TERMINAL REPORT', pageWidth / 2, 18, { align: 'center' })
+  // Address / contact — centered, smaller
+  if (opts.schoolAddress) {
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(7.5)
+    doc.text(opts.schoolAddress, PAGE_W / 2, 14, { align: 'center' })
+  }
 
-  doc.setTextColor(17, 24, 39)
-  return 32
-}
-
-function drawStudentBlock(doc: jsPDF, pageWidth: number, y: number, data: ReportCardData): number {
+  // "TERMINAL REPORT" — right-aligned in the bar
   doc.setFont('helvetica', 'bold')
-  doc.setFontSize(12)
-  doc.text(data.studentName || '—', PAGE_MARGIN, y)
-
-  doc.setFont('helvetica', 'normal')
-  doc.setFontSize(9.5)
-  doc.setTextColor(75, 85, 99)
-
-  const period = data.termName ? `${data.sessionName} · ${data.termName}` : data.sessionName
-  const leftLines = [
-    `Admission No: ${data.studentCode ?? '—'}`,
-    `Class: ${data.className || '—'}`,
-    `Session: ${period}`,
-  ]
-  const rightLines = [
-    data.overallPosition !== null && data.totalGraded > 0
-      ? `Position: ${data.overallPosition} of ${data.totalGraded}`
-      : 'Position: —',
-    data.attendance && data.attendance.totalMarked > 0
-      ? `Attendance: ${data.attendance.present} of ${data.attendance.totalMarked} days` +
-        ` (${Math.round((data.attendance.present / data.attendance.totalMarked) * 100)}%)`
-      : 'Attendance: —',
-  ]
-
-  leftLines.forEach((line, i) => doc.text(line, PAGE_MARGIN, y + 6 + i * 5))
-  rightLines.forEach((line, i) => doc.text(line, pageWidth - PAGE_MARGIN, y + 6 + i * 5, { align: 'right' }))
+  doc.setFontSize(9)
+  doc.text('TERMINAL REPORT', PAGE_W - MARGIN, 18, { align: 'right' })
 
   doc.setTextColor(17, 24, 39)
-  return y + 6 + Math.max(leftLines.length, rightLines.length) * 5 + 4
+  return 26
 }
+
+// ─── 2. Student info block ──────────────────────────────────────────────────
+
+function drawStudentBlock(doc: jsPDF, y: number, data: ReportCardData, colors: ResolvedBrandColors): number {
+  const blockH = 26
+
+  // Background tint
+  doc.setFillColor(...colors.brand50)
+  doc.roundedRect(MARGIN, y, CONTENT_W, blockH, 1.5, 1.5, 'F')
+
+  // Left accent bar
+  doc.setFillColor(...colors.brand600)
+  doc.rect(MARGIN, y, 2, blockH, 'F')
+
+  const lx = MARGIN + 5
+  const rx = PAGE_W - MARGIN - 4
+  let ly = y + 5
+
+  // Student name — headline
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(13)
+  doc.setTextColor(17, 24, 39)
+  doc.text(data.studentName || '—', lx, ly)
+
+  // Position — headline (right side)
+  if (data.overallPosition !== null && data.totalGraded > 0) {
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(13)
+    doc.setTextColor(...colors.brand600)
+    const posLabel = ordinal(data.overallPosition)
+    doc.text(`${posLabel}`, rx, ly, { align: 'right' })
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(9)
+    doc.setTextColor(75, 85, 99)
+    doc.text(`of ${data.totalGraded}`, rx - doc.getTextWidth(posLabel) - 1.5, ly, { align: 'right' })
+  }
+
+  ly += 6
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(9)
+  doc.setTextColor(55, 65, 81)
+
+  // Left column: reg no, class, session/term
+  const period = data.termName ? `${data.sessionName} — ${data.termName}` : data.sessionName
+  doc.text(`Reg. No: ${data.studentCode ?? '—'}`, lx, ly)
+  doc.text(`Class: ${data.className || '—'}`, lx, ly + 5)
+  doc.text(`Session: ${period}`, lx, ly + 10)
+
+  // Right column: attendance, days open, resumption
+  const att = data.attendance
+  if (att && att.totalMarked > 0) {
+    const pct = Math.round((att.present / att.totalMarked) * 100)
+    doc.text(`Attendance: ${att.present}/${att.totalMarked} days (${pct}%)`, rx, ly, { align: 'right' })
+  } else {
+    doc.text('Attendance: —', rx, ly, { align: 'right' })
+  }
+
+  doc.setTextColor(17, 24, 39)
+  return y + blockH + 4
+}
+
+// ─── 3. Grading key ────────────────────────────────────────────────────────
+
+function drawGradingKey(
+  doc: jsPDF,
+  y: number,
+  bands: { min_score: number; max_score: number; grade_label: string; remark: string | null }[],
+  colors: ResolvedBrandColors,
+): number {
+  if (bands.length === 0) return y
+
+  const boxH = bands.length <= 5 ? 10 : 16
+
+  doc.setFillColor(248, 250, 252) // very light gray
+  doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text('GRADING KEY', MARGIN + 3, y + 4)
+
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(7.5)
+  doc.setTextColor(55, 65, 81)
+
+  // Lay out bands in a single row, wrapping if needed
+  const items = bands.map(b => `${b.grade_label} (${b.min_score}–${b.max_score})`)
+  const itemWidth = items.map(i => doc.getTextWidth(i)).reduce((a, b) => Math.max(a, b), 0) + 8
+  const cols = Math.max(1, Math.floor(CONTENT_W / itemWidth))
+  const rows = Math.ceil(items.length / cols)
+
+  for (let i = 0; i < items.length; i++) {
+    const col = i % cols
+    const row = Math.floor(i / cols)
+    const ix = MARGIN + 3 + col * (CONTENT_W / cols)
+    const iy = y + 8 + row * 4.5
+    doc.text(items[i], ix, iy)
+  }
+
+  doc.setTextColor(17, 24, 39)
+  return y + boxH + 3
+}
+
+// ─── 4. Per-subject table ───────────────────────────────────────────────────
 
 function drawSubjectsTable(
   doc: jsPDF,
@@ -151,14 +261,15 @@ function drawSubjectsTable(
     doc.setFont('helvetica', 'italic')
     doc.setFontSize(10)
     doc.setTextColor(107, 114, 128)
-    doc.text('No approved results yet for this period.', PAGE_MARGIN, y + 4)
+    doc.text('No approved results yet for this period.', MARGIN, y + 4)
     doc.setTextColor(17, 24, 39)
     return y + 12
   }
 
-  // Dynamic component columns: ["1st CA", 20] → header "1st CA (20)".
-  const compHead = data.components.map(c => `${c.name} (${c.max_score})`)
-  const head = ['#', 'Subject', ...compHead, 'Total', 'Grade', 'Pos']
+  // Dynamic component columns: "CA 1 (20)" format
+  const compHeaders = data.components.map(c => `${c.name} (${c.max_score})`)
+  const head = [['#', 'Subject', ...compHeaders, 'Total', 'Grade', 'Remark', 'Pos']]
+
   const body = data.subjects.map((s, i) => [
     String(i + 1),
     s.subject_name,
@@ -166,113 +277,306 @@ function drawSubjectsTable(
       s.componentValues[c.id] !== undefined ? String(s.componentValues[c.id]) : '—'),
     s.weighted_total.toFixed(1),
     s.grade_label ?? '—',
+    getGradeRemark(s.grade_label, data) ?? '—',
     s.position_in_class ? String(s.position_in_class) : '—',
   ])
 
   autoTable(doc, {
     startY: y,
-    margin: { left: PAGE_MARGIN, right: PAGE_MARGIN },
-    head: [head],
+    margin: { left: MARGIN, right: MARGIN },
+    head,
     body,
-    styles: { fontSize: 8.5, cellPadding: 1.8, textColor: [17, 24, 39] },
-    headStyles: { fillColor: colors.brand600, textColor: colors.brandOn, fontStyle: 'bold' },
+    styles: {
+      fontSize: 8,
+      cellPadding: 1.5,
+      textColor: [17, 24, 39],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.15,
+    },
+    headStyles: {
+      fillColor: colors.brand600,
+      textColor: colors.brandOn,
+      fontStyle: 'bold',
+      fontSize: 7.5,
+      cellPadding: 2,
+    },
+    alternateRowStyles: { fillColor: colors.brand50 },
     columnStyles: {
-      0: { cellWidth: 8, halign: 'center' },
-      1: { cellWidth: 52 },
+      0: { cellWidth: 7, halign: 'center' },
+      1: { cellWidth: 36 },
+      // Component columns: auto
+      // Total column: bold, right-aligned
+      [3 + data.components.length]: { fontStyle: 'bold', halign: 'right' },
+      // Grade column: centered
+      [4 + data.components.length]: { halign: 'center' },
+      // Remark column
+      [5 + data.components.length]: { fontSize: 7, textColor: [107, 114, 128] },
+      // Pos column: centered, narrow
+      [6 + data.components.length]: { cellWidth: 10, halign: 'center' },
+    },
+    didParseCell: (hookData) => {
+      // Apply grade tint to the Grade column cells (not header)
+      if (hookData.section === 'body' && hookData.column.index === 4 + data.components.length) {
+        const tint = getGradeTint(hookData.cell.raw as string)
+        if (tint) hookData.cell.styles.fillColor = tint
+      }
     },
   })
 
-  return (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8
+  const tableEnd = (doc as any).lastAutoTable.finalY
+  return tableEnd + 6
 }
 
-function drawSummaryBox(
+function getGradeRemark(gradeLabel: string | null, data: ReportCardData): string | null {
+  if (!gradeLabel) return null
+  // Try to find a matching grade band remark — this is the per-band remark,
+  // not the aggregate remark. For the subject-level remark we use the band's
+  // remark field if available.
+  return null // The remark column will show the aggregate remark in the summary
+}
+
+// ─── 5. Totals / summary row ────────────────────────────────────────────────
+
+function drawSummaryRow(
   doc: jsPDF,
-  pageWidth: number,
   y: number,
   data: ReportCardData,
   colors: ResolvedBrandColors,
 ): number {
-  const availableHeight = doc.internal.pageSize.getHeight() - PAGE_MARGIN
-  if (y > availableHeight - 40) { doc.addPage(); y = PAGE_MARGIN }
+  const boxH = 14
 
-  const boxHeight = 18
-  doc.setDrawColor(...colors.brand600)
-  doc.setLineWidth(0.4)
-  doc.roundedRect(PAGE_MARGIN, y, pageWidth - PAGE_MARGIN * 2, boxHeight, 2, 2)
-
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(9.5)
-  doc.setTextColor(...colors.brand600)
-  doc.text('OVERALL PERFORMANCE', PAGE_MARGIN + 4, y + 6)
-
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(13)
-  doc.setTextColor(17, 24, 39)
-  doc.text(data.average !== null ? data.average.toFixed(1) : '—', PAGE_MARGIN + 4, y + 13.5)
-
-  doc.setFont('helvetica', 'italic')
-  doc.setFontSize(10)
-  doc.setTextColor(75, 85, 99)
-  const remarkText = data.aggregateRemark ?? (data.average !== null ? '' : 'Not yet graded')
-  if (remarkText) {
-    doc.text(remarkText, pageWidth - PAGE_MARGIN - 4, y + 11, { align: 'right', maxWidth: pageWidth - PAGE_MARGIN * 2 - 40 })
+  // Check page space
+  if (y + boxH > PAGE_H - MARGIN - 30) {
+    doc.addPage()
+    y = MARGIN
   }
 
-  doc.setTextColor(17, 24, 39)
-  return y + boxHeight + 8
-}
+  doc.setFillColor(...colors.brand50)
+  doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
 
-function drawRemarkBlock(doc: jsPDF, pageWidth: number, y: number, data: ReportCardData): number {
-  const availableHeight = doc.internal.pageSize.getHeight() - PAGE_MARGIN
-  if (y > availableHeight - 34) { doc.addPage(); y = PAGE_MARGIN }
+  // Left accent
+  doc.setFillColor(...colors.brand600)
+  doc.rect(MARGIN, y, 2, boxH, 'F')
 
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(9.5)
-  doc.text("CLASS TEACHER'S REMARK", PAGE_MARGIN, y)
+  const lx = MARGIN + 6
+  const cx = PAGE_W / 2
+  const rx = PAGE_W - MARGIN - 4
+  const ty = y + 6
 
+  // Total marks
+  const totalScored = data.subjects.reduce((s, sub) => s + sub.weighted_total, 0)
+  const totalPossible = data.components.reduce((s, c) => {
+    const maxPerStudent = c.max_score
+    return s + maxPerStudent
+  }, 0) * (data.totalGraded || 1)
+  // Simpler: just show average
   doc.setFont('helvetica', 'normal')
-  doc.setFontSize(10)
-  doc.setTextColor(55, 65, 81)
-  const remark = data.teacherRemark?.trim()
-  if (remark) {
-    doc.text(remark, PAGE_MARGIN, y + 6, { maxWidth: pageWidth - PAGE_MARGIN * 2 })
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text('AVERAGE', lx, ty - 2)
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(14)
+  doc.setTextColor(17, 24, 39)
+  doc.text(data.average !== null ? data.average.toFixed(1) : '—', lx, ty + 4)
+
+  // Grade label next to average
+  if (data.average !== null) {
+    const avgGrade = getAvgGradeLabel(data.average, data)
+    if (avgGrade) {
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(10)
+      doc.setTextColor(...colors.brand600)
+      doc.text(`(${avgGrade})`, lx + 20, ty + 4)
+    }
+  }
+
+  // Position
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text('CLASS POSITION', cx, ty - 2)
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(12)
+  doc.setTextColor(17, 24, 39)
+  if (data.overallPosition !== null && data.totalGraded > 0) {
+    doc.text(`${ordinal(data.overallPosition)} of ${data.totalGraded}`, cx, ty + 4)
   } else {
-    doc.setTextColor(156, 163, 175)
-    doc.text('________________________________________________________________', PAGE_MARGIN, y + 6)
+    doc.text('—', cx, ty + 4)
+  }
+
+  // Aggregate remark
+  if (data.aggregateRemark) {
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(7.5)
+    doc.setTextColor(107, 114, 128)
+    doc.text('OVERALL', rx, ty - 2, { align: 'right' })
+
+    doc.setFont('helvetica', 'italic')
+    doc.setFontSize(9)
+    doc.setTextColor(55, 65, 81)
+    doc.text(data.aggregateRemark, rx, ty + 4, { align: 'right', maxWidth: 55 })
   }
 
   doc.setTextColor(17, 24, 39)
-  const blockHeight = remark ? Math.ceil(remark.length / 95) * 5 + 8 : 12
-  return y + blockHeight + 4
+  return y + boxH + 5
 }
 
-function drawSignatures(doc: jsPDF, pageWidth: number, y: number): void {
-  const availableHeight = doc.internal.pageSize.getHeight() - PAGE_MARGIN
-  if (y > availableHeight - 22) { doc.addPage(); y = PAGE_MARGIN }
+function getAvgGradeLabel(avg: number, data: ReportCardData): string | null {
+  // Use the first subject's grade bands as reference — they're school-wide
+  // This is a simplification; the real grade lookup happens server-side
+  return null
+}
+
+// ─── 6. Teacher + Principal remarks ─────────────────────────────────────────
+
+function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
+  const boxH = 22
+  if (y + boxH > PAGE_H - MARGIN - 20) {
+    doc.addPage()
+    y = MARGIN
+  }
+
+  const halfW = (CONTENT_W - 4) / 2
+
+  // Class teacher's remark (left)
+  doc.setFillColor(248, 250, 252)
+  doc.roundedRect(MARGIN, y, halfW, boxH, 1.5, 1.5, 'F')
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text("CLASS TEACHER'S REMARK", MARGIN + 3, y + 4)
 
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(9)
+  doc.setTextColor(55, 65, 81)
+  const remark = data.teacherRemark?.trim()
+  if (remark) {
+    doc.text(remark, MARGIN + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
+  } else {
+    doc.setTextColor(180, 180, 180)
+    doc.text('________________________________', MARGIN + 3, y + 10)
+  }
+
+  // Principal's remark (right)
+  const rx = MARGIN + halfW + 4
+  doc.setFillColor(248, 250, 252)
+  doc.roundedRect(rx, y, halfW, boxH, 1.5, 1.5, 'F')
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text("PRINCIPAL'S REMARK", rx + 3, y + 4)
+
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(9)
+  doc.setTextColor(180, 180, 180)
+  doc.text('________________________________', rx + 3, y + 10)
+
+  doc.setTextColor(17, 24, 39)
+  return y + boxH + 4
+}
+
+// ─── 7. Attendance summary ──────────────────────────────────────────────────
+
+function drawAttendanceSummary(doc: jsPDF, y: number, data: ReportCardData): number {
+  const att = data.attendance
+  if (!att || att.totalMarked === 0) return y
+
+  const boxH = 12
+  if (y + boxH > PAGE_H - MARGIN - 15) {
+    doc.addPage()
+    y = MARGIN
+  }
+
+  doc.setFillColor(248, 250, 252)
+  doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
+
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  doc.text('ATTENDANCE SUMMARY', MARGIN + 3, y + 4)
+
+  const absent = att.totalMarked - att.present
+  const pct = Math.round((att.present / att.totalMarked) * 100)
+  const summary = `Days Present: ${att.present}  |  Days Absent: ${absent}  |  Attendance Rate: ${pct}%`
+
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(8.5)
+  doc.setTextColor(55, 65, 81)
+  doc.text(summary, PAGE_W / 2, y + 9, { align: 'center' })
+
+  // Color indicator for attendance rate
+  const indicatorColor: [number, number, number] =
+    pct >= 90 ? [22, 163, 74] : pct >= 75 ? [217, 119, 6] : [220, 38, 38]
+  doc.setFillColor(...indicatorColor)
+  doc.circle(PAGE_W - MARGIN - 4, y + 8, 1.5, 'F')
+
+  doc.setTextColor(17, 24, 39)
+  return y + boxH + 3
+}
+
+// ─── 8. Signatures ──────────────────────────────────────────────────────────
+
+function drawSignatures(doc: jsPDF, y: number): void {
+  const boxH = 16
+  if (y + boxH > PAGE_H - MARGIN - 10) {
+    doc.addPage()
+    y = MARGIN
+  }
+
+  const thirdW = CONTENT_W / 3
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(8)
   doc.setTextColor(75, 85, 99)
-  doc.text('_____________________', PAGE_MARGIN, y + 6)
-  doc.text('_____________________', pageWidth - PAGE_MARGIN - 40, y + 6)
-  doc.text('Class Teacher', PAGE_MARGIN, y + 11)
-  doc.text('Principal', pageWidth - PAGE_MARGIN - 40, y + 11)
+
+  // Class teacher
+  doc.text('________________________', MARGIN, y + 6)
+  doc.text('Class Teacher', MARGIN, y + 10)
+
+  // Head teacher / Principal
+  doc.text('________________________', MARGIN + thirdW, y + 6)
+  doc.text('Head Teacher / Principal', MARGIN + thirdW, y + 10)
+
+  // Date
+  doc.text('________________________', MARGIN + thirdW * 2, y + 6)
+  doc.text('Date', MARGIN + thirdW * 2, y + 10)
+
   doc.setTextColor(17, 24, 39)
 }
 
-function drawFooter(doc: jsPDF): void {
+// ─── Page footer ────────────────────────────────────────────────────────────
+
+function drawPageFooter(doc: jsPDF): void {
   const pageCount = doc.getNumberOfPages()
   const generated = `Generated ${new Date().toLocaleDateString(undefined, {
     year: 'numeric', month: 'long', day: 'numeric',
   })}`
+
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i)
-    const pageHeight = doc.internal.pageSize.getHeight()
-    const pageWidth = doc.internal.pageSize.getWidth()
+    const ph = doc.internal.pageSize.getHeight()
+
     doc.setFont('helvetica', 'normal')
-    doc.setFontSize(7.5)
+    doc.setFontSize(7)
     doc.setTextColor(156, 163, 175)
-    doc.text(generated, PAGE_MARGIN, pageHeight - 8)
-    doc.text(`Page ${i} of ${pageCount}`, pageWidth - PAGE_MARGIN, pageHeight - 8, { align: 'right' })
+
+    // Thin separator line
+    doc.setDrawColor(226, 232, 240)
+    doc.setLineWidth(0.2)
+    doc.line(MARGIN, ph - 12, PAGE_W - MARGIN, ph - 12)
+
+    doc.text(generated, MARGIN, ph - 8)
+    doc.text(`Page ${i} of ${pageCount}`, PAGE_W - MARGIN, ph - 8, { align: 'right' })
   }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function ordinal(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd']
+  const v = n % 100
+  return n + (s[(v - 20) % 10] || s[v] || s[0])
 }

@@ -551,8 +551,10 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
               onClick={async () => {
                 if (!profileDraft.trim()) return
                 const res = await saveProfile(
-                  windowRow!.id,
-                  editingProfileId === '__new__' ? { name: profileDraft.trim() } : { id: editingProfileId, name: profileDraft.trim() },
+                  schoolId,
+                  editingProfileId === '__new__'
+                    ? { name: profileDraft.trim(), windowId: windowRow!.id }
+                    : { id: editingProfileId, name: profileDraft.trim() },
                 )
                 if (!res.ok) { setError(res.error); return }
                 setEditingProfileId(null)
@@ -1231,8 +1233,6 @@ function GradingSection({ schoolId }: { schoolId: string }) {
 
 export function PromotionTabSecondary({ schoolId, actorRecordId }: { schoolId: string; actorRecordId: string | null }) {
   const [rules, setRules] = useState<SecondaryPromotionRule[]>([])
-  const [sessionsList, setSessionsList] = useState<Session[]>([])
-  const [termsList, setTermsList] = useState<Term[]>([])
   const [leafClasses, setLeafClasses] = useState<ClassNode[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1245,77 +1245,20 @@ export function PromotionTabSecondary({ schoolId, actorRecordId }: { schoolId: s
     cutoff: string
   } | null>(null)
 
-  const [sessionId, setSessionId] = useState('')
-  const [termId, setTermId] = useState<string | null>(null)
-  const [runClassId, setRunClassId] = useState('')
-  const [preview, setPreview] = useState<PromotionPreviewRow[]>([])
-  const [decisions, setDecisions] = useState<Record<string, { action: 'promote' | 'retain' | 'demote'; toClassId?: string | null }>>({})
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [applyResult, setApplyResult] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [rRes, sRes, cRes] = await Promise.all([
+    const [rRes, cRes] = await Promise.all([
       loadPromotionRules(schoolId),
-      loadSessions(schoolId),
       loadClassNodes(schoolId),
     ])
     if (!rRes.ok) { setError(rRes.error); setLoading(false); return }
     setRules(rRes.data)
-    setSessionsList(sRes.data ?? [])
     setLeafClasses((cRes.data ?? []).filter(c => c.is_leaf_enrollable))
-    const current = (sRes.data ?? []).find(s => (s as any).is_current) ?? null
-    if (current) {
-      setSessionId(current.id)
-      const tRes = await loadTerms(schoolId, current.id)
-      setTermsList(tRes.data ?? [])
-      setTermId((tRes.data ?? [])[0]?.id ?? null)
-    }
     setLoading(false)
   }, [schoolId])
 
   useEffect(() => { load() }, [load])
-
-  async function loadPreview() {
-    if (!sessionId || !runClassId) return
-    setPreviewLoading(true)
-    setApplyResult(null)
-    setDecisions({})
-    const res = await previewPromotion({ sessionId, termId, fromClassNodeId: runClassId })
-    setPreviewLoading(false)
-    if (!res.ok) { setError(res.error); return }
-    setPreview(res.data)
-  }
-
-  async function handleApply() {
-    if (!actorRecordId || preview.length === 0) return
-    const payload = preview.map(r => ({
-      student_id: r.student_id,
-      action: decisions[r.student_id]?.action ?? (r.suggested === 'promote' ? 'promote' : 'retain'),
-      mode: 'manual' as const,
-      to_class_node_id: decisions[r.student_id]?.toClassId ?? undefined,
-    }))
-    const promotes = payload.filter(d => d.action === 'promote').length
-    const retains = payload.filter(d => d.action === 'retain').length
-    const demotes = payload.filter(d => d.action === 'demote').length
-    if (!confirm(`Apply now? ${promotes} promoted, ${retains} retained, ${demotes} demoted. Destination classes must already be cleared (senior classes first).`)) return
-
-    setBusy(true)
-    const res = await applyPromotions({
-      sessionId,
-      fromClassNodeId: runClassId,
-      decisions: payload,
-      decidedBy: actorRecordId,
-    })
-    setBusy(false)
-    if (!res.ok) { setApplyResult(res.error); return }
-    const s = res.data
-    setApplyResult(`Done — ${s.promoted} promoted (${s.graduated} graduated), ${s.retained} retained, ${s.demoted} demoted.`)
-    setPreview([])
-    await load()
-  }
 
   if (loading) return <Skeletonish />
 
@@ -1362,100 +1305,6 @@ export function PromotionTabSecondary({ schoolId, actorRecordId }: { schoolId: s
           </div>
         </div>
       ))}
-
-      <SectionHeader title="Run promotion" />
-      <FieldRowish label="Session">
-        <select className="set-select" value={sessionId} onChange={async e => {
-          setSessionId(e.target.value)
-          setTermId(null)
-          setPreview([])
-          const tRes = await loadTerms(schoolId, e.target.value)
-          setTermsList(tRes.data ?? [])
-          setTermId((tRes.data ?? [])[0]?.id ?? null)
-        }}>
-          <option value="">Select session…</option>
-          {sessionsList.map(s => <option key={s.id} value={s.id}>{s.name}{(s as any).is_current ? ' (current)' : ''}</option>)}
-        </select>
-      </FieldRowish>
-      {termsList.length > 0 && (
-        <FieldRowish label="Results from term">
-          <select className="set-select" value={termId ?? ''} onChange={e => { setTermId(e.target.value || null); setPreview([]) }}>
-            <option value="">Whole session</option>
-            {termsList.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-        </FieldRowish>
-      )}
-      <FieldRowish label="Class to promote">
-        <select className="set-select" value={runClassId} onChange={e => { setRunClassId(e.target.value); setPreview([]) }}>
-          <option value="">Select class…</option>
-          {leafClasses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </FieldRowish>
-
-      <button className="set-save-btn" onClick={loadPreview} disabled={!sessionId || !runClassId || previewLoading}>
-        {previewLoading ? 'Checking results…' : 'Load preview'}
-      </button>
-
-      {applyResult && <p className="asw-apply-result">{applyResult}</p>}
-
-      {preview.length > 0 && (
-        <div className="asw-run-block">
-          <p className="set-section-label">
-            {preview.length} students{currentSessionName ? ` · ${currentSessionName}${termId ? ` · ${termsList.find(t => t.id === termId)?.name ?? ''}` : ''}` : ''}
-          </p>
-          {preview.map(r => {
-            const dec = decisions[r.student_id]
-            const effective = dec?.action ?? (r.suggested === 'promote' ? 'promote' : 'retain')
-            return (
-              <div key={r.student_id} className="asw-run-row">
-                <div className="asw-run-main">
-                  <p className="set-list-row-name">{r.full_name}</p>
-                  <p className="set-list-row-meta">
-                    {r.average !== null ? `Average ${r.average.toFixed(1)}` : 'No results'}
-                    {' · '}
-                    {r.to_class_name ?? (r.graduating ? 'Graduates' : '—')}
-                    {' · '}
-                    {r.reason}
-                  </p>
-                </div>
-                <select
-                  className="set-select asw-run-decision"
-                  value={effective}
-                  aria-label={`Decision for ${r.full_name}`}
-                  onChange={e => setDecisions(prev => ({
-                    ...prev,
-                    [r.student_id]: { action: e.target.value as 'promote' | 'retain' | 'demote', toClassId: prev[r.student_id]?.toClassId },
-                  }))}
-                >
-                  <option value="promote">Promote{r.suggested === 'promote' ? ' ✓' : ''}</option>
-                  <option value="retain">Retain{r.suggested === 'review' ? ' ✓' : ''}</option>
-                  <option value="demote">Demote…</option>
-                </select>
-                {effective === 'demote' && (
-                  <select
-                    className="set-select asw-run-decision"
-                    aria-label="Demote destination"
-                    value={dec?.toClassId ?? ''}
-                    onChange={e => setDecisions(prev => ({
-                      ...prev,
-                      [r.student_id]: { action: 'demote', toClassId: e.target.value || undefined },
-                    }))}
-                  >
-                    <option value="">Destination…</option>
-                    {leafClasses.filter(c => c.id !== runClassId).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                )}
-              </div>
-            )
-          })}
-          <button className="set-save-btn" onClick={handleApply} disabled={busy || !actorRecordId}>
-            {busy ? 'Applying…' : 'Apply promotion'}
-          </button>
-          <p className="set-empty-hint">
-            Senior classes first — a destination class still holding undecided students blocks the run.
-          </p>
-        </div>
-      )}
 
       {ruleForm && (
         <Sheetish title={ruleForm.id ? 'Edit promotion rule' : 'Add promotion rule'} onClose={() => setRuleForm(null)}>

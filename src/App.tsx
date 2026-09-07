@@ -45,6 +45,7 @@ type NavTab = BottomNavTab | 'home' | 'results' | 'hr' | 'library' | 'announceme
 export interface NavIntent {
   intent?: 'add_student' | 'record_payment' | 'mark_attendance'
   guardianId?: string
+  pendingApprovals?: boolean
 }
 
 // SESSION 66: TabContent's own copy of the same higher-institution check
@@ -1319,7 +1320,7 @@ function TabContent({
     // schoolType passed through (Session 60) so ResultsModule can branch to
     // the higher-ed course-results/GPA view — same pattern already used two
     // branches above for CourseRegistrationModule/CourseAttendanceModule.
-    return <ResultsModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} />
+    return <ResultsModule schoolId={schoolId} isAdmin={isAdmin} schoolType={schoolType} intent={intent} />
   }
 
   if (tab === 'hr') {

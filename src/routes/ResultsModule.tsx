@@ -61,7 +61,7 @@
  * received_by/approved_by bug.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
 import {
@@ -99,6 +99,14 @@ import {
 } from '../services/assessmentService'
 import CourseResultsModule from './CourseResultsModule'
 import ReportCardsPanel from './ReportCardsPanel'
+import type { NavIntent } from '../App'
+import { supabase } from '../lib/supabase'
+import {
+  previewPromotion,
+  applyPromotions,
+  type PromotionPreviewRow,
+  type PromotionDecision,
+} from '../services/promotionService'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -110,6 +118,8 @@ interface ResultsModuleProps {
    *  to pick which of the two entirely-separate render paths below runs —
    *  never passed further down into the secondary-school path's own tree. */
   schoolType: string | null
+  /** Intent passed from navigation — e.g. deep-link to pending approvals. */
+  intent?: NavIntent
 }
 
 // Duplicated intentionally from SettingsModule.tsx's own private (unexported)
@@ -128,7 +138,7 @@ type LoadState = 'booting' | 'loading' | 'ready' | 'empty' | 'error'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ResultsModule({ schoolId, isAdmin, schoolType }: ResultsModuleProps) {
+export default function ResultsModule({ schoolId, isAdmin, schoolType, intent }: ResultsModuleProps) {
   // Session 60: higher-ed schools get a completely separate component, not a
   // rendering-time fork lower down. This is deliberate — the secondary path's
   // boot effect (below) unconditionally calls loadMyTeachingAssignments/
@@ -143,12 +153,12 @@ export default function ResultsModule({ schoolId, isAdmin, schoolType }: Results
     return <CourseResultsModule schoolId={schoolId} isAdmin={isAdmin} />
   }
 
-  return <ResultsModuleSecondary schoolId={schoolId} isAdmin={isAdmin} />
+  return <ResultsModuleSecondary schoolId={schoolId} isAdmin={isAdmin} intent={intent} />
 }
 
 // ─── Secondary-school path (pre-existing, unmodified below this point) ────────
 
-function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdmin: boolean }) {
+function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: string; isAdmin: boolean; intent?: NavIntent }) {
   // ── Permissions (Session 10, PRD Problem 3.1) ────────────────────────────
   const can         = useAuthStore((s) => s.can)
   const canForClass = useAuthStore((s) => s.canForClass)
@@ -174,6 +184,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const [session,        setSession]        = useState<Session | null>(null)
   const [assignments,    setAssignments]    = useState<TeachingAssignment[]>([])
   const [selectedAssign, setSelectedAssign] = useState<TeachingAssignment | null>(null)
+  const [selectedClassNodeId, setSelectedClassNodeId] = useState<string | null>(null)
   const [bootState,      setBootState]      = useState<LoadState>('booting')
   const [bootError,      setBootError]      = useState('')
 
@@ -187,9 +198,9 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   const [resState, setResState] = useState<LoadState>('booting')
   const [resError, setResError] = useState('')
 
-  // ── Mode: score entry vs report cards (Session 49 surface) ────────────────
+  // ── Mode: score entry vs report cards vs promotion (Session 49 surface) ────
   const canManageRemarks = useAuthStore((s) => s.can('academics.remarks.manage'))
-  const [mode, setMode] = useState<'scores' | 'reports'>('scores')
+  const [mode, setMode] = useState<'scores' | 'reports' | 'promotion'>('scores')
 
   // ── Students + scores ─────────────────────────────────────────────────────
   const [students,   setStudents]   = useState<Student[]>([])
@@ -211,6 +222,33 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
   // ── Approval ──────────────────────────────────────────────────────────────
   const [approving,   setApproving]   = useState(false)
   const [approveErr,  setApproveErr]  = useState('')
+
+  // ── Promotion (moved from AssessmentsSettings — Session 67) ───────────────
+  const [promoPreview, setPromoPreview] = useState<PromotionPreviewRow[]>([])
+  const [promoDecisions, setPromoDecisions] = useState<Map<string, PromotionDecision>>(new Map())
+  const [promoLoading, setPromoLoading] = useState(false)
+  const [promoApplying, setPromoApplying] = useState(false)
+  const [promoResult, setPromoResult] = useState<{ promoted: number; retained: number; demoted: number; graduated: number } | null>(null)
+  const [promoError, setPromoError] = useState('')
+  const [promoClassId, setPromoClassId] = useState<string | null>(null)
+
+  // ── Class-first filter: unique classes, subjects per selected class ─────────
+  const uniqueClasses = useMemo(() => {
+    const seen = new Map<string, { classNodeId: string; className: string }>()
+    for (const a of assignments) {
+      if (!seen.has(a.class_node_id)) {
+        seen.set(a.class_node_id, { classNodeId: a.class_node_id, className: a.class_node_name })
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.className.localeCompare(b.className))
+  }, [assignments])
+
+  const subjectsForClass = useMemo(() => {
+    if (!selectedClassNodeId) return []
+    return assignments
+      .filter(a => a.class_node_id === selectedClassNodeId)
+      .sort((a, b) => a.subject_name.localeCompare(b.subject_name))
+  }, [assignments, selectedClassNodeId])
 
   // Online/offline detection effect is declared further below, after
   // loadGrid() exists — it needs to call loadGrid() on reconnect, see
@@ -261,6 +299,60 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
     if (isAdmin || staffId) boot()
     return () => { cancelled = true }
   }, [isAdmin, staffId, canViewAllAssignments])
+
+  // ─── Intent: auto-select class+subject for pending approvals ──────────────
+  // When navigated here with pendingApprovals intent (e.g. from dashboard
+  // action badge), find the first class with unapproved scores and auto-select
+  // it so the user lands directly on actionable content.
+  useEffect(() => {
+    if (!intent?.pendingApprovals || bootState !== 'ready' || assignments.length === 0 || !session) return
+    if (selectedClassNodeId) return // already selected, don't override
+
+    let cancelled = false
+    async function autoSelectPending() {
+      // Find classes that have unapproved scores
+      const { data: pendingScores } = await supabase
+        .from('scores')
+        .select('student_id, subject_id, students!inner(class_node_id)', { count: 'exact' })
+        .eq('school_id', schoolId)
+        .eq('session_id', session!.id)
+        .is('approved_at', null)
+
+      if (cancelled || !pendingScores || pendingScores.length === 0) return
+
+      // Group by class_node_id to find the class with the most pending scores
+      const classCounts = new Map<string, number>()
+      const classSubjects = new Map<string, Set<string>>()
+      for (const row of pendingScores as any[]) {
+        const clsId = row.students?.class_node_id
+        if (!clsId) continue
+        classCounts.set(clsId, (classCounts.get(clsId) ?? 0) + 1)
+        if (!classSubjects.has(clsId)) classSubjects.set(clsId, new Set())
+        classSubjects.get(clsId)!.add(row.subject_id)
+      }
+
+      // Pick the class with the most pending scores
+      let bestClass = ''
+      let bestCount = 0
+      for (const [clsId, count] of classCounts) {
+        if (count > bestCount) { bestClass = clsId; bestCount = count }
+      }
+      if (!bestClass) return
+
+      setSelectedClassNodeId(bestClass)
+
+      // Find the first subject for this class that has a matching assignment
+      const subjectsForCls = classSubjects.get(bestClass)
+      const matchingAssignment = assignments.find(
+        a => a.class_node_id === bestClass && subjectsForCls?.has(a.subject_id)
+      )
+      if (matchingAssignment) {
+        setSelectedAssign(matchingAssignment)
+      }
+    }
+    autoSelectPending()
+    return () => { cancelled = true }
+  }, [intent, bootState, assignments, session, schoolId, selectedClassNodeId])
 
   // ─── Load students + scores when assignment / term changes ────────────────
 
@@ -561,23 +653,45 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
       )
     }
     return (
-      <div className="res-selector-wrap">
-        <label className="res-selector-label">Subject · Class</label>
-        <select
-          className="res-selector"
-          value={selectedAssign?.id ?? ''}
-          onChange={e => {
-            const found = assignments.find(a => a.id === e.target.value) ?? null
-            setSelectedAssign(found)
-          }}
-        >
-          <option value="">— pick a subject and class —</option>
-          {assignments.map(a => (
-            <option key={a.id} value={a.id}>
-              {a.subject_name} — {a.class_node_name}
-            </option>
-          ))}
-        </select>
+      <div className="res-selector-wrap res-selector-two-step">
+        <div className="res-selector-group">
+          <label className="res-selector-label">Class</label>
+          <select
+            className="res-selector"
+            value={selectedClassNodeId ?? ''}
+            onChange={e => {
+              const val = e.target.value || null
+              setSelectedClassNodeId(val)
+              setSelectedAssign(null)
+            }}
+          >
+            <option value="">— pick a class —</option>
+            {uniqueClasses.map(c => (
+              <option key={c.classNodeId} value={c.classNodeId}>
+                {c.className}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="res-selector-group">
+          <label className="res-selector-label">Subject</label>
+          <select
+            className="res-selector"
+            value={selectedAssign?.id ?? ''}
+            disabled={!selectedClassNodeId}
+            onChange={e => {
+              const found = assignments.find(a => a.id === e.target.value) ?? null
+              setSelectedAssign(found)
+            }}
+          >
+            <option value="">{selectedClassNodeId ? '— pick a subject —' : '— select class first —'}</option>
+            {subjectsForClass.map(a => (
+              <option key={a.id} value={a.id}>
+                {a.subject_name}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
     )
   }
@@ -744,16 +858,25 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
     // Open — but surface a misconfigured weighting rather than letting bad
     // totals ship silently (the old schema comment's "app enforces = 100").
     const weightSum = components.reduce((acc, c) => acc + c.weight_pct, 0)
+    const deadline = w.scores_submission_deadline
+      ? new Date(w.scores_submission_deadline)
+      : null
+    const deadlineLabel = deadline
+      ? deadline.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : null
     return (
       <div>
-        <div className="res-win-banner res-win-banner--open">
-          <span className="res-win-icon"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /></span>
+        <div className="res-win-banner res-win-banner--open res-win-banner--prominent">
+          <span className="res-win-icon"><Icon name="circle-check" size={20} style={{ color: 'var(--color-success, #16a34a)' }} /></span>
           <div className="res-win-copy">
-            <p className="res-win-title">{w.name} · open</p>
+            <p className="res-win-title res-win-title--lg">{w.name}</p>
             <p className="res-win-sub">
-              {components.length === 0
-                ? 'No score columns configured yet for this class.'
-                : `Score entry is open${winInfo.windowClass && winInfo.window.scope === 'selected_classes' ? '' : ''}.`}
+              Score entry is open
+              {deadlineLabel && <> — submission deadline {deadlineLabel}</>}
+              {winInfo.windowClass && winInfo.window.scope === 'selected_classes'
+                ? <> for {selectedAssign.class_node_name}</>
+                : ''}
+              .
             </p>
           </div>
         </div>
@@ -772,7 +895,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
       return (
         <div className="res-empty-state res-empty-state--prompt">
           <span className="res-empty-icon"><Icon name="bar-chart" /></span>
-          <p className="res-empty-msg">Select a subject and class above to enter scores.</p>
+          <p className="res-empty-msg">Select a class and subject above to enter scores.</p>
         </div>
       )
     }
@@ -878,6 +1001,16 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
             >
               <Icon name="file-text" size={14} /> Report cards
             </button>
+            {isAdmin && (
+              <button
+                role="tab"
+                aria-selected={mode === 'promotion'}
+                className={['res-mode-tab', mode === 'promotion' ? 'res-mode-tab--active' : ''].join(' ')}
+                onClick={() => setMode('promotion')}
+              >
+                <Icon name="arrow-up-circle" size={14} /> Promotion
+              </button>
+            )}
           </div>
         )}
 
@@ -887,7 +1020,29 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
 
       {/* Body */}
       <div className="res-body">
-        {mode === 'reports' && (isAdmin || canManageRemarks) ? (
+        {mode === 'promotion' && isAdmin ? (
+          <PromotionPanel
+            schoolId={schoolId}
+            session={session}
+            selectedTerm={selectedTerm}
+            staffId={staffId}
+            uniqueClasses={uniqueClasses}
+            promoPreview={promoPreview}
+            setPromoPreview={setPromoPreview}
+            promoDecisions={promoDecisions}
+            setPromoDecisions={setPromoDecisions}
+            promoLoading={promoLoading}
+            setPromoLoading={setPromoLoading}
+            promoApplying={promoApplying}
+            setPromoApplying={setPromoApplying}
+            promoResult={promoResult}
+            setPromoResult={setPromoResult}
+            promoError={promoError}
+            setPromoError={setPromoError}
+            promoClassId={promoClassId}
+            setPromoClassId={setPromoClassId}
+          />
+        ) : mode === 'reports' && (isAdmin || canManageRemarks) ? (
           <ReportCardsPanel
             schoolId={schoolId}
             isAdmin={isAdmin}
@@ -904,6 +1059,226 @@ function ResultsModuleSecondary({ schoolId, isAdmin }: { schoolId: string; isAdm
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// ─── Promotion Panel (moved from AssessmentsSettings — Session 67) ──────────
+// Only the "Run promotion" action lives here. Rule CRUD stays in Settings.
+
+function PromotionPanel({
+  schoolId,
+  session,
+  selectedTerm,
+  staffId,
+  uniqueClasses,
+  promoPreview,
+  setPromoPreview,
+  promoDecisions,
+  setPromoDecisions,
+  promoLoading,
+  setPromoLoading,
+  promoApplying,
+  setPromoApplying,
+  promoResult,
+  setPromoResult,
+  promoError,
+  setPromoError,
+  promoClassId,
+  setPromoClassId,
+}: {
+  schoolId: string
+  session: Session | null
+  selectedTerm: Term | null
+  staffId: string
+  uniqueClasses: { classNodeId: string; className: string }[]
+  promoPreview: PromotionPreviewRow[]
+  setPromoPreview: (rows: PromotionPreviewRow[]) => void
+  promoDecisions: Map<string, PromotionDecision>
+  setPromoDecisions: (fn: (prev: Map<string, PromotionDecision>) => Map<string, PromotionDecision>) => void
+  promoLoading: boolean
+  setPromoLoading: (v: boolean) => void
+  promoApplying: boolean
+  setPromoApplying: (v: boolean) => void
+  promoResult: { promoted: number; retained: number; demoted: number; graduated: number } | null
+  setPromoResult: (r: { promoted: number; retained: number; demoted: number; graduated: number } | null) => void
+  promoError: string
+  setPromoError: (e: string) => void
+  promoClassId: string | null
+  setPromoClassId: (id: string | null) => void
+}) {
+  const [promoTermId, setPromoTermId] = useState<string | null>(selectedTerm?.id ?? null)
+
+  useEffect(() => {
+    setPromoTermId(selectedTerm?.id ?? null)
+  }, [selectedTerm])
+
+  async function loadPreview() {
+    if (!session || !promoClassId) return
+    setPromoLoading(true)
+    setPromoResult(null)
+    setPromoError('')
+    const res = await previewPromotion({
+      sessionId: session.id,
+      termId: promoTermId,
+      fromClassNodeId: promoClassId,
+    })
+    setPromoLoading(false)
+    if (!res.ok) { setPromoError(res.error); return }
+    setPromoPreview(res.data)
+  }
+
+  async function handleApply() {
+    if (!session || !staffId || promoPreview.length === 0) return
+    const payload: PromotionDecision[] = promoPreview.map(r => {
+      const dec = promoDecisions.get(r.student_id)
+      return {
+        student_id: r.student_id,
+        action: dec?.action ?? (r.suggested === 'promote' ? 'promote' : 'retain'),
+        mode: 'manual' as const,
+        to_class_node_id: dec?.to_class_node_id,
+      }
+    })
+    const promotes = payload.filter(d => d.action === 'promote').length
+    const retains = payload.filter(d => d.action === 'retain').length
+    const demotes = payload.filter(d => d.action === 'demote').length
+    if (!confirm(`Apply now? ${promotes} promoted, ${retains} retained, ${demotes} demoted.`)) return
+
+    setPromoApplying(true)
+    const res = await applyPromotions({
+      sessionId: session.id,
+      fromClassNodeId: promoClassId!,
+      decisions: payload,
+      decidedBy: staffId,
+    })
+    setPromoApplying(false)
+    if (!res.ok) { setPromoError(res.error); return }
+    setPromoResult(res.data)
+    setPromoPreview([])
+  }
+
+  if (!session) {
+    return (
+      <div className="res-win-banner res-win-banner--none">
+        <span className="res-win-icon"><Icon name="calendar" size={16} /></span>
+        <div className="res-win-copy">
+          <p className="res-win-title">No active session</p>
+          <p className="res-win-sub">Cannot run promotion without a current session.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="res-promo-panel">
+      <div className="res-win-banner res-win-banner--none" style={{ marginBottom: 'var(--space-4)' }}>
+        <span className="res-win-icon"><Icon name="arrow-up-circle" size={16} /></span>
+        <div className="res-win-copy">
+          <p className="res-win-title">Run Promotion</p>
+          <p className="res-win-sub">
+            Preview promotion outcomes for a class, adjust decisions, then apply.
+            Rules are configured in Settings &gt; Assessments.
+          </p>
+        </div>
+      </div>
+
+      {promoError && (
+        <div className="res-win-banner" style={{ borderColor: 'var(--color-error, #dc2626)', background: 'var(--color-error-subtle, #fef2f2)', marginBottom: 'var(--space-3)' }}>
+          <span className="res-win-icon"><Icon name="alert-triangle" size={16} style={{ color: 'var(--color-error, #dc2626)' }} /></span>
+          <div className="res-win-copy">
+            <p className="res-win-title" style={{ color: 'var(--color-error, #dc2626)' }}>{promoError}</p>
+          </div>
+        </div>
+      )}
+
+      {promoResult && (
+        <div className="res-win-banner res-win-banner--open" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="res-win-icon"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /></span>
+          <div className="res-win-copy">
+            <p className="res-win-title">
+              Done — {promoResult.promoted} promoted ({promoResult.graduated} graduated), {promoResult.retained} retained, {promoResult.demoted} demoted.
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="res-promo-form">
+        <div className="res-selector-group" style={{ maxWidth: 280 }}>
+          <label className="res-selector-label">Class to promote</label>
+          <select
+            className="res-selector"
+            value={promoClassId ?? ''}
+            onChange={e => { setPromoClassId(e.target.value || null); setPromoPreview([]) }}
+          >
+            <option value="">— pick a class —</option>
+            {uniqueClasses.map(c => (
+              <option key={c.classNodeId} value={c.classNodeId}>{c.className}</option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          className="btn btn-primary"
+          onClick={loadPreview}
+          disabled={!promoClassId || promoLoading}
+          style={{ alignSelf: 'flex-end' }}
+        >
+          {promoLoading ? 'Loading…' : 'Load preview'}
+        </button>
+      </div>
+
+      {promoPreview.length > 0 && (
+        <div className="res-promo-results">
+          <p className="res-promo-count">{promoPreview.length} students</p>
+          {promoPreview.map(r => {
+            const dec = promoDecisions.get(r.student_id)
+            const effective = dec?.action ?? (r.suggested === 'promote' ? 'promote' : 'retain')
+            return (
+              <div key={r.student_id} className="res-promo-row">
+                <div className="res-promo-row-main">
+                  <p className="res-promo-name">{r.full_name}</p>
+                  <p className="res-promo-meta">
+                    {r.average !== null ? `Avg ${r.average.toFixed(1)}` : 'No results'}
+                    {' · '}
+                    {r.to_class_name ?? (r.graduating ? 'Graduates' : '—')}
+                    {' · '}
+                    {r.reason}
+                  </p>
+                </div>
+                <select
+                  className="res-selector res-promo-decision"
+                  value={effective}
+                  onChange={e => setPromoDecisions(prev => {
+                    const next = new Map(prev)
+                    next.set(r.student_id, {
+                      student_id: r.student_id,
+                      action: e.target.value as 'promote' | 'retain' | 'demote',
+                      mode: 'manual',
+                      to_class_node_id: prev.get(r.student_id)?.to_class_node_id,
+                    })
+                    return next
+                  })}
+                >
+                  <option value="promote">Promote{r.suggested === 'promote' ? ' ✓' : ''}</option>
+                  <option value="retain">Retain{r.suggested === 'review' ? ' ✓' : ''}</option>
+                  <option value="demote">Demote</option>
+                </select>
+              </div>
+            )
+          })}
+          <button
+            className="btn btn-primary"
+            onClick={handleApply}
+            disabled={promoApplying || !staffId}
+            style={{ marginTop: 'var(--space-3)' }}
+          >
+            {promoApplying ? 'Applying…' : 'Apply promotion'}
+          </button>
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginTop: 'var(--space-2)' }}>
+            Senior classes first — a destination class still holding undecided students blocks the run.
+          </p>
+        </div>
+      )}
     </div>
   )
 }

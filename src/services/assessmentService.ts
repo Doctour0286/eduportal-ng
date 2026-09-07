@@ -65,7 +65,8 @@ export interface AssessmentWindow {
 
 export interface ComponentProfile {
   id: string
-  assessment_window_id: string
+  school_id: string
+  assessment_window_id: string | null
   name: string
 }
 
@@ -261,7 +262,7 @@ export async function createWindow(params: {
     // admin would see a window that "can't add components" with no explanation.
     const profIns = await supabase
       .from('score_component_profiles')
-      .insert({ assessment_window_id: w.id, name: 'Default weighting' })
+      .insert({ school_id: params.schoolId, assessment_window_id: w.id, name: 'Default weighting' })
     if (profIns.error) {
       return err(
         `Window "${w.name}" was created, but its default weighting profile could not be ` +
@@ -430,11 +431,12 @@ export async function detachClassFromWindow(rowId: string): Promise<Result<true>
 
 // ─── Weight profiles ──────────────────────────────────────────────────────────
 
+/** Load profiles for a specific assessment window (backward-compatible). */
 export async function loadProfiles(windowId: string): Promise<Result<ComponentProfile[]>> {
   try {
     const { data, error } = await supabase
       .from('score_component_profiles')
-      .select('id, assessment_window_id, name')
+      .select('id, school_id, assessment_window_id, name')
       .eq('assessment_window_id', windowId)
       .order('created_at')
     if (error) return err(friendly(error.message))
@@ -444,7 +446,30 @@ export async function loadProfiles(windowId: string): Promise<Result<ComponentPr
   }
 }
 
-export async function saveProfile(windowId: string, opts: { id?: string; name: string }): Promise<Result<ComponentProfile>> {
+/** Load all reusable profiles for a school (decoupled from windows). */
+export async function loadSchoolProfiles(schoolId: string): Promise<Result<ComponentProfile[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('score_component_profiles')
+      .select('id, school_id, assessment_window_id, name')
+      .eq('school_id', schoolId)
+      .order('created_at')
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: data ?? [] }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load school profiles')
+  }
+}
+
+/**
+ * Create or update a weighting profile.
+ * For new profiles: supply schoolId. Optionally supply windowId to link it.
+ * For updates: supply opts.id (name-only update).
+ */
+export async function saveProfile(
+  schoolId: string,
+  opts: { id?: string; name: string; windowId?: string | null },
+): Promise<Result<ComponentProfile>> {
   try {
     if (opts.id) {
       const { data, error } = await supabase
@@ -458,7 +483,11 @@ export async function saveProfile(windowId: string, opts: { id?: string; name: s
     }
     const { data, error } = await supabase
       .from('score_component_profiles')
-      .insert({ assessment_window_id: windowId, name: opts.name })
+      .insert({
+        school_id: schoolId,
+        assessment_window_id: opts.windowId ?? null,
+        name: opts.name,
+      })
       .select('*')
       .single()
     if (error) return err(friendly(error.message))
@@ -472,13 +501,22 @@ export async function deleteProfile(profileId: string): Promise<Result<true>> {
   try {
     // Refuse when classes still point at it — the DB FK would block anyway;
     // failing here gives a plain-English message instead of a raw FK error.
-    const { count, error: checkErr } = await supabase
+    const { count: awcCount, error: awcErr } = await supabase
       .from('assessment_window_classes')
       .select('id', { count: 'exact', head: true })
       .eq('score_component_profile_id', profileId)
-    if (checkErr) return err(friendly(checkErr.message))
-    if ((count ?? 0) > 0) {
+    if (awcErr) return err(friendly(awcErr.message))
+    if ((awcCount ?? 0) > 0) {
       return err('This weighting is still assigned to one or more classes. Reassign them first.')
+    }
+    // Also check if score_components reference this profile
+    const { count: scCount, error: scErr } = await supabase
+      .from('score_components')
+      .select('id', { count: 'exact', head: true })
+      .eq('score_component_profile_id', profileId)
+    if (scErr) return err(friendly(scErr.message))
+    if ((scCount ?? 0) > 0) {
+      return err('This weighting still has score components defined. Remove them first.')
     }
     const { error } = await supabase
       .from('score_component_profiles')

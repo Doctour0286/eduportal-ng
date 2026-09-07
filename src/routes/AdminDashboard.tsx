@@ -15,6 +15,7 @@ import { getPunctualitySummary, loadScheduledTeachersForDate, markPeriodRecord, 
 import { loadCurrentSession } from '../services/timetableService';
 import { getSowSummary, type SowSummary } from '../services/schemeOfWorkService';
 import { TermProgressCard } from '../components/TermProgressCard';
+import type { NavIntent } from '../App';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ interface ActionItem {
   count: number;
   urgency: 'normal' | 'warning' | 'urgent';
   route: string;  // future: used when we navigate to that module
+  intent?: NavIntent;
 }
 
 // ─── Skeleton ────────────────────────────────────────────────────────────────
@@ -185,7 +187,7 @@ export default function AdminDashboard({
   // mid-onboarding).
   schoolType,
 }: {
-  onNavigate: (tab: DashboardNavTarget) => void
+  onNavigate: (tab: DashboardNavTarget, intent?: NavIntent) => void
   schoolType: string | null
 }) {
   const school = useSchoolStore((s) => s.school);
@@ -553,6 +555,7 @@ export default function AdminDashboard({
       count: stats?.pendingScoreApprovals ?? 0,
       urgency: ((stats?.pendingScoreApprovals ?? 0) > 10 ? 'urgent' : 'warning') as ActionItem['urgency'],
       route: 'results',
+      intent: { pendingApprovals: true },
     },
     {
       label: 'leave requests pending',
@@ -607,7 +610,7 @@ export default function AdminDashboard({
               <ActionBadge
                 key={item.route}
                 item={item}
-                onClick={() => onNavigate(item.route as DashboardNavTarget)}
+                onClick={() => onNavigate(item.route as DashboardNavTarget, item.intent)}
               />
             ))}
           </div>

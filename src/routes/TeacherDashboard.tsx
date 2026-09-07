@@ -113,6 +113,7 @@ import {
   type PunctualityStatus,
 } from '../services/punctualityService';
 import { TermProgressCard } from '../components/TermProgressCard';
+import type { NavIntent } from '../App';
 
 // Same narrow, amended school_type branch precedent as App.tsx's own
 // isHigherEdSchool() (§3.16 — school_type is the one permitted branch
@@ -377,7 +378,7 @@ export default function TeacherDashboard({
   // component already tolerates !school by not firing its data-load effect
   // at all (see the existing `if (!school || !staffId) return` guard below).
   schoolType: string | null
-  onNavigate: (tab: DashboardNavTarget) => void
+  onNavigate: (tab: DashboardNavTarget, intent?: NavIntent) => void
 }) {
   const school = useSchoolStore((s) => s.school);
   const isHigherEd = isHigherEdSchool(schoolType);
@@ -1295,7 +1296,7 @@ export default function TeacherDashboard({
                 <button
                   className="btn btn--ghost dash-collapse-action"
                   type="button"
-                  onClick={() => onNavigate('results')}
+                  onClick={() => onNavigate('results', { pendingApprovals: true })}
                 >
                   Go to Results →
                 </button>
@@ -1488,7 +1489,7 @@ export default function TeacherDashboard({
           <QuickAction
             icon={<Icon name="pencil" />}
             label="Enter scores"
-            onClick={() => onNavigate('results')}
+            onClick={() => onNavigate('results', { pendingApprovals: true })}
           />
           <QuickAction
             icon={<Icon name="file-text" />}

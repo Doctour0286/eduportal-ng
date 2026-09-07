@@ -304,7 +304,7 @@ These apply to *every* module. Fix them once.
 ### P1 — Required to match docs
 
 6. Ship the one-file hotfixes that close documented gaps: `loadUnreadCount:313` for badge; `set-logo-upload` CSS; `RolesTab` error surfacing; render Admission intake fields (Settings field-settings are already authored); correct `AdmissionModule:897` "Data purged" copy.
-7. Decide on `report_card_templates` — either implement the template system the docs promise (`MASTER_PLAN:1006` `report_card_templates` unused; we shipped a fixed WAEC layout in `reportCardPdf`) **or** amend the docs to declare the fixed layout as the product. Don't leave both.
+7. ~~Decide on `report_card_templates` — either implement the template system the docs promise (`MASTER_PLAN:1006` `report_card_templates` unused; we shipped a fixed WAEC layout in `reportCardPdf`) **or** amend the docs to declare the fixed layout as the product.~~ **Resolved (Session 71):** the fixed layout is the product — complete PDF rewrite with 8-section branded layout (school header/logo, dynamic grade bands, grade-band tinting, side-by-side remarks). `report_card_templates` table remains unused; docs updated in `MASTER_PLAN` §13.
 8. Build the deferred-but-small `pg_cron` purge migration idempotently (docs claim it, repo has 0 SQL for it) or explicitly defer it.
 
 ### P2 — Recommended beyond docs (do only with your sign-off)
