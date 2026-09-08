@@ -18,11 +18,53 @@
  *   - School branding via theme_color (brand-600 / brand-on) — works in B&W
  *   - Grade-band subtle tinting on table rows — print-safe
  *   - Three-type hierarchy: headline (student name / position), section labels, body
+ *
+ * Font (Session 80, owner-reported bug — garbled/mojibake text on any field
+ * containing non-Latin characters, e.g. an Arabic school name): jsPDF's
+ * built-in fonts (helvetica/times/courier) only cover the WinAnsi character
+ * set. Every text draw in this file now goes through the local `text()`
+ * wrapper (not doc.text() directly), which (a) runs the string through
+ * toVisualPdfText() — reshapes+bidi-reorders Arabic so it draws correctly
+ * left-to-right — and (b) uses the custom 'ReportCard' font family
+ * (registerReportCardFont(), reportCardFont.ts) that actually has the Arabic
+ * + Latin + Naira (₦) glyphs to draw. setFont() calls below pass 'ReportCard'
+ * instead of 'helvetica' for the same reason. See pdfTextShaping.ts and
+ * scripts/build-pdf-font.cjs for the full root-cause writeup.
  */
 
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import type { ReportCardData } from './assessmentService'
+import { toVisualPdfText } from './pdfTextShaping'
+import { REPORT_CARD_FONT_REGULAR_BASE64, REPORT_CARD_FONT_BOLD_BASE64 } from '../assets/fonts/reportCardFont'
+
+// ─── Font registration ──────────────────────────────────────────────────────
+// jsPDF fonts are registered per-document (addFileToVFS/addFont live on the
+// jsPDF instance), so this runs once per generated PDF, not once globally.
+
+const FONT_FAMILY = 'ReportCard'
+
+function registerReportCardFont(doc: jsPDF): void {
+  doc.addFileToVFS('ReportCard-Regular.ttf', REPORT_CARD_FONT_REGULAR_BASE64)
+  doc.addFont('ReportCard-Regular.ttf', FONT_FAMILY, 'normal')
+  doc.addFileToVFS('ReportCard-Bold.ttf', REPORT_CARD_FONT_BOLD_BASE64)
+  doc.addFont('ReportCard-Bold.ttf', FONT_FAMILY, 'bold')
+  // No real italic weight is embedded — jsPDF falls back to synthetic
+  // slant-on-regular for 'italic' automatically when only normal/bold are
+  // registered, which is fine for the one italic use below (aggregate
+  // remark) and not worth doubling font payload size for.
+  doc.setFont(FONT_FAMILY, 'normal')
+}
+
+/**
+ * Draws text via jsPDF's doc.text(), but always through toVisualPdfText()
+ * first. Use this instead of doc.text() everywhere in this file — the one
+ * time a raw doc.text() call slips back in, any Arabic text handed to it
+ * will silently mis-shape/mis-order again.
+ */
+function text(doc: jsPDF, str: string, x: number, y: number, options?: Parameters<jsPDF['text']>[3]): void {
+  doc.text(toVisualPdfText(str), x, y, options)
+}
 
 // ─── Brand color resolution ─────────────────────────────────────────────────
 
@@ -104,6 +146,7 @@ const CONTENT_W = PAGE_W - MARGIN * 2
 function buildReportCardPdf(opts: ReportCardPdfOptions, colors: ResolvedBrandColors): jsPDF {
   const { data } = opts
   const doc = new jsPDF({ unit: 'mm', format: 'a4' })
+  registerReportCardFont(doc)
 
   let y = drawHeader(doc, opts, colors)
   y = drawStudentBlock(doc, y, data, colors)
@@ -127,21 +170,21 @@ function drawHeader(doc: jsPDF, opts: ReportCardPdfOptions, colors: ResolvedBran
 
   // School name — centered, dominant
   doc.setTextColor(...colors.brandOn)
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(16)
-  doc.text(opts.schoolName || 'School', PAGE_W / 2, 9, { align: 'center' })
+  text(doc, opts.schoolName || 'School', PAGE_W / 2, 9, { align: 'center' })
 
   // Address / contact — centered, smaller
   if (opts.schoolAddress) {
-    doc.setFont('helvetica', 'normal')
+    doc.setFont(FONT_FAMILY, 'normal')
     doc.setFontSize(7.5)
-    doc.text(opts.schoolAddress, PAGE_W / 2, 14, { align: 'center' })
+    text(doc, opts.schoolAddress, PAGE_W / 2, 14, { align: 'center' })
   }
 
   // "TERMINAL REPORT" — right-aligned in the bar
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(9)
-  doc.text('TERMINAL REPORT', PAGE_W - MARGIN, 18, { align: 'right' })
+  text(doc, 'TERMINAL REPORT', PAGE_W - MARGIN, 18, { align: 'right' })
 
   doc.setTextColor(17, 24, 39)
   return 26
@@ -165,42 +208,47 @@ function drawStudentBlock(doc: jsPDF, y: number, data: ReportCardData, colors: R
   let ly = y + 5
 
   // Student name — headline
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(13)
   doc.setTextColor(17, 24, 39)
-  doc.text(data.studentName || '—', lx, ly)
+  text(doc, data.studentName || '—', lx, ly)
 
   // Position — headline (right side)
   if (data.overallPosition !== null && data.totalGraded > 0) {
-    doc.setFont('helvetica', 'bold')
+    doc.setFont(FONT_FAMILY, 'bold')
     doc.setFontSize(13)
     doc.setTextColor(...colors.brand600)
     const posLabel = ordinal(data.overallPosition)
-    doc.text(`${posLabel}`, rx, ly, { align: 'right' })
-    doc.setFont('helvetica', 'normal')
+    // Measure while the bold/13pt font is still the active font — getTextWidth
+    // reads whatever font/size is currently set, so measuring after switching
+    // to the "of N" font/size below would use the wrong metrics and produce
+    // too small an offset, causing the two strings to overlap.
+    const posLabelWidth = doc.getTextWidth(posLabel)
+    text(doc, posLabel, rx, ly, { align: 'right' })
+    doc.setFont(FONT_FAMILY, 'normal')
     doc.setFontSize(9)
     doc.setTextColor(75, 85, 99)
-    doc.text(`of ${data.totalGraded}`, rx - doc.getTextWidth(posLabel) - 1.5, ly, { align: 'right' })
+    text(doc, `of ${data.totalGraded}`, rx - posLabelWidth - 1.5, ly, { align: 'right' })
   }
 
   ly += 6
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(9)
   doc.setTextColor(55, 65, 81)
 
   // Left column: reg no, class, session/term
   const period = data.termName ? `${data.sessionName} — ${data.termName}` : data.sessionName
-  doc.text(`Reg. No: ${data.studentCode ?? '—'}`, lx, ly)
-  doc.text(`Class: ${data.className || '—'}`, lx, ly + 5)
-  doc.text(`Session: ${period}`, lx, ly + 10)
+  text(doc, `Reg. No: ${data.studentCode ?? '—'}`, lx, ly)
+  text(doc, `Class: ${data.className || '—'}`, lx, ly + 5)
+  text(doc, `Session: ${period}`, lx, ly + 10)
 
   // Right column: attendance, days open, resumption
   const att = data.attendance
   if (att && att.totalMarked > 0) {
     const pct = Math.round((att.present / att.totalMarked) * 100)
-    doc.text(`Attendance: ${att.present}/${att.totalMarked} days (${pct}%)`, rx, ly, { align: 'right' })
+    text(doc, `Attendance: ${att.present}/${att.totalMarked} days (${pct}%)`, rx, ly, { align: 'right' })
   } else {
-    doc.text('Attendance: —', rx, ly, { align: 'right' })
+    text(doc, 'Attendance: —', rx, ly, { align: 'right' })
   }
 
   doc.setTextColor(17, 24, 39)
@@ -222,12 +270,12 @@ function drawGradingKey(
   doc.setFillColor(248, 250, 252) // very light gray
   doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text('GRADING KEY', MARGIN + 3, y + 4)
+  text(doc, 'GRADING KEY', MARGIN + 3, y + 4)
 
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(7.5)
   doc.setTextColor(55, 65, 81)
 
@@ -241,7 +289,7 @@ function drawGradingKey(
     const row = Math.floor(i / cols)
     const ix = MARGIN + 3 + col * (CONTENT_W / cols)
     const iy = y + 8 + row * 4.5
-    doc.text(items[i], ix, iy)
+    text(doc, items[i], ix, iy)
   }
 
   doc.setTextColor(17, 24, 39)
@@ -258,26 +306,31 @@ function drawSubjectsTable(
   colors: ResolvedBrandColors,
 ): number {
   if (data.subjects.length === 0) {
-    doc.setFont('helvetica', 'italic')
+    doc.setFont(FONT_FAMILY, 'normal')
     doc.setFontSize(10)
     doc.setTextColor(107, 114, 128)
-    doc.text('No approved results yet for this period.', MARGIN, y + 4)
+    text(doc, 'No approved results yet for this period.', MARGIN, y + 4)
     doc.setTextColor(17, 24, 39)
     return y + 12
   }
 
-  // Dynamic component columns: "CA 1 (20)" format
+  // Dynamic component columns: "CA 1 (20)" format. Header/body strings are
+  // pre-shaped via toVisualPdfText() here (rather than inside autoTable's own
+  // cell-drawing pass, which calls doc.text() directly and never goes through
+  // this file's text() wrapper) — subject names and grade remarks are
+  // free-text fields that could in principle contain Arabic, same as the
+  // school name that originally surfaced this bug.
   const compHeaders = data.components.map(c => `${c.name} (${c.max_score})`)
-  const head = [['#', 'Subject', ...compHeaders, 'Total', 'Grade', 'Remark', 'Pos']]
+  const head = [['#', 'Subject', ...compHeaders, 'Total', 'Grade', 'Remark', 'Pos'].map(toVisualPdfText)]
 
   const body = data.subjects.map((s, i) => [
     String(i + 1),
-    s.subject_name,
+    toVisualPdfText(s.subject_name),
     ...data.components.map(c =>
       s.componentValues[c.id] !== undefined ? String(s.componentValues[c.id]) : '—'),
     s.weighted_total.toFixed(1),
     s.grade_label ?? '—',
-    getGradeRemark(s.grade_label, bands) ?? '—',
+    toVisualPdfText(getGradeRemark(s.grade_label, bands) ?? '—'),
     s.position_in_class ? String(s.position_in_class) : '—',
   ])
 
@@ -287,6 +340,7 @@ function drawSubjectsTable(
     head,
     body,
     styles: {
+      font: FONT_FAMILY,
       fontSize: 8,
       cellPadding: 1.5,
       textColor: [17, 24, 39],
@@ -294,6 +348,7 @@ function drawSubjectsTable(
       lineWidth: 0.15,
     },
     headStyles: {
+      font: FONT_FAMILY,
       fillColor: colors.brand600,
       textColor: colors.brandOn,
       fontStyle: 'bold',
@@ -363,53 +418,62 @@ function drawSummaryRow(
   const ty = y + 6
 
   // Average
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text('AVERAGE', lx, ty - 2)
+  text(doc, 'AVERAGE', lx, ty - 2)
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(14)
   doc.setTextColor(17, 24, 39)
-  doc.text(data.average !== null ? data.average.toFixed(1) : '—', lx, ty + 4)
+  text(doc, data.average !== null ? data.average.toFixed(1) : '—', lx, ty + 4)
 
   // Grade label next to average
   if (data.average !== null) {
     const avgGrade = getAvgGradeLabel(data.average, bands)
     if (avgGrade) {
-      doc.setFont('helvetica', 'bold')
+      doc.setFont(FONT_FAMILY, 'bold')
       doc.setFontSize(10)
       doc.setTextColor(...colors.brand600)
-      doc.text(`(${avgGrade})`, lx + 20, ty + 4)
+      text(doc, `(${avgGrade})`, lx + 20, ty + 4)
     }
   }
 
   // Position
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text('CLASS POSITION', cx, ty - 2)
+  text(doc, 'CLASS POSITION', cx, ty - 2)
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(12)
   doc.setTextColor(17, 24, 39)
   if (data.overallPosition !== null && data.totalGraded > 0) {
-    doc.text(`${ordinal(data.overallPosition)} of ${data.totalGraded}`, cx, ty + 4)
+    text(doc, `${ordinal(data.overallPosition)} of ${data.totalGraded}`, cx, ty + 4)
   } else {
-    doc.text('—', cx, ty + 4)
+    text(doc, '—', cx, ty + 4)
   }
 
   // Aggregate remark
   if (data.aggregateRemark) {
-    doc.setFont('helvetica', 'normal')
+    doc.setFont(FONT_FAMILY, 'normal')
     doc.setFontSize(7.5)
     doc.setTextColor(107, 114, 128)
-    doc.text('OVERALL', rx, ty - 2, { align: 'right' })
+    text(doc, 'OVERALL', rx, ty - 2, { align: 'right' })
 
-    doc.setFont('helvetica', 'italic')
+    // Emphasis via color + size only, not font style: no italic weight is
+    // embedded in the custom font (see registerReportCardFont), and jsPDF
+    // does NOT synthesize a slant when an unregistered style is requested —
+    // it silently falls back to a built-in standard font instead (confirmed
+    // by testing: requesting 'italic' here with only 'normal'/'bold'
+    // registered swapped to Times-Italic, which has no Arabic glyphs and
+    // would have reintroduced this exact bug for this one field). Brand-
+    // colored + slightly larger reads as "distinct/emphasized" without
+    // that risk.
+    doc.setFont(FONT_FAMILY, 'bold')
     doc.setFontSize(9)
-    doc.setTextColor(55, 65, 81)
-    doc.text(data.aggregateRemark, rx, ty + 4, { align: 'right', maxWidth: 55 })
+    doc.setTextColor(...colors.brand600)
+    text(doc, data.aggregateRemark, rx, ty + 4, { align: 'right', maxWidth: 55 })
   }
 
   doc.setTextColor(17, 24, 39)
@@ -436,20 +500,20 @@ function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
   doc.setFillColor(248, 250, 252)
   doc.roundedRect(MARGIN, y, halfW, boxH, 1.5, 1.5, 'F')
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text("CLASS TEACHER'S REMARK", MARGIN + 3, y + 4)
+  text(doc, "CLASS TEACHER'S REMARK", MARGIN + 3, y + 4)
 
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(9)
   doc.setTextColor(55, 65, 81)
   const remark = data.teacherRemark?.trim()
   if (remark) {
-    doc.text(remark, MARGIN + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
+    text(doc, remark, MARGIN + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
   } else {
     doc.setTextColor(180, 180, 180)
-    doc.text('________________________________', MARGIN + 3, y + 10)
+    text(doc, '________________________________', MARGIN + 3, y + 10)
   }
 
   // Principal's remark (right)
@@ -457,15 +521,15 @@ function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
   doc.setFillColor(248, 250, 252)
   doc.roundedRect(rx, y, halfW, boxH, 1.5, 1.5, 'F')
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text("PRINCIPAL'S REMARK", rx + 3, y + 4)
+  text(doc, "PRINCIPAL'S REMARK", rx + 3, y + 4)
 
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(9)
   doc.setTextColor(180, 180, 180)
-  doc.text('________________________________', rx + 3, y + 10)
+  text(doc, '________________________________', rx + 3, y + 10)
 
   doc.setTextColor(17, 24, 39)
   return y + boxH + 4
@@ -486,19 +550,19 @@ function drawAttendanceSummary(doc: jsPDF, y: number, data: ReportCardData): num
   doc.setFillColor(248, 250, 252)
   doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
 
-  doc.setFont('helvetica', 'bold')
+  doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
-  doc.text('ATTENDANCE SUMMARY', MARGIN + 3, y + 4)
+  text(doc, 'ATTENDANCE SUMMARY', MARGIN + 3, y + 4)
 
   const absent = att.totalMarked - att.present
   const pct = Math.round((att.present / att.totalMarked) * 100)
   const summary = `Days Present: ${att.present}  |  Days Absent: ${absent}  |  Attendance Rate: ${pct}%`
 
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(8.5)
   doc.setTextColor(55, 65, 81)
-  doc.text(summary, PAGE_W / 2, y + 9, { align: 'center' })
+  text(doc, summary, PAGE_W / 2, y + 9, { align: 'center' })
 
   // Color indicator for attendance rate
   const indicatorColor: [number, number, number] =
@@ -520,21 +584,21 @@ function drawSignatures(doc: jsPDF, y: number): void {
   }
 
   const thirdW = CONTENT_W / 3
-  doc.setFont('helvetica', 'normal')
+  doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(8)
   doc.setTextColor(75, 85, 99)
 
   // Class teacher
-  doc.text('________________________', MARGIN, y + 6)
-  doc.text('Class Teacher', MARGIN, y + 10)
+  text(doc, '________________________', MARGIN, y + 6)
+  text(doc, 'Class Teacher', MARGIN, y + 10)
 
   // Head teacher / Principal
-  doc.text('________________________', MARGIN + thirdW, y + 6)
-  doc.text('Head Teacher / Principal', MARGIN + thirdW, y + 10)
+  text(doc, '________________________', MARGIN + thirdW, y + 6)
+  text(doc, 'Head Teacher / Principal', MARGIN + thirdW, y + 10)
 
   // Date
-  doc.text('________________________', MARGIN + thirdW * 2, y + 6)
-  doc.text('Date', MARGIN + thirdW * 2, y + 10)
+  text(doc, '________________________', MARGIN + thirdW * 2, y + 6)
+  text(doc, 'Date', MARGIN + thirdW * 2, y + 10)
 
   doc.setTextColor(17, 24, 39)
 }
@@ -551,7 +615,7 @@ function drawPageFooter(doc: jsPDF): void {
     doc.setPage(i)
     const ph = doc.internal.pageSize.getHeight()
 
-    doc.setFont('helvetica', 'normal')
+    doc.setFont(FONT_FAMILY, 'normal')
     doc.setFontSize(7)
     doc.setTextColor(156, 163, 175)
 
@@ -560,8 +624,8 @@ function drawPageFooter(doc: jsPDF): void {
     doc.setLineWidth(0.2)
     doc.line(MARGIN, ph - 12, PAGE_W - MARGIN, ph - 12)
 
-    doc.text(generated, MARGIN, ph - 8)
-    doc.text(`Page ${i} of ${pageCount}`, PAGE_W - MARGIN, ph - 8, { align: 'right' })
+    text(doc, generated, MARGIN, ph - 8)
+    text(doc, `Page ${i} of ${pageCount}`, PAGE_W - MARGIN, ph - 8, { align: 'right' })
   }
 }
 

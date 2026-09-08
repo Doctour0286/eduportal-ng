@@ -250,6 +250,31 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
       .sort((a, b) => a.subject_name.localeCompare(b.subject_name))
   }, [assignments, selectedClassNodeId])
 
+  // ── Pill-picker collapse state (matching AttendanceModule.tsx's own
+  // two-tier picker precedent — see that file's "Class selector" block).
+  // Results only has one real tier of grouping (class → subject, a genuine
+  // cascade) rather than Attendance's parent-group/leaf split, so there is
+  // no separate "parent pill" row here — just Class pills, then Subject
+  // pills once a class is picked, then collapse to one summary bar once
+  // both are chosen. Re-expands on tap, same as Attendance's "Change".
+  const [resPickerExpanded, setResPickerExpanded] = useState(true)
+  const resHasFullSelection = !!selectedClassNodeId && !!selectedAssign
+  const resSelectorLabel = selectedAssign
+    ? `${selectedAssign.class_node_name} · ${selectedAssign.subject_name}`
+    : ''
+
+  function selectResultsClass(classNodeId: string) {
+    setSelectedClassNodeId(classNodeId)
+    setSelectedAssign(null)
+    // Stay expanded — picking a class is only step 1; the subject pills for
+    // it need to render right away so the two-step flow feels continuous.
+  }
+
+  function selectResultsAssign(a: TeachingAssignment) {
+    setSelectedAssign(a)
+    setResPickerExpanded(false)
+  }
+
   // Online/offline detection effect is declared further below, after
   // loadGrid() exists — it needs to call loadGrid() on reconnect, see
   // "Online / offline detection" near the offline-queue flush.
@@ -652,46 +677,63 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
         </div>
       )
     }
+    // Collapsed summary bar — same pattern and classnames as
+    // AttendanceModule.tsx's .att-selector-summary, once both a class and a
+    // subject are picked and the picker isn't explicitly reopened.
+    if (resHasFullSelection && !resPickerExpanded) {
+      return (
+        <div className="res-selector-wrap">
+          <button
+            type="button"
+            className="att-selector-summary"
+            onClick={() => setResPickerExpanded(true)}
+          >
+            <span className="att-selector-summary-label">{resSelectorLabel}</span>
+            <span className="att-selector-summary-change">
+              Change <Icon name="chevron-down" size={14} />
+            </span>
+          </button>
+        </div>
+      )
+    }
+
     return (
-      <div className="res-selector-wrap res-selector-two-step">
-        <div className="res-selector-group">
-          <label className="res-selector-label">Class</label>
-          <select
-            className="res-selector"
-            value={selectedClassNodeId ?? ''}
-            onChange={e => {
-              const val = e.target.value || null
-              setSelectedClassNodeId(val)
-              setSelectedAssign(null)
-            }}
-          >
-            <option value="">— pick a class —</option>
-            {uniqueClasses.map(c => (
-              <option key={c.classNodeId} value={c.classNodeId}>
-                {c.className}
-              </option>
-            ))}
-          </select>
+      <div className="res-selector-wrap">
+        <label className="att-selector-label">Class</label>
+        <div className="att-pill-row att-pill-row--class">
+          {uniqueClasses.map(c => (
+            <button
+              key={c.classNodeId}
+              type="button"
+              className={`att-pill${selectedClassNodeId === c.classNodeId ? ' att-pill--active' : ''}`}
+              onClick={() => selectResultsClass(c.classNodeId)}
+            >
+              {c.className}
+            </button>
+          ))}
         </div>
-        <div className="res-selector-group">
-          <label className="res-selector-label">Subject</label>
-          <select
-            className="res-selector"
-            value={selectedAssign?.id ?? ''}
-            disabled={!selectedClassNodeId}
-            onChange={e => {
-              const found = assignments.find(a => a.id === e.target.value) ?? null
-              setSelectedAssign(found)
-            }}
-          >
-            <option value="">{selectedClassNodeId ? '— pick a subject —' : '— select class first —'}</option>
-            {subjectsForClass.map(a => (
-              <option key={a.id} value={a.id}>
-                {a.subject_name}
-              </option>
-            ))}
-          </select>
-        </div>
+
+        {selectedClassNodeId && (
+          <>
+            <label className="att-selector-label">Subject</label>
+            {subjectsForClass.length === 0 ? (
+              <p className="res-empty-sub">No subjects assigned for this class yet.</p>
+            ) : (
+              <div className="att-pill-row att-pill-row--class">
+                {subjectsForClass.map(a => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    className={`att-pill${selectedAssign?.id === a.id ? ' att-pill--active' : ''}`}
+                    onClick={() => selectResultsAssign(a)}
+                  >
+                    {a.subject_name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
     )
   }
