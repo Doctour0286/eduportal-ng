@@ -62,10 +62,7 @@ import {
   loadPromotionRules,
   savePromotionRule,
   deletePromotionRule,
-  previewPromotion,
-  applyPromotions,
   type SecondaryPromotionRule,
-  type PromotionPreviewRow,
 } from '../services/promotionService'
 import {
   loadSessions,
@@ -1231,7 +1228,7 @@ function GradingSection({ schoolId }: { schoolId: string }) {
 
 // ─── Tab 2: Promotion (secondary) ─────────────────────────────────────────────
 
-export function PromotionTabSecondary({ schoolId, actorRecordId }: { schoolId: string; actorRecordId: string | null }) {
+export function PromotionTabSecondary({ schoolId }: { schoolId: string }) {
   const [rules, setRules] = useState<SecondaryPromotionRule[]>([])
   const [leafClasses, setLeafClasses] = useState<ClassNode[]>([])
   const [loading, setLoading] = useState(true)
@@ -1261,8 +1258,6 @@ export function PromotionTabSecondary({ schoolId, actorRecordId }: { schoolId: s
   useEffect(() => { load() }, [load])
 
   if (loading) return <Skeletonish />
-
-  const currentSessionName = sessionsList.find(s => s.id === sessionId)?.name ?? ''
 
   return (
     <div>

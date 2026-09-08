@@ -976,11 +976,11 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
           {!isOnline && <span className="res-offline-badge"><Icon name="cloud" size={14} /> offline</span>}
         </div>
 
-        {/* Assignment selector */}
-        {renderAssignmentSelector()}
+        {/* Assignment selector — hidden in promotion mode (has its own class picker) */}
+        {mode !== 'promotion' && renderAssignmentSelector()}
 
-        {/* Term tabs — only when school uses terms */}
-        {selectedAssign && renderTermSelector()}
+        {/* Term tabs — only when school uses terms, not in promotion mode */}
+        {mode !== 'promotion' && selectedAssign && renderTermSelector()}
 
         {/* Mode switcher — report cards need a window + remark permission */}
         {(isAdmin || canManageRemarks) && (
@@ -1022,7 +1022,6 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
       <div className="res-body">
         {mode === 'promotion' && isAdmin ? (
           <PromotionPanel
-            schoolId={schoolId}
             session={session}
             selectedTerm={selectedTerm}
             staffId={staffId}
@@ -1067,7 +1066,6 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
 // Only the "Run promotion" action lives here. Rule CRUD stays in Settings.
 
 function PromotionPanel({
-  schoolId,
   session,
   selectedTerm,
   staffId,
@@ -1087,7 +1085,6 @@ function PromotionPanel({
   promoClassId,
   setPromoClassId,
 }: {
-  schoolId: string
   session: Session | null
   selectedTerm: Term | null
   staffId: string

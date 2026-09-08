@@ -4719,6 +4719,8 @@ Do not skip ahead while earlier items remain unchecked.
 
 **Verified:** `npm run build` clean. Zero direct `.from('subject_results')` queries remain in client code. All consumers use `rpc('get_subject_results', ...)`.
 
+**⚠️ Deployment gap (found Session 79):** Application code was migrated correctly, but the SQL function itself was never confirmed created in the live database. Owner's screenshot showed `Could not find the function public.get_subject_results(...)`. The migration file `migration_fix_subject_results_security.sql` must be run via Supabase SQL Editor — it is written `create or replace` so re-running is safe.
+
 **Still open (not addressed here):**
 - RLS policies on `grade_scales`, `staff`, `class_nodes`, `periods`, `attendance_records`, `announcements` should be verified/extended if not already school-scoped — the explicit `school_id` filters are defense-in-depth, not a replacement for proper RLS
 - `C5` (pagination/virtualization) remains open — not addressed in this fix

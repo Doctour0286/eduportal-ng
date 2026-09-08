@@ -372,7 +372,7 @@ export default function SettingsModule({ schoolId, isAdmin, themeMode, schoolTyp
         {safeActiveTab === 'promotion'    && (
           isHigherInstitutionSchoolType(schoolType)
             ? <PromotionTab schoolId={schoolId} actorRecordId={actorRecordId ?? null} />
-            : <PromotionTabSecondary schoolId={schoolId} actorRecordId={actorRecordId ?? null} />
+            : <PromotionTabSecondary schoolId={schoolId} />
         )}
         {safeActiveTab === 'admission'    && <AdmissionSettingsTab schoolId={schoolId} />}
         {safeActiveTab === 'subjects'     && <SubjectsTab     schoolId={schoolId} />}

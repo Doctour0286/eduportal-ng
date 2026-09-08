@@ -7008,6 +7008,10 @@ body {
   flex-direction: row;
   gap: var(--space-3);
   align-items: flex-end;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
 }
 
 .res-selector-two-step .res-selector-group {

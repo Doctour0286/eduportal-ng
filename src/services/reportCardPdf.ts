@@ -108,8 +108,8 @@ function buildReportCardPdf(opts: ReportCardPdfOptions, colors: ResolvedBrandCol
   let y = drawHeader(doc, opts, colors)
   y = drawStudentBlock(doc, y, data, colors)
   y = drawGradingKey(doc, y, opts.gradeBands ?? [], colors)
-  y = drawSubjectsTable(doc, y, data, colors)
-  y = drawSummaryRow(doc, y, data, colors)
+  y = drawSubjectsTable(doc, y, data, opts.gradeBands ?? [], colors)
+  y = drawSummaryRow(doc, y, data, opts.gradeBands ?? [], colors)
   y = drawRemarks(doc, y, data)
   y = drawAttendanceSummary(doc, y, data)
   drawSignatures(doc, y)
@@ -213,7 +213,7 @@ function drawGradingKey(
   doc: jsPDF,
   y: number,
   bands: { min_score: number; max_score: number; grade_label: string; remark: string | null }[],
-  colors: ResolvedBrandColors,
+  _colors: ResolvedBrandColors,
 ): number {
   if (bands.length === 0) return y
 
@@ -235,7 +235,6 @@ function drawGradingKey(
   const items = bands.map(b => `${b.grade_label} (${b.min_score}–${b.max_score})`)
   const itemWidth = items.map(i => doc.getTextWidth(i)).reduce((a, b) => Math.max(a, b), 0) + 8
   const cols = Math.max(1, Math.floor(CONTENT_W / itemWidth))
-  const rows = Math.ceil(items.length / cols)
 
   for (let i = 0; i < items.length; i++) {
     const col = i % cols
@@ -255,6 +254,7 @@ function drawSubjectsTable(
   doc: jsPDF,
   y: number,
   data: ReportCardData,
+  bands: { min_score: number; max_score: number; grade_label: string; remark: string | null }[],
   colors: ResolvedBrandColors,
 ): number {
   if (data.subjects.length === 0) {
@@ -277,7 +277,7 @@ function drawSubjectsTable(
       s.componentValues[c.id] !== undefined ? String(s.componentValues[c.id]) : '—'),
     s.weighted_total.toFixed(1),
     s.grade_label ?? '—',
-    getGradeRemark(s.grade_label, data) ?? '—',
+    getGradeRemark(s.grade_label, bands) ?? '—',
     s.position_in_class ? String(s.position_in_class) : '—',
   ])
 
@@ -327,12 +327,10 @@ function drawSubjectsTable(
   return tableEnd + 6
 }
 
-function getGradeRemark(gradeLabel: string | null, data: ReportCardData): string | null {
+function getGradeRemark(gradeLabel: string | null, bands: { grade_label: string; remark: string | null }[]): string | null {
   if (!gradeLabel) return null
-  // Try to find a matching grade band remark — this is the per-band remark,
-  // not the aggregate remark. For the subject-level remark we use the band's
-  // remark field if available.
-  return null // The remark column will show the aggregate remark in the summary
+  const band = bands.find(b => b.grade_label === gradeLabel)
+  return band?.remark ?? null
 }
 
 // ─── 5. Totals / summary row ────────────────────────────────────────────────
@@ -341,6 +339,7 @@ function drawSummaryRow(
   doc: jsPDF,
   y: number,
   data: ReportCardData,
+  bands: { min_score: number; max_score: number; grade_label: string; remark: string | null }[],
   colors: ResolvedBrandColors,
 ): number {
   const boxH = 14
@@ -363,13 +362,7 @@ function drawSummaryRow(
   const rx = PAGE_W - MARGIN - 4
   const ty = y + 6
 
-  // Total marks
-  const totalScored = data.subjects.reduce((s, sub) => s + sub.weighted_total, 0)
-  const totalPossible = data.components.reduce((s, c) => {
-    const maxPerStudent = c.max_score
-    return s + maxPerStudent
-  }, 0) * (data.totalGraded || 1)
-  // Simpler: just show average
+  // Average
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(7.5)
   doc.setTextColor(107, 114, 128)
@@ -382,7 +375,7 @@ function drawSummaryRow(
 
   // Grade label next to average
   if (data.average !== null) {
-    const avgGrade = getAvgGradeLabel(data.average, data)
+    const avgGrade = getAvgGradeLabel(data.average, bands)
     if (avgGrade) {
       doc.setFont('helvetica', 'bold')
       doc.setFontSize(10)
@@ -423,10 +416,9 @@ function drawSummaryRow(
   return y + boxH + 5
 }
 
-function getAvgGradeLabel(avg: number, data: ReportCardData): string | null {
-  // Use the first subject's grade bands as reference — they're school-wide
-  // This is a simplification; the real grade lookup happens server-side
-  return null
+function getAvgGradeLabel(avg: number, bands: { min_score: number; max_score: number; grade_label: string }[]): string | null {
+  const band = bands.find(b => avg >= b.min_score && avg <= b.max_score)
+  return band?.grade_label ?? null
 }
 
 // ─── 6. Teacher + Principal remarks ─────────────────────────────────────────
