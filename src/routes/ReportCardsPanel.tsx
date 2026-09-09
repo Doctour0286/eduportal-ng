@@ -52,6 +52,7 @@ import { downloadReportCardPdf, downloadBatchReportCardPdf, type ReportCardPdfOp
 import { loadCurrentSession, loadTermsForSession, type Session, type Term } from '../services/resultsService'
 import { loadAllLeafClasses, type ClassNode } from '../services/attendanceService'
 import { getStudentPhotoSignedUrl } from '../services/studentsService'
+import { loadPublicConfig } from '../services/settingsService'
 
 type BootState = 'booting' | 'ready' | 'error'
 type LoadState = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
@@ -91,15 +92,23 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
   const [classes, setClasses] = useState<ClassNode[]>([])
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
   const [gradeBands, setGradeBands] = useState<GradeBandRow[]>([])
+  // Session 82 (owner feedback, real-device test): school address/phone/
+  // email on the printed card — these already exist as school_public_
+  // config.contact_info (same source PublicHomepage.tsx's contact section
+  // reads), NOT a new field; just wasn't wired into the PDF options before.
+  const [schoolAddress, setSchoolAddress] = useState<string | null>(null)
+  const [schoolPhone, setSchoolPhone] = useState<string | null>(null)
+  const [schoolEmail, setSchoolEmail] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     async function boot() {
       setBootState('booting')
-      const [sessionRes, classesRes, bandsRes] = await Promise.all([
+      const [sessionRes, classesRes, bandsRes, publicConfigRes] = await Promise.all([
         loadCurrentSession(),
         loadAllLeafClasses(schoolId),
         loadGradeBands(schoolId),
+        loadPublicConfig(schoolId),
       ])
       if (cancelled) return
       if (!sessionRes.ok) { setBootError(sessionRes.error); setBootState('error'); return }
@@ -108,6 +117,11 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
       setSession(sessionRes.data)
       setClasses(classesRes.data)
       if (bandsRes.ok) setGradeBands(bandsRes.data)
+      if (publicConfigRes.data?.contact_info) {
+        setSchoolAddress(publicConfigRes.data.contact_info.address ?? null)
+        setSchoolPhone(publicConfigRes.data.contact_info.phone ?? null)
+        setSchoolEmail(publicConfigRes.data.contact_info.email ?? null)
+      }
 
       if (sessionRes.data.uses_terms) {
         const termsRes = await loadTermsForSession(sessionRes.data.id)
@@ -294,6 +308,9 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
 
     return {
       schoolName,
+      schoolAddress: schoolAddress ?? undefined,
+      schoolPhone,
+      schoolEmail,
       logoUrl: schoolLogoUrl,
       gradeBands,
       data: { ...res.data, studentPhotoUrl: photoUrl },

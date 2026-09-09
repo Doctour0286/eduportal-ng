@@ -64,7 +64,7 @@
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import type { ReportCardData } from './assessmentService'
-import { toVisualPdfText } from './pdfTextShaping'
+import { drawRtlAwareText, drawRtlAwareWrappedText, countWrappedLines, toVisualPdfText } from './pdfTextShaping'
 import { loadImageForPdf, fitWithinBox, type LoadedImage } from './pdfImageLoader'
 import { REPORT_CARD_FONT_REGULAR_BASE64, REPORT_CARD_FONT_BOLD_BASE64 } from '../assets/fonts/reportCardFont'
 
@@ -97,8 +97,39 @@ function registerReportCardFont(doc: jsPDF): void {
  * time a raw doc.text() call slips back in, any Arabic text handed to it
  * will silently mis-shape/mis-order again.
  */
-function text(doc: jsPDF, str: string, x: number, y: number, options?: Parameters<jsPDF['text']>[3]): void {
-  doc.text(toVisualPdfText(str), x, y, options)
+/**
+ * text()
+ * Every text draw in this file goes through this wrapper instead of
+ * calling doc.text() directly — it routes to drawRtlAwareText()
+ * (pdfTextShaping.ts), which lays out each word's position itself rather
+ * than handing jsPDF a single string to draw, because jsPDF's own
+ * multi-word RTL rendering has a confirmed, unfixable-from-the-outside bug
+ * (see pdfTextShaping.ts's file header for the full investigation before
+ * concluding this).
+ *
+ * Only `align` is forwarded — `maxWidth` (jsPDF's own auto-wrap option) is
+ * NOT supported here, because jsPDF's line-splitting for auto-wrap has the
+ * same RTL-unsafe internals as its single-line draw. Callers that need
+ * wrapping use wrappedText() below instead; the couple of `maxWidth`-only
+ * call sites that existed before this rewrite (safeguards against a
+ * long student name overflowing, not real expected multi-line wrapping)
+ * were checked individually and either don't need real wrapping or were
+ * moved to wrappedText().
+ */
+function text(doc: jsPDF, str: string, x: number, y: number, options?: { align?: 'left' | 'center' | 'right' }): void {
+  drawRtlAwareText(doc, str, x, y, options)
+}
+
+/**
+ * wrappedText()
+ * For text that genuinely needs to wrap across multiple lines (a remark, a
+ * notice) — see text()'s own comment for why this can't just be `maxWidth`
+ * on a regular text() call. Returns the number of lines drawn (mirrors
+ * jsPDF's own doc.splitTextToSize(...).length, which every prior call site
+ * needing a line count used).
+ */
+function wrappedText(doc: jsPDF, str: string, x: number, y: number, maxWidth: number, lineHeight: number, options?: { align?: 'left' | 'center' | 'right' }): number {
+  return drawRtlAwareWrappedText(doc, str, x, y, maxWidth, lineHeight, options)
 }
 
 /**
@@ -180,6 +211,8 @@ function getGradeTint(gradeLabel: string | null): [number, number, number] | nul
 export interface ReportCardPdfOptions {
   schoolName: string
   schoolAddress?: string
+  schoolPhone?: string | null
+  schoolEmail?: string | null
   logoUrl?: string | null
   gradeBands?: { min_score: number; max_score: number; grade_label: string; remark: string | null }[]
   data: ReportCardData
@@ -316,8 +349,8 @@ async function drawOneReportCard(
 ): Promise<void> {
   const { data } = opts
 
-  let y = drawHeader(doc, opts, colors, images.logo)
-  y = drawStudentBlock(doc, y, data, colors, images.photo)
+  let y = drawHeader(doc, opts, colors, images.logo, images.photo)
+  y = drawStudentBlock(doc, y, data, colors)
   y = drawGradingKey(doc, y, opts.gradeBands ?? [], colors)
   y = drawSubjectsTable(doc, y, data, opts.gradeBands ?? [], colors)
   y = drawSummaryRow(doc, y, data, opts.gradeBands ?? [], colors)
@@ -342,47 +375,88 @@ function drawHeader(
   opts: ReportCardPdfOptions,
   colors: ResolvedBrandColors,
   logo: LoadedImage | null,
+  photo: LoadedImage | null,
 ): number {
-  // Brand bar
-  doc.setFillColor(...colors.brand600)
-  doc.rect(0, 0, PAGE_W, 20, 'F')
+  // Session 82 redesign (owner feedback on a real device): the solid
+  // colored header bar is gone — plain white background, matching the
+  // reference report-card samples the owner shared, and reads more like a
+  // formal institutional letterhead than an app-branded banner. Logo sits
+  // top-left, passport photo top-right (moved OUT of the student-info
+  // block below, where it was cramped next to the position/"of N" text —
+  // this is the standard convention the reference samples use: logo and
+  // photo bookend the header, school name centered between them).
+  const HEADER_H = 30
+  const IMG_SLOT = 20
 
-  // Logo — left-aligned inside the bar, fitted to a fixed square slot so
-  // wide/square/portrait logos all sit consistently regardless of their
-  // native aspect ratio (see pdfImageLoader.ts's fitWithinBox).
-  const LOGO_SLOT = 16
+  // Logo — top-left
   if (logo) {
-    const { w, h } = fitWithinBox(logo, LOGO_SLOT, LOGO_SLOT)
-    // Center within the slot so a non-square logo doesn't hug one edge.
-    const lx = MARGIN + (LOGO_SLOT - w) / 2
-    const ly = (20 - h) / 2
-    safeAddImage(doc, logo, lx, ly, w, h)
+    const { w, h } = fitWithinBox(logo, IMG_SLOT, IMG_SLOT)
+    safeAddImage(doc, logo, MARGIN, (HEADER_H - h) / 2, w, h)
   }
 
-  // School name — centered, dominant. Still centered on the full page width
-  // (not re-centered between logo and right edge) — a logo present on some
-  // report cards and absent on others (e.g. before a school uploads one)
-  // must not shift the school name's horizontal position between the two
-  // states, which would look like a layout bug when comparing two cards.
-  doc.setTextColor(...colors.brandOn)
-  doc.setFont(FONT_FAMILY, 'bold')
-  doc.setFontSize(16)
-  text(doc, opts.schoolName || 'School', PAGE_W / 2, 9, { align: 'center' })
-
-  // Address / contact — centered, smaller
-  if (opts.schoolAddress) {
-    doc.setFont(FONT_FAMILY, 'normal')
-    doc.setFontSize(7.5)
-    text(doc, opts.schoolAddress, PAGE_W / 2, 14, { align: 'center' })
+  // Passport photo — top-right, mirroring the logo's placement. A bordered
+  // box only when it actually renders (see safeAddImage's own contract) —
+  // no placeholder box when a student has no photo yet, since a bordered
+  // empty box would read as a rendering bug rather than "not uploaded".
+  if (photo) {
+    const { w, h } = fitWithinBox(photo, IMG_SLOT, IMG_SLOT)
+    const px = PAGE_W - MARGIN - w
+    const py = (HEADER_H - h) / 2
+    const drew = safeAddImage(doc, photo, px, py, w, h)
+    if (drew) {
+      doc.setDrawColor(203, 213, 225)
+      doc.setLineWidth(0.2)
+      doc.rect(px, py, w, h)
+    }
   }
 
-  // "TERMINAL REPORT" — right-aligned in the bar
-  doc.setFont(FONT_FAMILY, 'bold')
-  doc.setFontSize(9)
-  text(doc, 'TERMINAL REPORT', PAGE_W - MARGIN, 18, { align: 'right' })
-
+  // School name — centered, bolder/larger than before (owner feedback:
+  // "font should be bolder") — bumped from 16pt to 18pt, and drawn twice
+  // with a hair offset to fake a heavier weight, since the embedded font
+  // only has one bold weight and jsPDF has no "extra-bold" to request (see
+  // registerReportCardFont's own note on why a second weight isn't
+  // embedded — this trick avoids doubling font payload size for one extra
+  // weight used in exactly one place).
   doc.setTextColor(17, 24, 39)
-  return 26
+  doc.setFont(FONT_FAMILY, 'bold')
+  doc.setFontSize(18)
+  text(doc, opts.schoolName || 'School', PAGE_W / 2 + 0.15, 12, { align: 'center' })
+  text(doc, opts.schoolName || 'School', PAGE_W / 2, 12, { align: 'center' })
+
+  // Address, then phone/email on their own line below — only drawn when
+  // set (owner: "if school address and contact exist"). Two separate
+  // lines rather than cramming both onto one, since a school with a long
+  // address AND both a phone and email would otherwise overflow or need
+  // its own wrap logic.
+  let contactY = 18
+  doc.setFont(FONT_FAMILY, 'normal')
+  doc.setFontSize(8)
+  doc.setTextColor(75, 85, 99)
+  if (opts.schoolAddress) {
+    text(doc, opts.schoolAddress, PAGE_W / 2, contactY, { align: 'center' })
+    contactY += 4.5
+  }
+  const contactParts = [opts.schoolPhone, opts.schoolEmail].filter((v): v is string => !!v)
+  if (contactParts.length > 0) {
+    text(doc, contactParts.join('   •   '), PAGE_W / 2, contactY, { align: 'center' })
+    contactY += 4.5
+  }
+
+  // "TERMINAL REPORT" label, centered below whatever contact lines were
+  // drawn (or right under the name if there are none) — small caps-style
+  // label, no longer competing with a colored bar for attention.
+  doc.setFont(FONT_FAMILY, 'bold')
+  doc.setFontSize(8)
+  doc.setTextColor(...colors.brand600)
+  text(doc, 'TERMINAL REPORT', PAGE_W / 2, contactY + 1, { align: 'center' })
+
+  // Thin rule under the whole header band, closing it off from the content
+  // below now that there's no colored fill to do that visually.
+  doc.setDrawColor(226, 232, 240)
+  doc.setLineWidth(0.3)
+  doc.line(MARGIN, HEADER_H, PAGE_W - MARGIN, HEADER_H)
+
+  return HEADER_H + 4
 }
 
 // ─── 2. Student info block ──────────────────────────────────────────────────
@@ -392,16 +466,13 @@ function drawStudentBlock(
   y: number,
   data: ReportCardData,
   colors: ResolvedBrandColors,
-  photo: LoadedImage | null,
 ): number {
-  // Session 81: taller than before to make room for the passport photo,
-  // and attendance is DELIBERATELY NOT drawn here anymore — it used to
-  // appear both in this block AND in its own dedicated section further
-  // down the page (a real duplication the owner flagged); the dedicated
-  // section (drawAttendanceSummary, richer — includes days-absent and a
-  // rate indicator) is now the only place attendance appears.
-  const PHOTO_SLOT = 20
-  const blockH = photo ? PHOTO_SLOT + 6 : 26
+  // Session 82: no longer takes a `photo` param — the passport photo now
+  // lives in the header (see drawHeader), so this block goes back to being
+  // a plain text block, same height regardless of whether the student has
+  // a photo. Attendance is still deliberately NOT drawn here — see the
+  // dedicated section further down the page (drawAttendanceSummary).
+  const blockH = 26
 
   // Background tint
   doc.setFillColor(...colors.brand50)
@@ -411,42 +482,17 @@ function drawStudentBlock(
   doc.setFillColor(...colors.brand600)
   doc.rect(MARGIN, y, 2, blockH, 'F')
 
-  // Passport photo — right side of the block, fixed square slot. Placed on
-  // the right (not left, where the accent bar and text naturally start) so
-  // it doesn't collide with the position/"of N" text also right-aligned in
-  // this block on the FIRST line only — the photo spans the block's full
-  // height, so text below the name line still has the full row width to
-  // itself on the left.
-  let textRightEdge = PAGE_W - MARGIN - 4
-  if (photo) {
-    const { w, h } = fitWithinBox(photo, PHOTO_SLOT, PHOTO_SLOT)
-    const px = PAGE_W - MARGIN - 4 - w
-    const py = y + (blockH - h) / 2
-    const drew = safeAddImage(doc, photo, px, py, w, h)
-    if (drew) {
-      // Thin border so a light/white-background photo doesn't blend into
-      // the block's own light background tint. Only drawn if the image
-      // itself actually rendered — an empty bordered box where a photo
-      // failed to load would look like a rendering bug, not a graceful
-      // degradation.
-      doc.setDrawColor(203, 213, 225)
-      doc.setLineWidth(0.2)
-      doc.rect(px, py, w, h)
-      textRightEdge = px - 4
-    }
-  }
-
   const lx = MARGIN + 5
-  const rx = textRightEdge
+  const rx = PAGE_W - MARGIN - 4
   let ly = y + 5
 
   // Student name — headline
   doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(13)
   doc.setTextColor(17, 24, 39)
-  text(doc, data.studentName || '—', lx, ly, { maxWidth: rx - lx - 20 })
+  text(doc, data.studentName || '—', lx, ly)
 
-  // Position — headline (right side, left of the photo if present)
+  // Position — headline (right side)
   if (data.overallPosition !== null && data.totalGraded > 0) {
     doc.setFont(FONT_FAMILY, 'bold')
     doc.setFontSize(13)
@@ -469,8 +515,7 @@ function drawStudentBlock(
   doc.setFontSize(9)
   doc.setTextColor(55, 65, 81)
 
-  // Reg no, class, session/term — attendance no longer duplicated here,
-  // see this function's own comment above.
+  // Reg no, class, session/term
   const period = data.termName ? `${data.sessionName} — ${data.termName}` : data.sessionName
   text(doc, `Reg. No: ${data.studentCode ?? '—'}`, lx, ly)
   text(doc, `Class: ${data.className || '—'}`, lx, ly + 5)
@@ -698,7 +743,7 @@ function drawSummaryRow(
     doc.setFont(FONT_FAMILY, 'bold')
     doc.setFontSize(9)
     doc.setTextColor(...colors.brand600)
-    text(doc, data.aggregateRemark, rx, ty + 4, { align: 'right', maxWidth: 55 })
+    wrappedText(doc, data.aggregateRemark, rx, ty + 4, 55, 4.5, { align: 'right' })
   }
 
   doc.setTextColor(17, 24, 39)
@@ -747,7 +792,7 @@ function drawRemarks(
   doc.setTextColor(55, 65, 81)
   const remark = data.teacherRemark?.trim()
   if (remark) {
-    text(doc, remark, MARGIN + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
+    wrappedText(doc, remark, MARGIN + 3, y + 10, halfW - 6, 4.1)
   } else {
     doc.setTextColor(180, 180, 180)
     text(doc, '________________________________', MARGIN + 3, y + 10)
@@ -771,7 +816,7 @@ function drawRemarks(
   const principalRemark = data.principalRemark?.trim()
   if (principalRemark) {
     doc.setTextColor(55, 65, 81)
-    text(doc, principalRemark, rx + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
+    wrappedText(doc, principalRemark, rx + 3, y + 10, halfW - 6, 4.1)
   } else {
     doc.setTextColor(180, 180, 180)
     text(doc, '________________________________', rx + 3, y + 10)
@@ -826,18 +871,15 @@ function drawNotice(doc: jsPDF, y: number, data: ReportCardData): number {
   const notice = data.settings?.notice?.trim()
   if (!notice) return y
 
-  doc.setFont(FONT_FAMILY, 'bold')
-  doc.setFontSize(7.5)
-  doc.setTextColor(107, 114, 128)
-  const labelY = y + 4
-  text(doc, 'NOTICE', MARGIN + 3, labelY)
-
+  // Measure line count first (font must be set before getTextWidth-based
+  // wrapping runs inside wrappedText, since it measures at whatever font/
+  // size is currently active) — this pass only measures, it doesn't draw
+  // yet, since the box height depends on the result and must be known
+  // before the box itself is painted.
   doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(8.5)
-  doc.setTextColor(55, 65, 81)
-  const lines = doc.splitTextToSize(toVisualPdfText(notice), CONTENT_W - 6)
-  const textH = lines.length * 4
-  const boxH = textH + 8
+  const lineCount = countWrappedLines(doc, notice, CONTENT_W - 6)
+  const boxH = lineCount * 4 + 8
 
   if (y + boxH > PAGE_H - MARGIN - 20) {
     doc.addPage()
@@ -846,14 +888,16 @@ function drawNotice(doc: jsPDF, y: number, data: ReportCardData): number {
 
   doc.setFillColor(255, 251, 235) // amber-50 — a notice should read as "pay attention," distinct from the neutral gray boxes elsewhere
   doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
+
   doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(7.5)
   doc.setTextColor(146, 64, 14) // amber-800
   text(doc, 'NOTICE', MARGIN + 3, y + 4)
+
   doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(8.5)
   doc.setTextColor(120, 53, 15) // amber-900
-  doc.text(lines, MARGIN + 3, y + 9)
+  wrappedText(doc, notice, MARGIN + 3, y + 9, CONTENT_W - 6, 4)
 
   doc.setTextColor(17, 24, 39)
   return y + boxH + 3
