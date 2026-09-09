@@ -1031,6 +1031,617 @@ export async function saveStudentRemark(params: {
   }
 }
 
+/**
+ * savePrincipalRemark
+ * Session 81 (owner request) — the principal/head-teacher remark, added as
+ * migration_tier8_s81_report_card_overhaul.sql's new principal_remark
+ * column on the SAME row as the class-teacher remark (assessment_window_
+ * student_remarks, keyed by window+student) — never a separate table, so
+ * the two remarks for one student in one period can't drift onto different
+ * rows. Upserts the same way saveStudentRemark() does, but must NOT stomp
+ * an existing class-teacher remark already on that row when only the
+ * principal remark is being set — upsert with onConflict only updates the
+ * columns actually passed, but Supabase's JS client upsert still requires
+ * `remark` conceptually exist on the row; since the column has a DB-level
+ * `not null default ''`, omitting it here is safe: Postgres keeps the
+ * existing value on conflict for any column not included in the upserted
+ * object shape... EXCEPT Supabase's upsert always overwrites with the
+ * object's own shape on conflict (it is not a partial PATCH) — so this
+ * function reads the current remark first and re-sends it unchanged,
+ * rather than risk silently blanking it. Same defensive shape used below
+ * by saveStudentRemark's sibling if it ever needs the reverse.
+ */
+export async function savePrincipalRemark(params: {
+  schoolId: string
+  windowId: string
+  studentId: string
+  principalRemark: string
+  enteredBy: string      // staff.id (actorRecordId)
+}): Promise<Result<true>> {
+  try {
+    // Read the existing row first (if any) so its class-teacher `remark`
+    // and `entered_by` survive this upsert untouched — see function comment.
+    const existingRes = await supabase
+      .from('assessment_window_student_remarks')
+      .select('remark, entered_by')
+      .eq('assessment_window_id', params.windowId)
+      .eq('student_id', params.studentId)
+      .maybeSingle()
+    if (existingRes.error) return err(friendly(existingRes.error.message))
+
+    const { error } = await supabase
+      .from('assessment_window_student_remarks')
+      .upsert(
+        {
+          school_id: params.schoolId,
+          assessment_window_id: params.windowId,
+          student_id: params.studentId,
+          remark: existingRes.data?.remark ?? '',
+          entered_by: existingRes.data?.entered_by ?? null,
+          principal_remark: params.principalRemark,
+          principal_remark_entered_by: params.enteredBy,
+        },
+        { onConflict: 'assessment_window_id,student_id' },
+      )
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: true }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to save principal remark')
+  }
+}
+
+/**
+ * loadRemarksForWindow (extended, Session 81)
+ * Kept as one function rather than adding a second loadPrincipalRemarksFor
+ * Window() — the PDF, the panel's list, and the bulk-apply preview all want
+ * both remarks for the same set of students at once, and they live on the
+ * same row anyway.
+ */
+export interface StudentRemarkFull {
+  student_id: string
+  remark: string
+  principal_remark: string
+}
+
+export async function loadFullRemarksForWindow(windowId: string): Promise<Result<StudentRemarkFull[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('assessment_window_student_remarks')
+      .select('student_id, remark, principal_remark')
+      .eq('assessment_window_id', windowId)
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: (data ?? []).map((r: any) => ({
+      student_id: r.student_id,
+      remark: r.remark ?? '',
+      principal_remark: r.principal_remark ?? '',
+    })) }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load remarks')
+  }
+}
+
+/**
+ * bulkApplyRemarks
+ * Session 81 (owner request) — a teacher/principal who doesn't have time to
+ * remark every student individually picks a target and writes ONE remark
+ * text that's applied to every matching student's row at once. Deliberately
+ * NOT a persisted "rules" table (the owner's own framing: "just an option
+ * for bulk remarks... applied to all the class/school wide results or
+ * applied based on score averages") — this is a one-time write action, not
+ * standing configuration. `kind` picks which of the two independent remark
+ * fields this call writes; the caller makes two separate calls to set both.
+ *
+ * Target resolution:
+ *   - 'class'  -> every active student in classNodeId (classNodeId required)
+ *   - 'school' -> every active student in the school with a result in this
+ *                 window (no class filter)
+ *   - 'range'  -> every student (school-wide, or class-scoped if
+ *                 classNodeId is also given) whose cross-subject average for
+ *                 this window falls within [minAverage, maxAverage] inclusive
+ *
+ * Existing remarks for students OUTSIDE the resolved target are left
+ * completely untouched — this only ever writes rows for students who match.
+ * Uses the same read-existing-then-upsert shape as savePrincipalRemark() so
+ * a bulk apply of one remark field never blanks the other.
+ */
+export async function bulkApplyRemarks(params: {
+  schoolId: string
+  windowId: string
+  sessionId: string
+  termId: string | null
+  kind: 'teacher' | 'principal'
+  remarkText: string
+  enteredBy: string
+  target:
+    | { type: 'class'; classNodeId: string }
+    | { type: 'school' }
+    | { type: 'range'; minAverage: number; maxAverage: number; classNodeId?: string }
+}): Promise<Result<{ updatedCount: number }>> {
+  try {
+    // Resolve the target student id list first.
+    let studentIds: string[] = []
+
+    if (params.target.type === 'class') {
+      const sRes = await supabase
+        .from('students')
+        .select('id')
+        .eq('class_node_id', params.target.classNodeId)
+        .eq('status', 'active')
+      if (sRes.error) return err(friendly(sRes.error.message))
+      studentIds = (sRes.data ?? []).map((s: any) => s.id)
+    } else if (params.target.type === 'school') {
+      const sRes = await supabase
+        .from('students')
+        .select('id')
+        .eq('school_id', params.schoolId)
+        .eq('status', 'active')
+      if (sRes.error) return err(friendly(sRes.error.message))
+      studentIds = (sRes.data ?? []).map((s: any) => s.id)
+    } else {
+      // Range: need each candidate's cross-subject average for this
+      // window's session+term — same computation loadReportCardData()
+      // already does per-student, done here once across the whole
+      // candidate pool instead of N calls.
+      let candidateQuery = supabase.from('students').select('id').eq('school_id', params.schoolId).eq('status', 'active')
+      if (params.target.classNodeId) candidateQuery = candidateQuery.eq('class_node_id', params.target.classNodeId)
+      const candRes = await candidateQuery
+      if (candRes.error) return err(friendly(candRes.error.message))
+      const candidateIds = (candRes.data ?? []).map((s: any) => s.id)
+      if (candidateIds.length === 0) return { ok: true, data: { updatedCount: 0 } }
+
+      const NULL_TERM_SENTINEL = '00000000-0000-0000-0000-000000000000'
+      const srRes = await supabase.rpc('get_subject_results', {
+        p_school_id: params.schoolId,
+        p_session_id: params.sessionId,
+        p_student_ids: candidateIds,
+        p_term_id: params.termId ?? NULL_TERM_SENTINEL,
+      })
+      if (srRes.error) return err(friendly(srRes.error.message))
+      const srRows = (srRes.data ?? []) as Array<{ student_id: string; weighted_total: number }>
+
+      const sumByStudent = new Map<string, { sum: number; n: number }>()
+      for (const r of srRows) {
+        const cur = sumByStudent.get(r.student_id) ?? { sum: 0, n: 0 }
+        cur.sum += Number(r.weighted_total)
+        cur.n += 1
+        sumByStudent.set(r.student_id, cur)
+      }
+      const { minAverage, maxAverage } = params.target
+      studentIds = [...sumByStudent.entries()]
+        .filter(([, agg]) => {
+          const avg = agg.sum / agg.n
+          return avg >= minAverage && avg <= maxAverage
+        })
+        .map(([sid]) => sid)
+    }
+
+    if (studentIds.length === 0) return { ok: true, data: { updatedCount: 0 } }
+
+    // Read existing rows for these students in this window so the remark
+    // field NOT being bulk-applied right now survives untouched, same
+    // defensive shape as savePrincipalRemark().
+    const existingRes = await supabase
+      .from('assessment_window_student_remarks')
+      .select('student_id, remark, principal_remark, entered_by, principal_remark_entered_by')
+      .eq('assessment_window_id', params.windowId)
+      .in('student_id', studentIds)
+    if (existingRes.error) return err(friendly(existingRes.error.message))
+    const existingByStudent = new Map((existingRes.data ?? []).map((r: any) => [r.student_id, r]))
+
+    const rows = studentIds.map(studentId => {
+      const existing = existingByStudent.get(studentId)
+      const base = {
+        school_id: params.schoolId,
+        assessment_window_id: params.windowId,
+        student_id: studentId,
+        remark: existing?.remark ?? '',
+        entered_by: existing?.entered_by ?? null,
+        principal_remark: existing?.principal_remark ?? '',
+        principal_remark_entered_by: existing?.principal_remark_entered_by ?? null,
+      }
+      if (params.kind === 'teacher') {
+        base.remark = params.remarkText
+        base.entered_by = params.enteredBy
+      } else {
+        base.principal_remark = params.remarkText
+        base.principal_remark_entered_by = params.enteredBy
+      }
+      return base
+    })
+
+    const { error } = await supabase
+      .from('assessment_window_student_remarks')
+      .upsert(rows, { onConflict: 'assessment_window_id,student_id' })
+    if (error) return err(friendly(error.message))
+
+    return { ok: true, data: { updatedCount: rows.length } }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to apply bulk remarks')
+  }
+}
+
+// ─── Report-card settings (Session 81, owner request) ─────────────────────────
+// Admin-configurable extra fields printed on the report card: resumption
+// date, next-term fees, a free-text notice. Keyed per class+session+term
+// (migration_tier8_s81's own reasoning: standing per-term configuration,
+// not an assessment-cycle fact, so NOT keyed through assessment_windows).
+// "Reusable" per the owner's answer means a "copy from last term" action —
+// implemented here as a plain read of the most recent prior row for the
+// same class, no separate template table.
+
+export interface ReportCardSettings {
+  id: string
+  class_node_id: string
+  session_id: string
+  term_id: string | null
+  resumption_date: string | null
+  next_term_fees: number | null
+  notice: string | null
+}
+
+export async function loadReportCardSettings(params: {
+  classNodeId: string
+  sessionId: string
+  termId: string | null
+}): Promise<Result<ReportCardSettings | null>> {
+  try {
+    let q = supabase
+      .from('report_card_settings')
+      .select('id, class_node_id, session_id, term_id, resumption_date, next_term_fees, notice')
+      .eq('class_node_id', params.classNodeId)
+      .eq('session_id', params.sessionId)
+    q = params.termId ? q.eq('term_id', params.termId) : q.is('term_id', null)
+    const { data, error } = await q.maybeSingle()
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: data ?? null }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load report card settings')
+  }
+}
+
+export async function saveReportCardSettings(params: {
+  schoolId: string
+  classNodeId: string
+  sessionId: string
+  termId: string | null
+  resumptionDate: string | null
+  nextTermFees: number | null
+  notice: string | null
+  createdBy: string
+}): Promise<Result<true>> {
+  try {
+    const { error } = await supabase
+      .from('report_card_settings')
+      .upsert(
+        {
+          school_id: params.schoolId,
+          class_node_id: params.classNodeId,
+          session_id: params.sessionId,
+          term_id: params.termId,
+          resumption_date: params.resumptionDate,
+          next_term_fees: params.nextTermFees,
+          notice: params.notice,
+          created_by: params.createdBy,
+        },
+        { onConflict: 'class_node_id,session_id,term_id' },
+      )
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: true }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to save report card settings')
+  }
+}
+
+/**
+ * loadMostRecentReportCardSettings
+ * Powers the "copy from last term" convenience action: the most recently
+ * updated settings row for this class, excluding the exact (session, term)
+ * currently being edited (there's nothing to "copy from" if that's already
+ * the row in question). Not scoped to the current session — a school's
+ * first-ever settings entry for a class this session should still be able
+ * to pull forward last SESSION's notice/fees text as a starting point.
+ */
+export async function loadMostRecentReportCardSettings(params: {
+  classNodeId: string
+  excludeSessionId: string
+  excludeTermId: string | null
+}): Promise<Result<ReportCardSettings | null>> {
+  try {
+    let q = supabase
+      .from('report_card_settings')
+      .select('id, class_node_id, session_id, term_id, resumption_date, next_term_fees, notice')
+      .eq('class_node_id', params.classNodeId)
+      .order('updated_at', { ascending: false })
+      .limit(5) // small buffer so the exclude-filter below still has options if the very latest row happens to be the excluded one
+    const { data, error } = await q
+    if (error) return err(friendly(error.message))
+    const candidates = (data ?? []).filter(
+      (r: any) => !(r.session_id === params.excludeSessionId && r.term_id === params.excludeTermId),
+    )
+    return { ok: true, data: candidates[0] ?? null }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load previous report card settings')
+  }
+}
+
+// ─── Class form masters (Session 81, owner request) ────────────────────────────
+// Assigns one staff member as form master / class coordinator for a class.
+// Assigning ALSO writes a scoped staff_permission_class_scope grant for
+// academics.remarks.manage (see migration file header) — this is the one
+// write path in this service that touches two tables for one user action,
+// documented inline below rather than split across two silently-related
+// calls the caller would have to remember to make together.
+
+export interface ClassFormMaster {
+  id: string
+  class_node_id: string
+  staff_id: string
+  staff_name: string
+  contact_phone: string | null
+  contact_email: string | null
+  notes_for_parents: string | null
+  signature_url: string | null   // Storage PATH, not a URL — see getFormMasterSignatureSignedUrl()
+}
+
+export async function loadFormMaster(classNodeId: string): Promise<Result<ClassFormMaster | null>> {
+  try {
+    const { data, error } = await supabase
+      .from('class_form_masters')
+      .select('id, class_node_id, staff_id, contact_phone, contact_email, notes_for_parents, signature_url, staff:staff_id ( full_name )')
+      .eq('class_node_id', classNodeId)
+      .maybeSingle()
+    if (error) return err(friendly(error.message))
+    if (!data) return { ok: true, data: null }
+    const staffRow = Array.isArray((data as any).staff) ? (data as any).staff[0] : (data as any).staff
+    return {
+      ok: true,
+      data: {
+        id: data.id,
+        class_node_id: data.class_node_id,
+        staff_id: data.staff_id,
+        staff_name: staffRow?.full_name ?? '—',
+        contact_phone: data.contact_phone ?? null,
+        contact_email: data.contact_email ?? null,
+        notes_for_parents: data.notes_for_parents ?? null,
+        signature_url: data.signature_url ?? null,
+      },
+    }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load form master')
+  }
+}
+
+/**
+ * assignFormMaster
+ * Admin-only action (enforced by cfm_write's RLS — see migration). Creates
+ * or reassigns the class_form_masters row AND the staff_permission_class_
+ * scope grant together:
+ *   - If a different staff member currently holds the class's scoped grant
+ *     for academics.remarks.manage, that row is removed first — a class has
+ *     exactly one form master, and a stale scoped grant left behind after
+ *     reassignment would let the PREVIOUS form master keep editing remarks
+ *     for a class they're no longer responsible for, which is a real
+ *     permission leak, not just a stale label.
+ *   - The new staff member's scoped grant is inserted (idempotent — checks
+ *     for an existing identical row first rather than assuming a specific
+ *     unique-index shape to upsert against, since that index's exact
+ *     definition isn't available to this file — see migration file header).
+ *   - Neither step is wrapped in a real DB transaction (no RPC exists for
+ *     this yet) — if the class_form_masters write succeeds but the
+ *     permission-scope write fails, the row exists but the grant doesn't;
+ *     the caller should treat a non-ok result here as "retry," and this
+ *     function is safe to call again (idempotent on both tables).
+ */
+export async function assignFormMaster(params: {
+  schoolId: string
+  classNodeId: string
+  staffId: string
+  contactPhone: string | null
+  contactEmail: string | null
+  notesForParents: string | null
+  assignedBy: string
+}): Promise<Result<true>> {
+  const PERMISSION_KEY = 'academics.remarks.manage'
+  try {
+    // Remove any existing scoped grant for this class under the OLD form
+    // master (if the class already had one and it's a different staff
+    // member) before writing the new assignment — see function comment.
+    const existingRes = await supabase
+      .from('class_form_masters')
+      .select('staff_id')
+      .eq('class_node_id', params.classNodeId)
+      .maybeSingle()
+    if (existingRes.error) return err(friendly(existingRes.error.message))
+    const previousStaffId = existingRes.data?.staff_id ?? null
+
+    if (previousStaffId && previousStaffId !== params.staffId) {
+      const revokeRes = await supabase
+        .from('staff_permission_class_scope')
+        .delete()
+        .eq('school_id', params.schoolId)
+        .eq('staff_id', previousStaffId)
+        .eq('permission_key', PERMISSION_KEY)
+        .eq('class_id', params.classNodeId)
+      if (revokeRes.error) return err(friendly(revokeRes.error.message))
+    }
+
+    // Upsert the class_form_masters row itself.
+    const { error: cfmError } = await supabase
+      .from('class_form_masters')
+      .upsert(
+        {
+          school_id: params.schoolId,
+          class_node_id: params.classNodeId,
+          staff_id: params.staffId,
+          contact_phone: params.contactPhone,
+          contact_email: params.contactEmail,
+          notes_for_parents: params.notesForParents,
+          assigned_by: params.assignedBy,
+          assigned_at: new Date().toISOString(),
+        },
+        { onConflict: 'class_node_id' },
+      )
+    if (cfmError) return err(friendly(cfmError.message))
+
+    // Grant the new form master a scoped permission, if they don't already
+    // have this exact grant (e.g. re-saving the same form master's contact
+    // details shouldn't try to insert a duplicate grant row every time).
+    const grantCheckRes = await supabase
+      .from('staff_permission_class_scope')
+      .select('id')
+      .eq('school_id', params.schoolId)
+      .eq('staff_id', params.staffId)
+      .eq('permission_key', PERMISSION_KEY)
+      .eq('class_id', params.classNodeId)
+      .maybeSingle()
+    if (grantCheckRes.error) return err(friendly(grantCheckRes.error.message))
+
+    if (!grantCheckRes.data) {
+      const grantRes = await supabase
+        .from('staff_permission_class_scope')
+        .insert({
+          school_id: params.schoolId,
+          staff_id: params.staffId,
+          permission_key: PERMISSION_KEY,
+          class_id: params.classNodeId,
+        })
+      if (grantRes.error) return err(friendly(grantRes.error.message))
+    }
+
+    return { ok: true, data: true }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to assign form master')
+  }
+}
+
+/**
+ * updateFormMasterOwnProfile
+ * Self-service — the form master updates their OWN contact info/notes
+ * (matches cfm_self_update's RLS, which allows this without admin rights,
+ * but does not allow changing staff_id — that stays admin-only via
+ * assignFormMaster above).
+ */
+export async function updateFormMasterOwnProfile(params: {
+  classNodeId: string
+  contactPhone: string | null
+  contactEmail: string | null
+  notesForParents: string | null
+}): Promise<Result<true>> {
+  try {
+    const { error } = await supabase
+      .from('class_form_masters')
+      .update({
+        contact_phone: params.contactPhone,
+        contact_email: params.contactEmail,
+        notes_for_parents: params.notesForParents,
+      })
+      .eq('class_node_id', params.classNodeId)
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: true }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to update form master profile')
+  }
+}
+
+/**
+ * loadClassesNeedingFormMaster / loadAllFormMasters
+ * For the admin assignment screen: every class alongside whichever form
+ * master (if any) currently holds it, in one query rather than the screen
+ * doing a per-class lookup.
+ */
+export async function loadAllFormMasters(schoolId: string): Promise<Result<ClassFormMaster[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('class_form_masters')
+      .select('id, class_node_id, staff_id, contact_phone, contact_email, notes_for_parents, signature_url, staff:staff_id ( full_name )')
+      .eq('school_id', schoolId)
+    if (error) return err(friendly(error.message))
+    return {
+      ok: true,
+      data: (data ?? []).map((row: any) => {
+        const staffRow = Array.isArray(row.staff) ? row.staff[0] : row.staff
+        return {
+          id: row.id,
+          class_node_id: row.class_node_id,
+          staff_id: row.staff_id,
+          staff_name: staffRow?.full_name ?? '—',
+          contact_phone: row.contact_phone ?? null,
+          contact_email: row.contact_email ?? null,
+          notes_for_parents: row.notes_for_parents ?? null,
+          signature_url: row.signature_url ?? null,
+        }
+      }),
+    }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to load form masters')
+  }
+}
+
+/**
+ * uploadFormMasterSignature / getFormMasterSignatureSignedUrl
+ * Mirrors studentsService.ts's uploadStudentPhoto()/getStudentPhotoSignedUrl()
+ * pattern exactly (see migration file header): private bucket, fixed
+ * filename (signature.jpg, upsert:true — a re-upload replaces the old one
+ * rather than accumulating orphaned files), store the Storage PATH (not a
+ * URL, since the bucket is private and getPublicUrl() would silently
+ * produce a URL that 400s on every render), resolve to a real signed URL
+ * only at display/PDF-generation time.
+ *
+ * No client-side resize here (unlike the student-photo path) — a signature
+ * image is typically already small (a scanned/photographed signature on
+ * plain paper), and this function is deliberately kept simple; add a resize
+ * step here if real uploads turn out to be unexpectedly large.
+ */
+export async function uploadFormMasterSignature(params: {
+  schoolId: string
+  classNodeId: string
+  file: File
+}): Promise<Result<{ signature_path: string }>> {
+  try {
+    const path = `${params.schoolId}/${params.classNodeId}/signature.jpg`
+    const { error: uploadError } = await supabase.storage
+      .from('class-form-master-signatures')
+      .upload(path, params.file, { contentType: params.file.type || 'image/jpeg', upsert: true })
+    if (uploadError) {
+      const msg = uploadError.message ?? ''
+      if (msg.toLowerCase().includes('row-level security') || msg.toLowerCase().includes('policy')) {
+        return err("You don't have permission to upload a signature for this class.")
+      }
+      return err('Failed to upload signature. Please try again.')
+    }
+    const { error: dbError } = await supabase
+      .from('class_form_masters')
+      .update({ signature_url: path })
+      .eq('class_node_id', params.classNodeId)
+    if (dbError) return err(friendly(dbError.message))
+    return { ok: true, data: { signature_path: path } }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to upload signature')
+  }
+}
+
+const SIGNATURE_URL_TTL_SECONDS = 60 * 30 // 30 minutes, matches the student-photo precedent
+const signatureUrlCache = new Map<string, { url: string; expiresAt: number }>()
+
+export async function getFormMasterSignatureSignedUrl(signaturePath: string | null): Promise<string | null> {
+  if (!signaturePath) return null
+  const cached = signatureUrlCache.get(signaturePath)
+  if (cached && cached.expiresAt > Date.now()) return cached.url
+  try {
+    const { data, error } = await supabase.storage
+      .from('class-form-master-signatures')
+      .createSignedUrl(signaturePath, SIGNATURE_URL_TTL_SECONDS)
+    if (error || !data?.signedUrl) return null
+    signatureUrlCache.set(signaturePath, {
+      url: data.signedUrl,
+      expiresAt: Date.now() + (SIGNATURE_URL_TTL_SECONDS - 30) * 1000,
+    })
+    return data.signedUrl
+  } catch {
+    return null
+  }
+}
+
 // ─── Report-card data assembly ────────────────────────────────────────────────
 
 export interface ReportCardSubjectRow {
@@ -1046,6 +1657,7 @@ export interface ReportCardSubjectRow {
 export interface ReportCardData {
   studentName: string
   studentCode: string | null
+  studentPhotoUrl: string | null   // students.photo_url — Storage PATH, resolved to a signed URL by the PDF layer, same as everywhere else this column is consumed
   className: string
   sessionName: string
   termName: string | null
@@ -1056,7 +1668,19 @@ export interface ReportCardData {
   totalGraded: number           // how many peers have results (denominator for position)
   aggregateRemark: string | null
   teacherRemark: string
+  principalRemark: string        // Session 81 — new sibling field, same row as teacherRemark
   attendance: { present: number; totalMarked: number } | null
+  formMaster: {                  // Session 81 — null if the class has no form master assigned yet
+    staffName: string
+    contactPhone: string | null
+    contactEmail: string | null
+    signatureUrl: string | null  // Storage PATH — resolved to a signed URL by the PDF layer
+  } | null
+  settings: {                    // Session 81 — null if the admin hasn't configured this class+term yet
+    resumptionDate: string | null
+    nextTermFees: number | null
+    notice: string | null
+  } | null
 }
 
 export async function loadReportCardData(params: {
@@ -1074,7 +1698,7 @@ export async function loadReportCardData(params: {
     // Students of the class (for the peer-average position denominator).
     const studentsRes = await supabase
       .from('students')
-      .select('id, full_name, student_code')
+      .select('id, full_name, student_code, photo_url')
       .eq('class_node_id', params.classNodeId)
       .eq('status', 'active')
       .order('full_name')
@@ -1180,16 +1804,51 @@ export async function loadReportCardData(params: {
       }
     }
 
-    // Teacher's remark (may not exist yet — empty default, not an error).
+    // Teacher's + principal's remark (both live on the same row — Session
+    // 81 added principal_remark as a sibling column, see migration file
+    // header — may not exist yet, empty default, not an error).
     let teacherRemark = ''
+    let principalRemark = ''
     if (params.windowId) {
       const rmRes = await supabase
         .from('assessment_window_student_remarks')
-        .select('remark')
+        .select('remark, principal_remark')
         .eq('assessment_window_id', params.windowId)
         .eq('student_id', params.studentId)
         .maybeSingle()
-      if (!rmRes.error && rmRes.data) teacherRemark = rmRes.data.remark ?? ''
+      if (!rmRes.error && rmRes.data) {
+        teacherRemark = rmRes.data.remark ?? ''
+        principalRemark = (rmRes.data as any).principal_remark ?? ''
+      }
+    }
+
+    // Form master for this class (Session 81) — null if none assigned yet,
+    // which is a legitimate, common state, not an error.
+    let formMaster: ReportCardData['formMaster'] = null
+    const fmRes = await loadFormMaster(params.classNodeId)
+    if (fmRes.ok && fmRes.data) {
+      formMaster = {
+        staffName: fmRes.data.staff_name,
+        contactPhone: fmRes.data.contact_phone,
+        contactEmail: fmRes.data.contact_email,
+        signatureUrl: fmRes.data.signature_url,
+      }
+    }
+
+    // Admin-configured print settings for this class+term (Session 81) —
+    // null if the admin hasn't set anything up for this period yet.
+    let settings: ReportCardData['settings'] = null
+    const settingsRes = await loadReportCardSettings({
+      classNodeId: params.classNodeId,
+      sessionId: params.sessionId,
+      termId: params.termId,
+    })
+    if (settingsRes.ok && settingsRes.data) {
+      settings = {
+        resumptionDate: settingsRes.data.resumption_date,
+        nextTermFees: settingsRes.data.next_term_fees,
+        notice: settingsRes.data.notice,
+      }
     }
 
     // Attendance summary within the term/session date range.
@@ -1229,6 +1888,7 @@ export async function loadReportCardData(params: {
       data: {
         studentName: me?.full_name ?? '',
         studentCode: me?.student_code ?? null,
+        studentPhotoUrl: (me as any)?.photo_url ?? null,
         className: params.className,
         sessionName: params.sessionName,
         termName: params.termName,
@@ -1239,7 +1899,10 @@ export async function loadReportCardData(params: {
         totalGraded: ranked.length,
         aggregateRemark,
         teacherRemark,
+        principalRemark,
         attendance,
+        formMaster,
+        settings,
       },
     }
   } catch (e: any) {

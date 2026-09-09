@@ -2,16 +2,25 @@
  * reportCardPdf.ts
  * PRD Tier 8 / Problem 8.4 — PDF report card for secondary schools.
  *
- * Layout (Session 67 redesign — Nigerian/Ghanaian terminal-report standard):
- *   1. School header band: logo, name, address, "TERMINAL REPORT"
- *   2. Student info block: name (dominant), position (dominant), reg/class/session,
- *      attendance, days open, next resumption
+ * Layout (Session 81 redesign — owner-requested overhaul):
+ *   1. School header band: LOGO, name, address, "TERMINAL REPORT"
+ *   2. Student info block: PASSPORT PHOTO, name (dominant), position
+ *      (dominant), reg/class/session — attendance moved OUT of this block,
+ *      see point 7 (Session 81: fixed a real duplication — attendance used
+ *      to appear here AND in its own section below; now only the section)
  *   3. Grading key: dynamic from grade_scales, never hardcoded
  *   4. Per-subject table: dynamic component columns, total, grade, remark, position
  *   5. Totals / summary row: total marks, average, class position
- *   6. Teacher's remark + Principal's remark (side by side)
- *   7. Attendance summary: days open, present, absent, late, rate
- *   8. Signature lines + page footer
+ *   6. Admin-configured notice (Session 81: report_card_settings.notice —
+ *      only rendered if the admin set one for this class+term)
+ *   7. Attendance summary: days present, absent, rate — the ONE place this
+ *      appears now
+ *   8. Teacher's remark + Principal's remark, each with an actual SIGNATURE
+ *      IMAGE when the form master / school has uploaded one (Session 81 —
+ *      previously always a blank line, and the principal remark was never
+ *      wired to real data at all)
+ *   9. Resumption date / next-term fees (Session 81: report_card_settings)
+ *   10. Signature lines + page footer
  *
  * Design principles:
  *   - Single A4 page per student, overflow to page 2 only when subject count requires
@@ -30,17 +39,42 @@
  * + Latin + Naira (₦) glyphs to draw. setFont() calls below pass 'ReportCard'
  * instead of 'helvetica' for the same reason. See pdfTextShaping.ts and
  * scripts/build-pdf-font.cjs for the full root-cause writeup.
+ *
+ * Images (Session 81): logo, passport photo, and signatures are loaded
+ * ASYNCHRONOUSLY before drawing (pdfImageLoader.ts — jsPDF's addImage()
+ * needs actual image bytes, it cannot fetch a URL itself), which is why
+ * downloadReportCardPdf() and downloadBatchReportCardPdf() are both async
+ * now, unlike this file's previous fully-synchronous shape. A failed image
+ * load (network hiccup, missing photo) never aborts generation — the report
+ * card just renders without that one image; see pdfImageLoader.ts's own
+ * comment for why that's the right failure mode for a print job.
+ *
+ * Batch printing (Session 81, owner request — "print all" / "print
+ * selected" as ONE combined multi-page PDF): drawOneReportCard() draws a
+ * single student's full report card onto a jsPDF doc the CALLER owns and
+ * has already added a page to, rather than creating its own document the
+ * way the old buildReportCardPdf() did. downloadReportCardPdf() (single
+ * student, unchanged public contract) and downloadBatchReportCardPdf() (new)
+ * both just create one shared doc, loop, and call drawOneReportCard() once
+ * per student — this is the only structural change needed to support
+ * batching; nothing about the single-student path's behavior or output
+ * changed.
  */
 
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import type { ReportCardData } from './assessmentService'
 import { toVisualPdfText } from './pdfTextShaping'
+import { loadImageForPdf, fitWithinBox, type LoadedImage } from './pdfImageLoader'
 import { REPORT_CARD_FONT_REGULAR_BASE64, REPORT_CARD_FONT_BOLD_BASE64 } from '../assets/fonts/reportCardFont'
 
 // ─── Font registration ──────────────────────────────────────────────────────
 // jsPDF fonts are registered per-document (addFileToVFS/addFont live on the
-// jsPDF instance), so this runs once per generated PDF, not once globally.
+// jsPDF instance), so this runs once per generated PDF, not once per student
+// — for a batch, register ONCE on the shared doc, not inside the per-student
+// loop (re-registering the same font data on every page is pure waste and,
+// worse, re-running addFont mid-document has not been verified safe against
+// pages already drawn with FONT_FAMILY active).
 
 const FONT_FAMILY = 'ReportCard'
 
@@ -49,10 +83,11 @@ function registerReportCardFont(doc: jsPDF): void {
   doc.addFont('ReportCard-Regular.ttf', FONT_FAMILY, 'normal')
   doc.addFileToVFS('ReportCard-Bold.ttf', REPORT_CARD_FONT_BOLD_BASE64)
   doc.addFont('ReportCard-Bold.ttf', FONT_FAMILY, 'bold')
-  // No real italic weight is embedded — jsPDF falls back to synthetic
-  // slant-on-regular for 'italic' automatically when only normal/bold are
-  // registered, which is fine for the one italic use below (aggregate
-  // remark) and not worth doubling font payload size for.
+  // No real italic weight is embedded — jsPDF falls back to a built-in
+  // standard font (NOT a synthetic slant) when 'italic' is requested and no
+  // italic weight is registered for a custom family — confirmed by testing
+  // in Session 80. Never request FONT_FAMILY + 'italic' anywhere below;
+  // use color/weight for emphasis instead (see drawSummaryRow's own note).
   doc.setFont(FONT_FAMILY, 'normal')
 }
 
@@ -64,6 +99,29 @@ function registerReportCardFont(doc: jsPDF): void {
  */
 function text(doc: jsPDF, str: string, x: number, y: number, options?: Parameters<jsPDF['text']>[3]): void {
   doc.text(toVisualPdfText(str), x, y, options)
+}
+
+/**
+ * safeAddImage
+ * jsPDF's addImage() can throw even after pdfImageLoader.ts's own checks
+ * passed (fetch succeeded, browser decoded it fine for dimensions) — jsPDF
+ * has its own internal image processing (re-encoding, colorspace handling)
+ * that can reject a file the browser itself displayed without complaint.
+ * Confirmed directly during this feature's own testing: a malformed test
+ * PNG that fetch()/Image() both accepted still threw "Error while
+ * decompressing the data" inside addImage. Every addImage call in this
+ * file goes through this wrapper so that failure mode matches
+ * pdfImageLoader.ts's own stated policy — a bad image degrades gracefully
+ * (skip it, keep the blank-line/no-logo layout), it never aborts the
+ * student's whole report card.
+ */
+function safeAddImage(doc: jsPDF, img: LoadedImage, x: number, y: number, w: number, h: number): boolean {
+  try {
+    doc.addImage(img.dataUrl, img.format, x, y, w, h)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ─── Brand color resolution ─────────────────────────────────────────────────
@@ -129,11 +187,109 @@ export interface ReportCardPdfOptions {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-export function downloadReportCardPdf(opts: ReportCardPdfOptions): void {
-  const doc = buildReportCardPdf(opts, resolveBrandColors())
+export async function downloadReportCardPdf(opts: ReportCardPdfOptions): Promise<void> {
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' })
+  registerReportCardFont(doc)
+  const colors = resolveBrandColors()
+
+  const [logo, photo] = await Promise.all([
+    loadImageForPdf(opts.logoUrl),
+    loadImageForPdf(opts.data.studentPhotoUrl),
+  ])
+  const signatures = await loadSignaturesForOptions(opts)
+
+  await drawOneReportCard(doc, opts, colors, { logo, photo, ...signatures })
+  drawPageFooter(doc)
+
   const safeName = (opts.data.studentName || 'student').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '')
   const period = opts.data.termName ?? opts.data.sessionName
   doc.save(`${safeName || 'report'}-report-card${period ? `-${period.replace(/[^a-z0-9]+/gi, '-')}` : ''}.pdf`.toLowerCase())
+}
+
+/**
+ * downloadBatchReportCardPdf
+ * Session 81 (owner request) — "print all" / "print selected students as a
+ * batch" -> ONE combined multi-page PDF, one download.
+ *
+ * The school logo and each student's form-master/principal signature are
+ * loaded ONCE per distinct URL across the whole batch (not once per
+ * student) via the caches below — a class of 40 students all share the
+ * same school logo and, in the overwhelming majority of cases, the same
+ * form master, so re-fetching those images 40 times would be pure waste
+ * and would meaningfully slow down a big print run. Each student's own
+ * passport photo is still fetched individually (genuinely per-student
+ * data), but happens in parallel across the batch via Promise.all, not
+ * serially page-by-page.
+ */
+export async function downloadBatchReportCardPdf(
+  optsList: ReportCardPdfOptions[],
+  batchLabel: string,
+): Promise<void> {
+  if (optsList.length === 0) return
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' })
+  registerReportCardFont(doc)
+  const colors = resolveBrandColors()
+
+  const imageCache = new Map<string, Promise<LoadedImage | null>>()
+  const cachedLoad = (url: string | null | undefined): Promise<LoadedImage | null> => {
+    if (!url) return Promise.resolve(null)
+    if (!imageCache.has(url)) imageCache.set(url, loadImageForPdf(url))
+    return imageCache.get(url)!
+  }
+
+  // Pre-warm every distinct image URL in the batch in parallel, rather than
+  // sequentially inside the per-student loop below — this is what actually
+  // makes the shared-logo/shared-signature caching pay off (without this,
+  // the FIRST student to need the logo would still trigger one fetch, but
+  // subsequent students calling cachedLoad on an in-flight promise before it
+  // resolves works correctly either way; pre-warming just makes the whole
+  // batch's image loading happen concurrently instead of page-by-page).
+  await Promise.all(
+    optsList.flatMap(o => [
+      cachedLoad(o.logoUrl),
+      cachedLoad(o.data.studentPhotoUrl),
+      cachedLoad(o.data.formMaster?.signatureUrl),
+    ]),
+  )
+
+  for (let i = 0; i < optsList.length; i++) {
+    const opts = optsList[i]
+    if (i > 0) doc.addPage()
+
+    const [logo, photo] = await Promise.all([cachedLoad(opts.logoUrl), cachedLoad(opts.data.studentPhotoUrl)])
+    const signature = await cachedLoad(opts.data.formMaster?.signatureUrl)
+
+    await drawOneReportCard(doc, opts, colors, {
+      logo,
+      photo,
+      teacherSignature: signature,
+      principalSignature: null, // no separate principal-signature source exists yet — see file header's schema note
+    })
+  }
+
+  drawPageFooter(doc)
+  doc.save(`${batchLabel.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-report-cards.pdf`)
+}
+
+async function loadSignaturesForOptions(opts: ReportCardPdfOptions): Promise<{
+  teacherSignature: LoadedImage | null
+  principalSignature: LoadedImage | null
+}> {
+  const teacherSignature = await loadImageForPdf(opts.data.formMaster?.signatureUrl)
+  // No separate principal-signature field exists in the schema yet (only
+  // class_form_masters.signature_url, which is the CLASS TEACHER's/form
+  // master's signature) — the principal's remark box therefore still draws
+  // a blank signature line, same as before, until/unless a school-level
+  // head-teacher-signature field is added.
+  return { teacherSignature, principalSignature: null }
+}
+
+interface ReportCardImages {
+  logo: LoadedImage | null
+  photo: LoadedImage | null
+  teacherSignature: LoadedImage | null
+  principalSignature: LoadedImage | null
 }
 
 // ─── Document assembly ──────────────────────────────────────────────────────
@@ -143,32 +299,71 @@ const PAGE_W = 210 // A4 width mm
 const PAGE_H = 297 // A4 height mm
 const CONTENT_W = PAGE_W - MARGIN * 2
 
-function buildReportCardPdf(opts: ReportCardPdfOptions, colors: ResolvedBrandColors): jsPDF {
+/**
+ * Draws one student's complete report card onto `doc`, starting at
+ * whatever page is CURRENTLY ACTIVE (doc.setPage/doc.addPage is the
+ * caller's responsibility — see downloadReportCardPdf/
+ * downloadBatchReportCardPdf above). This is the one function this whole
+ * file previously called buildReportCardPdf() and had create its own
+ * jsPDF instance; it no longer does either, which is what makes batching
+ * possible without changing anything about a single student's own layout.
+ */
+async function drawOneReportCard(
+  doc: jsPDF,
+  opts: ReportCardPdfOptions,
+  colors: ResolvedBrandColors,
+  images: ReportCardImages,
+): Promise<void> {
   const { data } = opts
-  const doc = new jsPDF({ unit: 'mm', format: 'a4' })
-  registerReportCardFont(doc)
 
-  let y = drawHeader(doc, opts, colors)
-  y = drawStudentBlock(doc, y, data, colors)
+  let y = drawHeader(doc, opts, colors, images.logo)
+  y = drawStudentBlock(doc, y, data, colors, images.photo)
   y = drawGradingKey(doc, y, opts.gradeBands ?? [], colors)
   y = drawSubjectsTable(doc, y, data, opts.gradeBands ?? [], colors)
   y = drawSummaryRow(doc, y, data, opts.gradeBands ?? [], colors)
-  y = drawRemarks(doc, y, data)
+  y = drawNotice(doc, y, data)
   y = drawAttendanceSummary(doc, y, data)
-  drawSignatures(doc, y)
-  drawPageFooter(doc)
-
-  return doc
+  y = drawRemarks(doc, y, data, images.teacherSignature, images.principalSignature)
+  y = drawTermInfo(doc, y, data)
+  drawSignatureLines(doc, y)
+  // NOTE: drawPageFooter() is deliberately NOT called here. It stamps every
+  // page currently in the whole document (needed for a correct "Page X of
+  // N" count), so it must run exactly ONCE, after the LAST student in a
+  // batch is drawn — not once per student, which would both re-stamp
+  // already-footed pages (visible double-footer) and show the wrong "of N"
+  // total until the very last call. See downloadReportCardPdf and
+  // downloadBatchReportCardPdf, which each call it exactly once.
 }
 
 // ─── 1. School header band ──────────────────────────────────────────────────
 
-function drawHeader(doc: jsPDF, opts: ReportCardPdfOptions, colors: ResolvedBrandColors): number {
+function drawHeader(
+  doc: jsPDF,
+  opts: ReportCardPdfOptions,
+  colors: ResolvedBrandColors,
+  logo: LoadedImage | null,
+): number {
   // Brand bar
   doc.setFillColor(...colors.brand600)
   doc.rect(0, 0, PAGE_W, 20, 'F')
 
-  // School name — centered, dominant
+  // Logo — left-aligned inside the bar, fitted to a fixed square slot so
+  // wide/square/portrait logos all sit consistently regardless of their
+  // native aspect ratio (see pdfImageLoader.ts's fitWithinBox).
+  const LOGO_SLOT = 16
+  if (logo) {
+    const { w, h } = fitWithinBox(logo, LOGO_SLOT, LOGO_SLOT)
+    // Center within the slot so a non-square logo doesn't hug one edge.
+    const lx = MARGIN + (LOGO_SLOT - w) / 2
+    const ly = (20 - h) / 2
+    safeAddImage(doc, logo, lx, ly, w, h)
+  }
+
+  // School name — centered, dominant. Still centered on the full page width
+  // (not re-centered between logo and right edge) — a logo present on some
+  // report cards and absent on others (e.g. before a school uploads one)
+  // must not shift the school name's horizontal position between the two
+  // states, which would look like a layout bug when comparing two cards.
   doc.setTextColor(...colors.brandOn)
   doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(16)
@@ -192,8 +387,21 @@ function drawHeader(doc: jsPDF, opts: ReportCardPdfOptions, colors: ResolvedBran
 
 // ─── 2. Student info block ──────────────────────────────────────────────────
 
-function drawStudentBlock(doc: jsPDF, y: number, data: ReportCardData, colors: ResolvedBrandColors): number {
-  const blockH = 26
+function drawStudentBlock(
+  doc: jsPDF,
+  y: number,
+  data: ReportCardData,
+  colors: ResolvedBrandColors,
+  photo: LoadedImage | null,
+): number {
+  // Session 81: taller than before to make room for the passport photo,
+  // and attendance is DELIBERATELY NOT drawn here anymore — it used to
+  // appear both in this block AND in its own dedicated section further
+  // down the page (a real duplication the owner flagged); the dedicated
+  // section (drawAttendanceSummary, richer — includes days-absent and a
+  // rate indicator) is now the only place attendance appears.
+  const PHOTO_SLOT = 20
+  const blockH = photo ? PHOTO_SLOT + 6 : 26
 
   // Background tint
   doc.setFillColor(...colors.brand50)
@@ -203,17 +411,42 @@ function drawStudentBlock(doc: jsPDF, y: number, data: ReportCardData, colors: R
   doc.setFillColor(...colors.brand600)
   doc.rect(MARGIN, y, 2, blockH, 'F')
 
+  // Passport photo — right side of the block, fixed square slot. Placed on
+  // the right (not left, where the accent bar and text naturally start) so
+  // it doesn't collide with the position/"of N" text also right-aligned in
+  // this block on the FIRST line only — the photo spans the block's full
+  // height, so text below the name line still has the full row width to
+  // itself on the left.
+  let textRightEdge = PAGE_W - MARGIN - 4
+  if (photo) {
+    const { w, h } = fitWithinBox(photo, PHOTO_SLOT, PHOTO_SLOT)
+    const px = PAGE_W - MARGIN - 4 - w
+    const py = y + (blockH - h) / 2
+    const drew = safeAddImage(doc, photo, px, py, w, h)
+    if (drew) {
+      // Thin border so a light/white-background photo doesn't blend into
+      // the block's own light background tint. Only drawn if the image
+      // itself actually rendered — an empty bordered box where a photo
+      // failed to load would look like a rendering bug, not a graceful
+      // degradation.
+      doc.setDrawColor(203, 213, 225)
+      doc.setLineWidth(0.2)
+      doc.rect(px, py, w, h)
+      textRightEdge = px - 4
+    }
+  }
+
   const lx = MARGIN + 5
-  const rx = PAGE_W - MARGIN - 4
+  const rx = textRightEdge
   let ly = y + 5
 
   // Student name — headline
   doc.setFont(FONT_FAMILY, 'bold')
   doc.setFontSize(13)
   doc.setTextColor(17, 24, 39)
-  text(doc, data.studentName || '—', lx, ly)
+  text(doc, data.studentName || '—', lx, ly, { maxWidth: rx - lx - 20 })
 
-  // Position — headline (right side)
+  // Position — headline (right side, left of the photo if present)
   if (data.overallPosition !== null && data.totalGraded > 0) {
     doc.setFont(FONT_FAMILY, 'bold')
     doc.setFontSize(13)
@@ -236,20 +469,12 @@ function drawStudentBlock(doc: jsPDF, y: number, data: ReportCardData, colors: R
   doc.setFontSize(9)
   doc.setTextColor(55, 65, 81)
 
-  // Left column: reg no, class, session/term
+  // Reg no, class, session/term — attendance no longer duplicated here,
+  // see this function's own comment above.
   const period = data.termName ? `${data.sessionName} — ${data.termName}` : data.sessionName
   text(doc, `Reg. No: ${data.studentCode ?? '—'}`, lx, ly)
   text(doc, `Class: ${data.className || '—'}`, lx, ly + 5)
   text(doc, `Session: ${period}`, lx, ly + 10)
-
-  // Right column: attendance, days open, resumption
-  const att = data.attendance
-  if (att && att.totalMarked > 0) {
-    const pct = Math.round((att.present / att.totalMarked) * 100)
-    text(doc, `Attendance: ${att.present}/${att.totalMarked} days (${pct}%)`, rx, ly, { align: 'right' })
-  } else {
-    text(doc, 'Attendance: —', rx, ly, { align: 'right' })
-  }
 
   doc.setTextColor(17, 24, 39)
   return y + blockH + 4
@@ -487,14 +712,26 @@ function getAvgGradeLabel(avg: number, bands: { min_score: number; max_score: nu
 
 // ─── 6. Teacher + Principal remarks ─────────────────────────────────────────
 
-function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
-  const boxH = 22
+function drawRemarks(
+  doc: jsPDF,
+  y: number,
+  data: ReportCardData,
+  teacherSignature: LoadedImage | null,
+  principalSignature: LoadedImage | null,
+): number {
+  // Taller than before to make room for a signature image sitting under
+  // the remark text, when one is available (Session 81 — previously this
+  // box only ever drew a blank underscore line, and the principal side
+  // never read real data at all: data.principalRemark did not exist yet).
+  const boxH = 30
   if (y + boxH > PAGE_H - MARGIN - 20) {
     doc.addPage()
     y = MARGIN
   }
 
   const halfW = (CONTENT_W - 4) / 2
+  const SIG_SLOT_W = 30
+  const SIG_SLOT_H = 10
 
   // Class teacher's remark (left)
   doc.setFillColor(248, 250, 252)
@@ -515,8 +752,11 @@ function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
     doc.setTextColor(180, 180, 180)
     text(doc, '________________________________', MARGIN + 3, y + 10)
   }
+  drawSignatureBlock(doc, teacherSignature, data.formMaster?.staffName ?? null, MARGIN + 3, y + boxH - SIG_SLOT_H - 2, SIG_SLOT_W, SIG_SLOT_H)
 
-  // Principal's remark (right)
+  // Principal's remark (right) — now reads real data (data.principalRemark,
+  // added by migration_tier8_s81_report_card_overhaul.sql) instead of
+  // always drawing a blank line.
   const rx = MARGIN + halfW + 4
   doc.setFillColor(248, 250, 252)
   doc.roundedRect(rx, y, halfW, boxH, 1.5, 1.5, 'F')
@@ -528,11 +768,95 @@ function drawRemarks(doc: jsPDF, y: number, data: ReportCardData): number {
 
   doc.setFont(FONT_FAMILY, 'normal')
   doc.setFontSize(9)
-  doc.setTextColor(180, 180, 180)
-  text(doc, '________________________________', rx + 3, y + 10)
+  const principalRemark = data.principalRemark?.trim()
+  if (principalRemark) {
+    doc.setTextColor(55, 65, 81)
+    text(doc, principalRemark, rx + 3, y + 10, { maxWidth: halfW - 6, lineHeightFactor: 1.3 })
+  } else {
+    doc.setTextColor(180, 180, 180)
+    text(doc, '________________________________', rx + 3, y + 10)
+  }
+  // No separate principal/head-teacher signature source exists in the
+  // schema yet (see downloadBatchReportCardPdf's own note) — this side
+  // still gets a signature slot drawn, but with no image, it degrades to
+  // exactly the blank line this box always used to show.
+  drawSignatureBlock(doc, principalSignature, null, rx + 3, y + boxH - SIG_SLOT_H - 2, SIG_SLOT_W, SIG_SLOT_H)
 
   doc.setTextColor(17, 24, 39)
   return y + boxH + 4
+}
+
+/**
+ * drawSignatureBlock
+ * Draws either an actual signature image (fitted into a fixed slot, with a
+ * name label beneath it) or, when no image is available, the same blank
+ * underscore line this file always drew — so a school that hasn't uploaded
+ * a signature yet sees no regression from before this feature existed.
+ */
+function drawSignatureBlock(
+  doc: jsPDF,
+  signature: LoadedImage | null,
+  nameLabel: string | null,
+  x: number,
+  y: number,
+  slotW: number,
+  slotH: number,
+): void {
+  if (signature) {
+    const { w, h } = fitWithinBox(signature, slotW, slotH)
+    safeAddImage(doc, signature, x, y + (slotH - h), w, h)
+  }
+  doc.setDrawColor(180, 180, 180)
+  doc.setLineWidth(0.2)
+  doc.line(x, y + slotH + 1, x + slotW, y + slotH + 1)
+  if (nameLabel) {
+    doc.setFont(FONT_FAMILY, 'normal')
+    doc.setFontSize(6.5)
+    doc.setTextColor(107, 114, 128)
+    text(doc, nameLabel, x, y + slotH + 4.5)
+  }
+}
+
+// ─── 6b. Admin-configured notice ────────────────────────────────────────────
+// Session 81 (owner request) — free-text notice space, admin-configured per
+// class+term via report_card_settings. Only rendered when set; a school
+// that hasn't configured this yet sees no empty box taking up page space.
+
+function drawNotice(doc: jsPDF, y: number, data: ReportCardData): number {
+  const notice = data.settings?.notice?.trim()
+  if (!notice) return y
+
+  doc.setFont(FONT_FAMILY, 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(107, 114, 128)
+  const labelY = y + 4
+  text(doc, 'NOTICE', MARGIN + 3, labelY)
+
+  doc.setFont(FONT_FAMILY, 'normal')
+  doc.setFontSize(8.5)
+  doc.setTextColor(55, 65, 81)
+  const lines = doc.splitTextToSize(toVisualPdfText(notice), CONTENT_W - 6)
+  const textH = lines.length * 4
+  const boxH = textH + 8
+
+  if (y + boxH > PAGE_H - MARGIN - 20) {
+    doc.addPage()
+    y = MARGIN
+  }
+
+  doc.setFillColor(255, 251, 235) // amber-50 — a notice should read as "pay attention," distinct from the neutral gray boxes elsewhere
+  doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
+  doc.setFont(FONT_FAMILY, 'bold')
+  doc.setFontSize(7.5)
+  doc.setTextColor(146, 64, 14) // amber-800
+  text(doc, 'NOTICE', MARGIN + 3, y + 4)
+  doc.setFont(FONT_FAMILY, 'normal')
+  doc.setFontSize(8.5)
+  doc.setTextColor(120, 53, 15) // amber-900
+  doc.text(lines, MARGIN + 3, y + 9)
+
+  doc.setTextColor(17, 24, 39)
+  return y + boxH + 3
 }
 
 // ─── 7. Attendance summary ──────────────────────────────────────────────────
@@ -574,9 +898,49 @@ function drawAttendanceSummary(doc: jsPDF, y: number, data: ReportCardData): num
   return y + boxH + 3
 }
 
-// ─── 8. Signatures ──────────────────────────────────────────────────────────
+// ─── 7b. Term info: resumption date, next-term fees ─────────────────────────
+// Session 81 (owner request) — admin-configured per class+term via
+// report_card_settings. Only rendered when at least one of the two fields
+// is set; a school that hasn't configured either sees no empty box.
 
-function drawSignatures(doc: jsPDF, y: number): void {
+function drawTermInfo(doc: jsPDF, y: number, data: ReportCardData): number {
+  const resumptionDate = data.settings?.resumptionDate
+  const nextTermFees = data.settings?.nextTermFees
+  if (!resumptionDate && nextTermFees == null) return y
+
+  const boxH = 10
+  if (y + boxH > PAGE_H - MARGIN - 20) {
+    doc.addPage()
+    y = MARGIN
+  }
+
+  doc.setFillColor(248, 250, 252)
+  doc.roundedRect(MARGIN, y, CONTENT_W, boxH, 1.5, 1.5, 'F')
+
+  const parts: string[] = []
+  if (resumptionDate) {
+    const d = new Date(resumptionDate)
+    const formatted = Number.isNaN(d.getTime())
+      ? resumptionDate
+      : d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+    parts.push(`Next Resumption: ${formatted}`)
+  }
+  if (nextTermFees != null) {
+    parts.push(`Next Term Fees: ₦${nextTermFees.toLocaleString()}`)
+  }
+
+  doc.setFont(FONT_FAMILY, 'bold')
+  doc.setFontSize(8.5)
+  doc.setTextColor(55, 65, 81)
+  text(doc, parts.join('     |     '), PAGE_W / 2, y + 6.5, { align: 'center' })
+
+  doc.setTextColor(17, 24, 39)
+  return y + boxH + 3
+}
+
+// ─── 8. Signature lines ─────────────────────────────────────────────────────
+
+function drawSignatureLines(doc: jsPDF, y: number): void {
   const boxH = 16
   if (y + boxH > PAGE_H - MARGIN - 10) {
     doc.addPage()

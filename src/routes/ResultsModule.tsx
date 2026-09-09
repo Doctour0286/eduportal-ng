@@ -1018,11 +1018,13 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
           {!isOnline && <span className="res-offline-badge"><Icon name="cloud" size={14} /> offline</span>}
         </div>
 
-        {/* Assignment selector — hidden in promotion mode (has its own class picker) */}
-        {mode !== 'promotion' && renderAssignmentSelector()}
+        {/* Assignment selector — hidden in promotion AND reports mode (both
+            have their own class picker; reports also drops the subject
+            dimension entirely per the owner's explicit request — Session 81). */}
+        {mode !== 'promotion' && mode !== 'reports' && renderAssignmentSelector()}
 
-        {/* Term tabs — only when school uses terms, not in promotion mode */}
-        {mode !== 'promotion' && selectedAssign && renderTermSelector()}
+        {/* Term tabs — only when school uses terms; hidden in promotion/reports for the same reason as above */}
+        {mode !== 'promotion' && mode !== 'reports' && selectedAssign && renderTermSelector()}
 
         {/* Mode switcher — report cards need a window + remark permission */}
         {(isAdmin || canManageRemarks) && (
@@ -1087,10 +1089,6 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
           <ReportCardsPanel
             schoolId={schoolId}
             isAdmin={isAdmin}
-            session={session}
-            selectedTerm={selectedTerm}
-            selectedAssign={selectedAssign}
-            winInfo={winInfo}
           />
         ) : (
           <>
