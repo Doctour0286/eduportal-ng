@@ -1,6 +1,22 @@
 /**
  * ReportCardsPanel.tsx
- * PRD Tier 8 / Problem 8.4 (Session 49, rebuilt Session 81 — owner request).
+ * PRD Tier 8 / Problem 8.4 (Session 49, rebuilt Session 81 — owner request;
+ * Session 83 — switched print mechanism from jsPDF to HTML/browser-print).
+ *
+ * Session 83 — print mechanism swap:
+ *   Uses reportCardHtml.ts (printReportCardHtml/printBatchReportCardHtml)
+ *   instead of reportCardPdf.ts (downloadReportCardPdf/
+ *   downloadBatchReportCardPdf). Both single and batch print now open a
+ *   new tab with a plain HTML document and trigger the browser's native
+ *   print dialog — the same proven approach printStudentIdCards.ts already
+ *   uses — rather than generating PDF bytes with jsPDF and triggering a
+ *   file download. See reportCardHtml.ts's own file header for why: after
+ *   extensive investigation (Sessions 80-82), jsPDF's text-drawing
+ *   internals proved unable to correctly render Arabic on real devices no
+ *   matter how the input was pre-processed, while the browser's own text
+ *   engine (used here) renders it correctly for free. buildOptionsForStudent
+ *   below is UNCHANGED from the jsPDF version — it assembles the exact same
+ *   data shape, this was purely a rendering-engine swap at the call sites.
  *
  * Session 81 rebuild — what changed and why:
  *   - DROPPED the subject/teaching-assignment dependency entirely. The
@@ -20,9 +36,9 @@
  *     class here, not just ones they hold a subject assignment for.
  *   - ADDED: student search (filters the loaded roster client-side).
  *   - ADDED: checkbox multi-select with "select all filtered", "Print all"
- *     and "Print selected" — both produce ONE combined multi-page PDF via
- *     reportCardPdf.ts's new downloadBatchReportCardPdf() (owner's explicit
- *     answer: one file, not a zip of separate PDFs).
+ *     and "Print selected" — both produce ONE combined print job (one
+ *     browser tab, one page per student) via reportCardHtml.ts (owner's
+ *     explicit answer: one combined output, not separate files per student).
  *   - ADDED: passport photo now flows through automatically (students.
  *     photo_url, already resolved via getStudentPhotoSignedUrl — reuses the
  *     exact signed-URL pattern the Students module already established,
@@ -48,7 +64,7 @@ import {
   type AssessmentWindow,
   type AssessmentWindowClassRow,
 } from '../services/assessmentService'
-import { downloadReportCardPdf, downloadBatchReportCardPdf, type ReportCardPdfOptions } from '../services/reportCardPdf'
+import { printReportCardHtml, printBatchReportCardHtml, type ReportCardHtmlOptions } from '../services/reportCardHtml'
 import { loadCurrentSession, loadTermsForSession, type Session, type Term } from '../services/resultsService'
 import { loadAllLeafClasses, type ClassNode } from '../services/attendanceService'
 import { getStudentPhotoSignedUrl } from '../services/studentsService'
@@ -284,7 +300,7 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
 
-  async function buildOptionsForStudent(studentId: string): Promise<ReportCardPdfOptions | null> {
+  async function buildOptionsForStudent(studentId: string): Promise<ReportCardHtmlOptions | null> {
     if (!selectedClass || !session) return null
     const res = await loadReportCardData({
       schoolId,
@@ -323,7 +339,7 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
     const opts = await buildOptionsForStudent(studentId)
     setPdfBusyFor(null)
     if (!opts) return
-    await downloadReportCardPdf(opts)
+    printReportCardHtml(opts)
   }
 
   /**
@@ -340,7 +356,7 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
     setInlineError('')
     setBatchProgress({ done: 0, total: targetIds.length })
 
-    const optsList: ReportCardPdfOptions[] = []
+    const optsList: ReportCardHtmlOptions[] = []
     for (const studentId of targetIds) {
       const opts = await buildOptionsForStudent(studentId)
       if (opts) optsList.push(opts)
@@ -351,8 +367,7 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
     setBatchProgress(null)
     if (optsList.length === 0) return
 
-    const label = selectedTerm ? `${selectedClass?.name}-${selectedTerm.name}` : `${selectedClass?.name}-${session?.name}`
-    await downloadBatchReportCardPdf(optsList, label ?? 'report-cards')
+    printBatchReportCardHtml(optsList)
   }
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -539,11 +554,11 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
                     className="rpt-pdf-btn"
                     onClick={() => handleDownloadOne(r.studentId)}
                     disabled={pdfBusyFor === r.studentId || batchBusy}
-                    aria-label={`Download report card for ${r.fullName}`}
+                    aria-label={`Print report card for ${r.fullName}`}
                   >
                     {pdfBusyFor === r.studentId
                       ? <Icon name="refresh-cw" size={15} />
-                      : <><Icon name="file-text" size={15} /> PDF</>}
+                      : <><Icon name="printer" size={15} /> Print</>}
                   </button>
                 </div>
               ))
