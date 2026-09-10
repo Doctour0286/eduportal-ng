@@ -16,9 +16,10 @@
  * the real gate per §3.2. Every destructive action confirms first.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Icon } from '../components/icons'
 import { supabase } from '../lib/supabase'
+import { useAuthStore } from '../stores/authStore'
 import {
   loadWindows,
   createWindow,
@@ -49,6 +50,12 @@ import {
   loadAggregateBands,
   saveAggregateBand,
   deleteAggregateBand,
+  loadAllFormMasters,
+  assignFormMaster,
+  uploadFormMasterSignature,
+  loadReportCardSettings,
+  saveReportCardSettings,
+  loadMostRecentReportCardSettings,
   type AssessmentWindow,
   type ComponentProfile,
   type ScoreComponentWithMax,
@@ -57,6 +64,7 @@ import {
   type ExamEntry,
   type SecondaryGradeBand,
   type AggregateRemarkBand,
+  type ClassFormMaster,
 } from '../services/assessmentService'
 import {
   loadPromotionRules,
@@ -97,7 +105,7 @@ function SectionHeader({ title, action }: { title: string; action?: React.ReactN
 // ─── Tab 1: Assessments ───────────────────────────────────────────────────────
 
 export function AssessmentsTab({ schoolId }: { schoolId: string }) {
-  const [section, setSection] = useState<'windows' | 'exams' | 'grading'>('windows')
+  const [section, setSection] = useState<'windows' | 'exams' | 'grading' | 'reportcards'>('windows')
   return (
     <div className="set-tab-content">
       <div className="asw-subnav" role="tablist">
@@ -105,6 +113,7 @@ export function AssessmentsTab({ schoolId }: { schoolId: string }) {
           ['windows', 'Windows'],
           ['exams', 'Exams & venues'],
           ['grading', 'Grading & remarks'],
+          ['reportcards', 'Report cards'],
         ] as const).map(([id, label]) => (
           <button
             key={id}
@@ -121,6 +130,7 @@ export function AssessmentsTab({ schoolId }: { schoolId: string }) {
       {section === 'windows' && <WindowsSection schoolId={schoolId} />}
       {section === 'exams'   && <ExamsSection schoolId={schoolId} />}
       {section === 'grading' && <GradingSection schoolId={schoolId} />}
+      {section === 'reportcards' && <ReportCardsSettingsSection schoolId={schoolId} />}
     </div>
   )
 }
@@ -1356,6 +1366,456 @@ export function PromotionTabSecondary({ schoolId }: { schoolId: string }) {
 }
 
 // ─── Local micro-primitives (mirror SettingsModule's private helpers) ─────────
+
+// ─── Report cards section (Session 84 — Phase 3 of the Session 81 report
+// card overhaul: admin UI for the tables/services built back then, which
+// until now had no screen anywhere to actually configure them from) ────────
+//
+// Two independent CRUD surfaces sharing one section, same as Grading's own
+// two-band-types-in-one-section precedent above:
+//   1. Form master assignment — one staff member per class, with contact
+//      info/notes for the guardian portal and an uploadable signature.
+//      Assigning ALSO grants that staff a class-scoped permission (handled
+//      entirely inside assignFormMaster() — this UI just calls it).
+//   2. Report card print settings — resumption date / next-term fees /
+//      notice, per class+session+term, with a "copy from last term" action.
+
+function ReportCardsSettingsSection({ schoolId }: { schoolId: string }) {
+  const [subsection, setSubsection] = useState<'formmasters' | 'printsettings'>('formmasters')
+  return (
+    <div>
+      <div className="asw-subnav" role="tablist" style={{ marginBottom: 'var(--space-3)' }}>
+        {([
+          ['formmasters', 'Form masters'],
+          ['printsettings', 'Print settings'],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={subsection === id}
+            className={['asw-subnav-btn', subsection === id ? 'asw-subnav-btn--active' : ''].join(' ')}
+            onClick={() => setSubsection(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {subsection === 'formmasters' && <FormMastersSection schoolId={schoolId} />}
+      {subsection === 'printsettings' && <ReportCardPrintSettingsSection schoolId={schoolId} />}
+    </div>
+  )
+}
+
+function FormMastersSection({ schoolId }: { schoolId: string }) {
+  const actorRecordId = useAuthStore(s => s.actorRecordId)
+
+  const [leafClasses, setLeafClasses] = useState<ClassNode[]>([])
+  const [staffList, setStaffList] = useState<StaffListItem[]>([])
+  const [formMasters, setFormMasters] = useState<ClassFormMaster[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [assignForm, setAssignForm] = useState<{
+    classNodeId: string
+    staffId: string
+    contactPhone: string
+    contactEmail: string
+    notesForParents: string
+  } | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // Signature upload — separate from the assign form itself, since a
+  // signature can only be uploaded for a class that ALREADY has a form
+  // master assigned (the upload path keys off class_node_id on an
+  // existing class_form_masters row — see uploadFormMasterSignature).
+  const signatureInputRef = useRef<HTMLInputElement>(null)
+  const [signatureUploadClassId, setSignatureUploadClassId] = useState<string | null>(null)
+  const [signatureUploading, setSignatureUploading] = useState(false)
+  const [signatureError, setSignatureError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [clsRes, staffRes, fmRes] = await Promise.all([
+      loadClassNodes(schoolId),
+      loadStaffWithRoles(schoolId),
+      loadAllFormMasters(schoolId),
+    ])
+    if (clsRes.error) { setError(clsRes.error); setLoading(false); return }
+    setLeafClasses((clsRes.data ?? []).filter(c => c.is_leaf_enrollable))
+    if (!staffRes.ok) { setError(staffRes.error); setLoading(false); return }
+    setStaffList(staffRes.data)
+    if (!fmRes.ok) { setError(fmRes.error); setLoading(false); return }
+    setFormMasters(fmRes.data)
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Skeletonish />
+
+  const formMasterByClassId = new Map(formMasters.map(fm => [fm.class_node_id, fm]))
+  const classById = new Map(leafClasses.map(c => [c.id, c]))
+
+  function handleSignatureButtonClick(classNodeId: string) {
+    setSignatureUploadClassId(classNodeId)
+    setSignatureError(null)
+    signatureInputRef.current?.click()
+  }
+
+  async function handleSignatureSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-selecting the same file later
+    if (!file || !signatureUploadClassId) return
+    setSignatureUploading(true)
+    setSignatureError(null)
+    const res = await uploadFormMasterSignature({ schoolId, classNodeId: signatureUploadClassId, file })
+    setSignatureUploading(false)
+    if (!res.ok) { setSignatureError(res.error); return }
+    await load()
+  }
+
+  return (
+    <div>
+      {error && <ErrorBoxish message={error} onRetry={load} />}
+      {signatureError && <p className="set-form-error">{signatureError}</p>}
+
+      <input
+        ref={signatureInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={handleSignatureSelected}
+      />
+
+      <SectionHeader
+        title="Form masters / class coordinators"
+        action={
+          <button
+            className="set-add-btn"
+            onClick={() => setAssignForm({ classNodeId: leafClasses[0]?.id ?? '', staffId: staffList[0]?.id ?? '', contactPhone: '', contactEmail: '', notesForParents: '' })}
+          >
+            + Assign form master
+          </button>
+        }
+      />
+      <p className="set-empty-hint">
+        A form master can edit remarks and upload a signature for their own class's report cards, and their
+        contact details/notes show on the guardian and student portal for that class.
+      </p>
+
+      {leafClasses.length === 0 && (
+        <p className="set-empty-hint">No classes set up yet — add classes in the Classes tab first.</p>
+      )}
+
+      {leafClasses.map(cls => {
+        const fm = formMasterByClassId.get(cls.id)
+        return (
+          <div key={cls.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{cls.name}</p>
+              {fm ? (
+                <>
+                  <p className="set-list-row-meta">{fm.staff_name}</p>
+                  {(fm.contact_phone || fm.contact_email) && (
+                    <p className="set-list-row-meta">
+                      {[fm.contact_phone, fm.contact_email].filter(Boolean).join('  •  ')}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="set-list-row-meta">No form master assigned</p>
+              )}
+            </div>
+            <div className="set-list-row-actions">
+              {fm && (
+                <button
+                  className="set-edit-btn"
+                  onClick={() => handleSignatureButtonClick(cls.id)}
+                  disabled={signatureUploading && signatureUploadClassId === cls.id}
+                >
+                  {signatureUploading && signatureUploadClassId === cls.id
+                    ? 'Uploading…'
+                    : fm.signature_url ? 'Change signature' : 'Upload signature'}
+                </button>
+              )}
+              <button
+                className="set-edit-btn"
+                onClick={() => setAssignForm({
+                  classNodeId: cls.id,
+                  staffId: fm?.staff_id ?? staffList[0]?.id ?? '',
+                  contactPhone: fm?.contact_phone ?? '',
+                  contactEmail: fm?.contact_email ?? '',
+                  notesForParents: fm?.notes_for_parents ?? '',
+                })}
+              >
+                {fm ? 'Reassign / edit' : 'Assign'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      {assignForm && (
+        <Sheetish
+          title={classById.get(assignForm.classNodeId)?.name
+            ? `Form master for ${classById.get(assignForm.classNodeId)!.name}`
+            : 'Assign form master'}
+          onClose={() => setAssignForm(null)}
+        >
+          <FieldRowish label="Class">
+            <select
+              className="set-input"
+              value={assignForm.classNodeId}
+              onChange={e => setAssignForm({ ...assignForm, classNodeId: e.target.value })}
+            >
+              {leafClasses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </FieldRowish>
+          <FieldRowish label="Staff member">
+            <select
+              className="set-input"
+              value={assignForm.staffId}
+              onChange={e => setAssignForm({ ...assignForm, staffId: e.target.value })}
+            >
+              {staffList.map(s => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+            </select>
+          </FieldRowish>
+          <FieldRowish label="Contact phone (for parents)">
+            <Inputish
+              value={assignForm.contactPhone}
+              onChange={v => setAssignForm({ ...assignForm, contactPhone: v })}
+              placeholder="If different from their staff record"
+            />
+          </FieldRowish>
+          <FieldRowish label="Contact email (for parents)">
+            <Inputish
+              value={assignForm.contactEmail}
+              onChange={v => setAssignForm({ ...assignForm, contactEmail: v })}
+              placeholder="If different from their staff record"
+            />
+          </FieldRowish>
+          <FieldRowish label="Notes for parents">
+            <textarea
+              className="set-input"
+              rows={3}
+              value={assignForm.notesForParents}
+              onChange={e => setAssignForm({ ...assignForm, notesForParents: e.target.value })}
+              placeholder="Shown on the guardian/student portal for this class"
+            />
+          </FieldRowish>
+          <SheetFooterish
+            onCancel={() => setAssignForm(null)}
+            saving={saving}
+            onSave={async () => {
+              if (!assignForm.classNodeId || !assignForm.staffId) { alert('Class and staff member are required.'); return }
+              if (!actorRecordId) { alert('Could not identify the current user.'); return }
+              setSaving(true)
+              const res = await assignFormMaster({
+                schoolId,
+                classNodeId: assignForm.classNodeId,
+                staffId: assignForm.staffId,
+                contactPhone: assignForm.contactPhone.trim() || null,
+                contactEmail: assignForm.contactEmail.trim() || null,
+                notesForParents: assignForm.notesForParents.trim() || null,
+                assignedBy: actorRecordId,
+              })
+              setSaving(false)
+              if (!res.ok) { alert(res.error); return }
+              setAssignForm(null)
+              await load()
+            }}
+          />
+        </Sheetish>
+      )}
+    </div>
+  )
+}
+
+function ReportCardPrintSettingsSection({ schoolId }: { schoolId: string }) {
+  const actorRecordId = useAuthStore(s => s.actorRecordId)
+
+  const [leafClasses, setLeafClasses] = useState<ClassNode[]>([])
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [terms, setTerms] = useState<Term[]>([])
+  const [selectedClassId, setSelectedClassId] = useState('')
+  const [selectedSessionId, setSelectedSessionId] = useState('')
+  const [selectedTermId, setSelectedTermId] = useState<string>('') // '' = whole session (uses_terms=false schools, or explicit "no term" choice)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [form, setForm] = useState({ resumptionDate: '', nextTermFees: '', notice: '' })
+  const [formLoaded, setFormLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveMsg, setSaveMsg] = useState<string | null>(null)
+  const [hasPrevious, setHasPrevious] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const [clsRes, sessRes] = await Promise.all([
+      loadClassNodes(schoolId),
+      loadSessions(schoolId),
+    ])
+    if (clsRes.error) { setError(clsRes.error); setLoading(false); return }
+    const leaves = (clsRes.data ?? []).filter(c => c.is_leaf_enrollable)
+    setLeafClasses(leaves)
+    if (sessRes.error) { setError(sessRes.error); setLoading(false); return }
+    setSessions(sessRes.data)
+    setSelectedClassId(prev => prev || leaves[0]?.id || '')
+    setSelectedSessionId(prev => prev || sessRes.data.find(s => s.is_current)?.id || sessRes.data[0]?.id || '')
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  // Load terms whenever the selected session changes.
+  useEffect(() => {
+    if (!selectedSessionId) { setTerms([]); return }
+    let cancelled = false
+    loadTerms(schoolId, selectedSessionId).then(res => {
+      if (cancelled) return
+      if (!res.error) {
+        setTerms(res.data)
+        setSelectedTermId(res.data[0]?.id ?? '')
+      }
+    })
+    return () => { cancelled = true }
+  }, [schoolId, selectedSessionId])
+
+  // Load the settings row (if any) whenever class/session/term selection changes.
+  useEffect(() => {
+    if (!selectedClassId || !selectedSessionId) return
+    let cancelled = false
+    setFormLoaded(false)
+    setSaveMsg(null);
+    (async () => {
+      const res = await loadReportCardSettings({
+        classNodeId: selectedClassId,
+        sessionId: selectedSessionId,
+        termId: selectedTermId || null,
+      })
+      if (cancelled) return
+      if (res.ok && res.data) {
+        setForm({
+          resumptionDate: res.data.resumption_date ?? '',
+          nextTermFees: res.data.next_term_fees != null ? String(res.data.next_term_fees) : '',
+          notice: res.data.notice ?? '',
+        })
+      } else {
+        setForm({ resumptionDate: '', nextTermFees: '', notice: '' })
+      }
+      const prevRes = await loadMostRecentReportCardSettings({
+        classNodeId: selectedClassId,
+        excludeSessionId: selectedSessionId,
+        excludeTermId: selectedTermId || null,
+      })
+      if (cancelled) return
+      setHasPrevious(!!(prevRes.ok && prevRes.data))
+      setFormLoaded(true)
+    })()
+    return () => { cancelled = true }
+  }, [selectedClassId, selectedSessionId, selectedTermId])
+
+  async function handleCopyFromLastTerm() {
+    const prevRes = await loadMostRecentReportCardSettings({
+      classNodeId: selectedClassId,
+      excludeSessionId: selectedSessionId,
+      excludeTermId: selectedTermId || null,
+    })
+    if (!prevRes.ok || !prevRes.data) { alert('No previous settings found for this class.'); return }
+    setForm({
+      resumptionDate: prevRes.data.resumption_date ?? '',
+      nextTermFees: prevRes.data.next_term_fees != null ? String(prevRes.data.next_term_fees) : '',
+      notice: prevRes.data.notice ?? '',
+    })
+  }
+
+  async function handleSave() {
+    if (!actorRecordId) { alert('Could not identify the current user.'); return }
+    const fees = form.nextTermFees.trim() ? parseFloat(form.nextTermFees) : null
+    if (form.nextTermFees.trim() && isNaN(fees as number)) { alert('Next term fees must be a number.'); return }
+    setSaving(true)
+    setSaveMsg(null)
+    const res = await saveReportCardSettings({
+      schoolId,
+      classNodeId: selectedClassId,
+      sessionId: selectedSessionId,
+      termId: selectedTermId || null,
+      resumptionDate: form.resumptionDate || null,
+      nextTermFees: fees,
+      notice: form.notice.trim() || null,
+      createdBy: actorRecordId,
+    })
+    setSaving(false)
+    if (!res.ok) { alert(res.error); return }
+    setSaveMsg('Saved.')
+  }
+
+  if (loading) return <Skeletonish />
+
+  return (
+    <div>
+      {error && <ErrorBoxish message={error} onRetry={load} />}
+
+      <SectionHeader title="Report card print settings" />
+      <p className="set-empty-hint">
+        Resumption date, next term's fees, and a notice — printed on report cards for the class and term
+        selected below. Set once per class per term; nothing prints if a field is left blank.
+      </p>
+
+      <FieldRowish label="Class">
+        <select className="set-input" value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)}>
+          {leafClasses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </FieldRowish>
+      <FieldRowish label="Session">
+        <select className="set-input" value={selectedSessionId} onChange={e => setSelectedSessionId(e.target.value)}>
+          {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </FieldRowish>
+      {terms.length > 0 && (
+        <FieldRowish label="Term">
+          <select className="set-input" value={selectedTermId} onChange={e => setSelectedTermId(e.target.value)}>
+            {terms.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </FieldRowish>
+      )}
+
+      {formLoaded && (
+        <>
+          <div className="set-section-header" style={{ marginTop: 'var(--space-4)' }}>
+            <p className="set-section-label">Settings for this class + term</p>
+            {hasPrevious && (
+              <button className="set-add-btn" onClick={handleCopyFromLastTerm}>Copy from last term</button>
+            )}
+          </div>
+
+          <FieldRowish label="Next resumption date">
+            <Inputish type="date" value={form.resumptionDate} onChange={v => setForm({ ...form, resumptionDate: v })} />
+          </FieldRowish>
+          <FieldRowish label="Next term fees (₦)">
+            <Inputish type="number" value={form.nextTermFees} onChange={v => setForm({ ...form, nextTermFees: v })} placeholder="e.g. 65000" />
+          </FieldRowish>
+          <FieldRowish label="Notice">
+            <textarea
+              className="set-input"
+              rows={3}
+              value={form.notice}
+              onChange={e => setForm({ ...form, notice: e.target.value })}
+              placeholder="e.g. All outstanding fees must be cleared before resumption."
+            />
+          </FieldRowish>
+
+          <div className="set-sheet-footer" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
+            {saveMsg && <span className="set-list-row-meta" style={{ marginRight: 'auto' }}>{saveMsg}</span>}
+            <button className="set-save-btn" onClick={handleSave} disabled={saving} style={{ flex: '0 0 auto' }}>{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 function Skeletonish() {
   return (
