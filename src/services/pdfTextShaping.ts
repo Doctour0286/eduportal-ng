@@ -94,8 +94,18 @@ function containsArabic(str: string): boolean {
  * letter joining, producing disconnected/wrong glyph forms).
  */
 function shapeWord(word: string): string {
-  if (!containsArabic(word)) return word
-  const reshaped = ArabicReshaper.convertArabic(word)
+  // Normalize to NFC first — Arabic text entered via different keyboards/
+  // input systems can arrive as NFD (decomposed combining sequences, e.g.
+  // alef + a separate combining madda instead of the single precomposed
+  // "آ" codepoint). arabic-reshaper's character map is built for
+  // precomposed characters only; feeding it NFD input was confirmed
+  // directly to produce visibly wrong reshaping (a stray/duplicated
+  // character where a precomposed one should be) — this normalization
+  // closes that gap regardless of which real-world input path produces
+  // NFD text.
+  const normalized = word.normalize('NFC')
+  if (!containsArabic(normalized)) return normalized
+  const reshaped = ArabicReshaper.convertArabic(normalized)
   return [...reshaped].reverse().join('')
 }
 
@@ -211,7 +221,12 @@ export function drawRtlAwareText(
 ): void {
   if (!str) return
 
-  const words = str.split(' ')
+  // Normalize once, here, before any splitting/detection/shaping — see
+  // shapeWord's own comment for why NFC matters. Doing it here (not just
+  // inside shapeWord) means containsArabic's own detection calls below,
+  // and every downstream function, all see the same normalized text.
+  const normalizedStr = str.normalize('NFC')
+  const words = normalizedStr.split(' ')
   const isRtlLine = words.some(containsArabic)
   const orderedWords = layoutRunsForDraw(words, isRtlLine)
   const spaceWidth = doc.getTextWidth(' ')
@@ -293,7 +308,7 @@ function wrapOrderedWords(doc: jsPDF, orderedWords: string[], maxWidth: number):
  */
 export function countWrappedLines(doc: jsPDF, str: string, maxWidth: number): number {
   if (!str) return 0
-  const words = str.split(' ')
+  const words = str.normalize('NFC').split(' ')
   const isRtlLine = words.some(containsArabic)
   const orderedWords = layoutRunsForDraw(words, isRtlLine)
   return wrapOrderedWords(doc, orderedWords, maxWidth).length
@@ -310,7 +325,7 @@ export function drawRtlAwareWrappedText(
 ): number {
   if (!str) return 0
 
-  const words = str.split(' ')
+  const words = str.normalize('NFC').split(' ')
   const isRtlLine = words.some(containsArabic)
   const orderedWords = layoutRunsForDraw(words, isRtlLine)
   const spaceWidth = doc.getTextWidth(' ')
@@ -361,7 +376,8 @@ export function drawRtlAwareWrappedText(
 
 export function toVisualPdfText(str: string): string {
   if (!str) return str
-  const reshaped = ArabicReshaper.convertArabic(str)
+  const normalized = str.normalize('NFC')
+  const reshaped = ArabicReshaper.convertArabic(normalized)
   const embeddingLevels = bidi.getEmbeddingLevels(reshaped)
   const flips = bidi.getReorderSegments(reshaped, embeddingLevels)
   if (flips.length === 0) return reshaped
