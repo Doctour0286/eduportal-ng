@@ -95,6 +95,7 @@ interface GradeBandRow {
 
 export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanelProps) {
   const actorRecordId = useAuthStore((s) => s.actorRecordId)
+  const canForClass = useAuthStore((s) => s.canForClass)
   const schoolName = useSchoolStore((s) => s.school?.name ?? '')
   const schoolLogoUrl = useSchoolStore((s) => s.school?.logo_url ?? null)
 
@@ -185,6 +186,17 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
   const [search, setSearch] = useState('')
 
   const selectedClass = classes.find(c => c.id === selectedClassId) ?? null
+
+  // Session 84: whether the CURRENT user can edit remarks for the
+  // CURRENTLY SELECTED class specifically — not just "can they see this
+  // panel at all" (that's the coarser check ResultsModule.tsx's own mode
+  // tab already does). A form master scoped to one class must not see an
+  // editable-looking textarea for a different class they can't actually
+  // save changes to; the database itself now enforces this correctly too
+  // (migration_tier8_s84_remarks_class_scope_fix.sql), this is the UI
+  // reflecting that same rule so the textarea's enabled/disabled state
+  // isn't misleading.
+  const canEditRemarksForSelectedClass = isAdmin || (!!selectedClassId && canForClass('academics.remarks.manage', selectedClassId))
 
   const load = useCallback(async () => {
     if (!selectedClassId || !session || !winChecked) return
@@ -283,7 +295,7 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
   }
 
   async function handleRemarkBlur(studentId: string) {
-    if (!winInfo || !actorRecordId) return
+    if (!winInfo || !actorRecordId || !canEditRemarksForSelectedClass) return
     setInlineError('')
     const res = await saveStudentRemark({
       schoolId,
@@ -543,9 +555,13 @@ export default function ReportCardsPanel({ schoolId, isAdmin }: ReportCardsPanel
                   <textarea
                     className="rpt-remark-input"
                     rows={2}
-                    placeholder={winInfo ? "Class teacher's remark…" : 'No window open for remarks'}
+                    placeholder={
+                      !winInfo ? 'No window open for remarks'
+                      : !canEditRemarksForSelectedClass ? 'You can only edit remarks for your own assigned class'
+                      : "Class teacher's remark…"
+                    }
                     value={remarks[r.studentId] ?? ''}
-                    disabled={!winInfo}
+                    disabled={!winInfo || !canEditRemarksForSelectedClass}
                     onChange={e => setRemarks(prev => ({ ...prev, [r.studentId]: e.target.value }))}
                     onBlur={() => handleRemarkBlur(r.studentId)}
                   />

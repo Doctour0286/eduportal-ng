@@ -44,6 +44,7 @@ import {
   type PaymentHistoryRow,
   type PortalAnnouncement,
 } from '../services/portalService'
+import { loadFormMaster, type ClassFormMaster } from '../services/assessmentService'
 import {
   loadStudentTranscript,
   type StudentTranscript,
@@ -708,6 +709,29 @@ function ResultsTab({
   const [results, setResults] = useState<SubjectResultRow[]>([])
   const [expandedSubject, setExpandedSubject] = useState<string | null>(null)
 
+  // Session 84 (owner request, Phase 4 of the report card overhaul): show
+  // the class's form master/coordinator's contact details and notes here,
+  // since a guardian looking at their child's results is exactly who'd
+  // want to know who to contact about them. Loaded independently of the
+  // term selector below (a form master is a whole-class, whole-period
+  // fact, not scoped to one term) and independently of the results
+  // load/error state (this card should still show even if results
+  // themselves are empty or still loading).
+  const [formMaster, setFormMaster] = useState<ClassFormMaster | null>(null)
+  const [formMasterChecked, setFormMasterChecked] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setFormMasterChecked(false)
+    if (!child.class_node_id) { setFormMaster(null); setFormMasterChecked(true); return }
+    loadFormMaster(child.class_node_id).then(res => {
+      if (cancelled) return
+      setFormMaster(res.ok ? res.data : null)
+      setFormMasterChecked(true)
+    })
+    return () => { cancelled = true }
+  }, [child.class_node_id])
+
   useEffect(() => {
     if (terms.length > 0 && !selectedTermId) setSelectedTermId(terms[0].id)
   }, [terms, selectedTermId])
@@ -737,6 +761,21 @@ function ResultsTab({
 
   return (
     <div className="port-results">
+      {formMasterChecked && formMaster && (formMaster.contact_phone || formMaster.contact_email || formMaster.notes_for_parents) && (
+        <div className="port-form-master-card">
+          <p className="port-form-master-title">Class Teacher</p>
+          <p className="port-form-master-name">{formMaster.staff_name}</p>
+          {(formMaster.contact_phone || formMaster.contact_email) && (
+            <p className="port-form-master-contact">
+              {[formMaster.contact_phone, formMaster.contact_email].filter(Boolean).join('  •  ')}
+            </p>
+          )}
+          {formMaster.notes_for_parents && (
+            <p className="port-form-master-notes">{formMaster.notes_for_parents}</p>
+          )}
+        </div>
+      )}
+
       {usesTerms && terms.length > 0 && (
         <div className="port-term-bar">
           {terms.map((t) => (

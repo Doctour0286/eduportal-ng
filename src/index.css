@@ -15503,6 +15503,24 @@ body {
   border-radius: var(--radius-md);
   overflow: hidden;
 }
+.port-form-master-card {
+  border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--color-brand-50);
+}
+.port-form-master-title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--color-brand-700);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 0 0 2px;
+}
+.port-form-master-name { font-weight: 600; color: var(--color-text); margin: 0; }
+.port-form-master-contact { font-size: var(--text-sm); color: var(--color-text-muted); margin: 2px 0 0; }
+.port-form-master-notes { font-size: var(--text-sm); color: var(--color-text); margin: var(--space-2) 0 0; }
 .port-result-card-header {
   width: 100%;
   display: flex;
