@@ -1443,7 +1443,7 @@ function FormMastersSection({ schoolId }: { schoolId: string }) {
     ])
     if (clsRes.error) { setError(clsRes.error); setLoading(false); return }
     setLeafClasses((clsRes.data ?? []).filter(c => c.is_leaf_enrollable))
-    if (!staffRes.ok) { setError(staffRes.error); setLoading(false); return }
+    if (staffRes.error) { setError(staffRes.error); setLoading(false); return }
     setStaffList(staffRes.data)
     if (!fmRes.ok) { setError(fmRes.error); setLoading(false); return }
     setFormMasters(fmRes.data)
