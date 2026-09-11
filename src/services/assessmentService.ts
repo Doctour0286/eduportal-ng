@@ -268,19 +268,34 @@ export async function createWindow(params: {
     if (error) return err(friendly(error.message))
     const w = data as any
 
-    // Every window starts with one profile so attaching classes always has a
-    // valid profile to point at (assessment_window_classes.profile_id is NOT NULL).
-    // The insert result IS checked: a silently-failed profile row would leave
-    // the window with zero weightings and nothing to attach classes to — the
-    // admin would see a window that "can't add components" with no explanation.
-    const profIns = await supabase
+    // Session 85: profiles are school-scoped and reusable across windows
+    // now (see migration_tier8_s85_reusable_score_profiles.sql) — a new
+    // window should NOT automatically spawn its own "Default weighting"
+    // profile if the school already has one or more real profiles to
+    // reuse; that would just clutter the profile list with redundant
+    // near-duplicates every time a window is created. The auto-create
+    // still happens, but ONLY for a school's very first window ever
+    // (zero existing profiles) — the ORIGINAL reason this existed still
+    // applies for that one case: assessment_window_classes.
+    // score_component_profile_id is NOT NULL, so attaching a class to a
+    // window needs SOME profile to exist, and a brand-new school has none
+    // yet to reuse.
+    const existingRes = await supabase
       .from('score_component_profiles')
-      .insert({ school_id: params.schoolId, assessment_window_id: w.id, name: 'Default weighting' })
-    if (profIns.error) {
-      return err(
-        `Window "${w.name}" was created, but its default weighting profile could not be ` +
-        `(${profIns.error.message}). Delete the window and try again, or add a weighting manually.`,
-      )
+      .select('id', { count: 'exact', head: true })
+      .eq('school_id', params.schoolId)
+    const hasExistingProfiles = (existingRes.count ?? 0) > 0
+
+    if (!hasExistingProfiles) {
+      const profIns = await supabase
+        .from('score_component_profiles')
+        .insert({ school_id: params.schoolId, assessment_window_id: null, name: 'Default weighting' })
+      if (profIns.error) {
+        return err(
+          `Window "${w.name}" was created, but its default weighting profile could not be ` +
+          `(${profIns.error.message}). Delete the window and try again, or add a weighting manually.`,
+        )
+      }
     }
 
     return { ok: true, data: w as AssessmentWindow }
@@ -330,32 +345,45 @@ export async function deleteWindow(windowId: string): Promise<Result<true>> {
  * Per-window setup counts for list rendering (classes attached + weightings
  * defined), in two batched queries — never one query per window.
  */
+/**
+ * Per-window setup counts for list rendering (classes attached + distinct
+ * weightings in use), in two batched queries — never one query per window.
+ *
+ * Session 85: "profiles" now counts DISTINCT score_component_profile_id
+ * values actually attached to this window's classes (via
+ * assessment_window_classes), not score_component_profiles rows whose own
+ * assessment_window_id happens to match — now that profiles are reusable
+ * across windows (migration_tier8_s85_reusable_score_profiles.sql), a
+ * profile actually in use by this window's classes may have been
+ * originally created under a DIFFERENT window (or none at all), so its
+ * own assessment_window_id would no longer reliably indicate which
+ * window(s) currently use it. assessment_window_classes is the real,
+ * current source of truth for "which weighting does this window's class
+ * use," regardless of where that weighting was first created.
+ */
 export async function loadWindowSummaries(
   windowIds: string[],
 ): Promise<Result<Map<string, { classes: number; profiles: number }>>> {
   const map = new Map<string, { classes: number; profiles: number }>()
   if (windowIds.length === 0) return { ok: true, data: map }
   try {
-    const [awcRes, profRes] = await Promise.all([
-      supabase
-        .from('assessment_window_classes')
-        .select('assessment_window_id')
-        .in('assessment_window_id', windowIds),
-      supabase
-        .from('score_component_profiles')
-        .select('assessment_window_id')
-        .in('assessment_window_id', windowIds),
-    ])
+    const awcRes = await supabase
+      .from('assessment_window_classes')
+      .select('assessment_window_id, score_component_profile_id')
+      .in('assessment_window_id', windowIds)
     if (awcRes.error) return err(friendly(awcRes.error.message))
-    if (profRes.error) return err(friendly(profRes.error.message))
+
     for (const id of windowIds) map.set(id, { classes: 0, profiles: 0 })
+    const profileIdsByWindow = new Map<string, Set<string>>()
     for (const r of awcRes.data ?? []) {
       const cur = map.get(r.assessment_window_id)
       if (cur) cur.classes += 1
+      if (!profileIdsByWindow.has(r.assessment_window_id)) profileIdsByWindow.set(r.assessment_window_id, new Set())
+      profileIdsByWindow.get(r.assessment_window_id)!.add(r.score_component_profile_id)
     }
-    for (const r of profRes.data ?? []) {
-      const cur = map.get(r.assessment_window_id)
-      if (cur) cur.profiles += 1
+    for (const [windowId, profileIds] of profileIdsByWindow) {
+      const cur = map.get(windowId)
+      if (cur) cur.profiles = profileIds.size
     }
     return { ok: true, data: map }
   } catch (e: any) {

@@ -32,6 +32,7 @@ import {
   hasScoresUnderProfile,
   detachClassFromWindow,
   loadProfiles,
+  loadSchoolProfiles,
   saveProfile,
   deleteProfile,
   loadComponents,
@@ -257,7 +258,7 @@ function WindowsSection({ schoolId }: { schoolId: string }) {
   }
 
   async function handleDelete(w: AssessmentWindow) {
-    if (!confirm(`Delete "${w.name}"? Its weight profiles, attached classes, exam timetable entries, and student remarks are removed too.`)) return
+    if (!confirm(`Delete "${w.name}"? Its attached classes, exam timetable entries, and student remarks are removed too. Weighting profiles are not affected and remain available for other windows.`)) return
     const res = await deleteWindow(w.id)
     if (!res.ok) { alert(res.error); return }
     await load()
@@ -436,7 +437,7 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
     setLoading(true)
     setError(null)
     const [profRes, awcRes, clsRes] = await Promise.all([
-      loadProfiles(windowRow.id),
+      loadSchoolProfiles(schoolId),
       loadWindowClasses(windowRow.id),
       loadClassNodes(schoolId),
     ])
@@ -561,7 +562,7 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
                 const res = await saveProfile(
                   schoolId,
                   editingProfileId === '__new__'
-                    ? { name: profileDraft.trim(), windowId: windowRow!.id }
+                    ? { name: profileDraft.trim() } // Session 85: no windowId — profiles are school-scoped and reusable across windows now, not tied to whichever window they were first created from.
                     : { id: editingProfileId, name: profileDraft.trim() },
                 )
                 if (!res.ok) { setError(res.error); return }
