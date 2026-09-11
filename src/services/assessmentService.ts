@@ -41,6 +41,19 @@ function friendly(message: string): string {
   if (message.includes('duplicate key')) {
     return 'That entry already exists.'
   }
+  // Session 84 (owner-reported bug): a real, unhandled case reached this
+  // far and showed the raw Postgres text verbatim to the user
+  // ("update or delete on table... violates foreign key constraint...").
+  // This is a defense-in-depth fallback for ANY foreign-key violation this
+  // file's own callers didn't already pre-check for with a specific,
+  // more helpful message (see deleteComponent's own pre-check, added the
+  // same session this fallback was added, for the one case that was
+  // actually reachable) — a generic-but-readable message is still a large
+  // improvement over raw constraint-name text for any case not yet
+  // specifically handled.
+  if (message.includes('violates foreign key constraint')) {
+    return 'This can\u2019t be deleted because other records still depend on it. Remove those first, then try again.'
+  }
   return message
 }
 
@@ -399,6 +412,63 @@ export async function attachClassesToWindow(windowId: string, classNodeIds: stri
   }
 }
 
+/**
+ * hasScoresUnderProfile
+ * Session 84 (owner request) — before letting an admin switch a window-
+ * class's score_component_profile_id to a DIFFERENT profile, check
+ * whether real student scores already exist for that class under the
+ * CURRENT profile's components. Switching profiles doesn't delete or
+ * migrate those scores — they'd stay in the `scores` table exactly as
+ * they are, but the class would now show a different set of score
+ * columns (the new profile's components), making the old scores
+ * effectively invisible/unreachable from the UI without directly
+ * querying the database. This is a genuine data-integrity risk distinct
+ * from the delete-time FK violation this session's other fix addresses —
+ * that one blocks an impossible operation; this one warns before an
+ * operation that would SUCCEED but silently strand real data.
+ *
+ * Deliberately NOT scoped to one window's session/term — a class's scores
+ * could exist from ANY point in time under this profile's components
+ * (components are shared across all windows that ever used this profile,
+ * not window-specific), so checking window-wide is the safer, more
+ * conservative choice: a false "yes, scores exist" (blocking a switch
+ * that would have been fine) is a minor inconvenience an admin can
+ * investigate; a false "no scores exist" (allowing a switch that strands
+ * real data) is the actual harm this check exists to prevent.
+ */
+export async function hasScoresUnderProfile(params: {
+  classNodeId: string
+  profileId: string
+}): Promise<Result<boolean>> {
+  try {
+    const compRes = await supabase
+      .from('score_components')
+      .select('id')
+      .eq('score_component_profile_id', params.profileId)
+    if (compRes.error) return err(friendly(compRes.error.message))
+    const componentIds = (compRes.data ?? []).map((c: any) => c.id)
+    if (componentIds.length === 0) return { ok: true, data: false }
+
+    const studentRes = await supabase
+      .from('students')
+      .select('id')
+      .eq('class_node_id', params.classNodeId)
+    if (studentRes.error) return err(friendly(studentRes.error.message))
+    const studentIds = (studentRes.data ?? []).map((s: any) => s.id)
+    if (studentIds.length === 0) return { ok: true, data: false }
+
+    const { count, error } = await supabase
+      .from('scores')
+      .select('id', { count: 'exact', head: true })
+      .in('score_component_id', componentIds)
+      .in('student_id', studentIds)
+    if (error) return err(friendly(error.message))
+    return { ok: true, data: (count ?? 0) > 0 }
+  } catch (e: any) {
+    return err(e?.message ?? 'Failed to check existing scores')
+  }
+}
+
 export async function updateWindowClass(rowId: string, patch: {
   score_component_profile_id?: string
   is_promotional?: boolean
@@ -597,6 +667,27 @@ export async function saveComponent(schoolId: string, profileId: string, opts: {
 
 export async function deleteComponent(componentId: string): Promise<Result<true>> {
   try {
+    // Session 84 (owner-reported bug): refuse when real student scores
+    // still reference this component — the DB FK would block anyway
+    // (scores.score_component_id -> score_components.id), but failing
+    // here first gives a plain-English message instead of the raw
+    // Postgres constraint-violation text the owner actually saw
+    // ("update or delete on table 'score_components' violates foreign
+    // key constraint 'scores_score_component_id_fkey' on table
+    // 'scores'"). Mirrors deleteProfile's own pre-check pattern above,
+    // which this function should have had from the start — it was the
+    // one gap that let a raw DB error reach the UI, since deleteProfile
+    // itself was already safe (it separately checks for score_components
+    // before ever attempting a delete that could cascade into this exact
+    // FK violation).
+    const { count: scoresCount, error: scoresErr } = await supabase
+      .from('scores')
+      .select('id', { count: 'exact', head: true })
+      .eq('score_component_id', componentId)
+    if (scoresErr) return err(friendly(scoresErr.message))
+    if ((scoresCount ?? 0) > 0) {
+      return err('This score column still has student scores recorded against it. Those must be cleared first.')
+    }
     const { error } = await supabase
       .from('score_components')
       .delete()

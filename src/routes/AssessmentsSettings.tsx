@@ -29,6 +29,7 @@ import {
   loadWindowClasses,
   attachClassesToWindow,
   updateWindowClass,
+  hasScoresUnderProfile,
   detachClassFromWindow,
   loadProfiles,
   saveProfile,
@@ -605,7 +606,7 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
                     className="set-delete-btn"
                     aria-label={`Delete ${c.name}`}
                     onClick={async () => {
-                      if (!confirm(`Delete column "${c.name}"? Existing scores under it stay in the database but lose their column.`)) return
+                      if (!confirm(`Delete column "${c.name}"? This can only be done if no student scores are recorded against it yet.`)) return
                       const res = await deleteComponent(c.id)
                       if (!res.ok) { setError(res.error); return }
                       const refreshed = await loadComponents(activeProfileId)
@@ -661,7 +662,27 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
               className="set-select asw-class-select"
               value={a.score_component_profile_id}
               onChange={async e => {
-                const res = await updateWindowClass(a.id, { score_component_profile_id: e.target.value })
+                const newProfileId = e.target.value
+                if (newProfileId === a.score_component_profile_id) return
+                // Session 84 (owner request): warn before switching a
+                // class's profile if real scores already exist under the
+                // CURRENT one — see hasScoresUnderProfile's own comment
+                // for why this matters (switching doesn't migrate or
+                // delete those scores, it just makes them invisible from
+                // the new profile's column set).
+                const checkRes = await hasScoresUnderProfile({
+                  classNodeId: a.class_node_id,
+                  profileId: a.score_component_profile_id,
+                })
+                if (checkRes.ok && checkRes.data) {
+                  const proceed = confirm(
+                    `${a.class_node_name} already has student scores recorded under its current weighting. ` +
+                    `Switching to a different weighting will NOT delete those scores, but they will no longer ` +
+                    `show up under the new weighting's columns. Continue anyway?`
+                  )
+                  if (!proceed) return
+                }
+                const res = await updateWindowClass(a.id, { score_component_profile_id: newProfileId })
                 if (!res.ok) { setError(res.error); return }
                 await loadAll()
               }}
