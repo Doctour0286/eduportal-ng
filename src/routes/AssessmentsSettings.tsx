@@ -1,11 +1,25 @@
 /**
  * AssessmentsSettings.tsx
- * PRD Tier 8 / Problem 8.4 (Sessions 46–50) — admin configuration surfaces
- * for the Assessment Window system and secondary-school promotion, rendered
- * inside SettingsModule as two tabs:
+ * PRD Tier 8 / Problem 8.4 (Sessions 46–50, restructured Session 86) —
+ * admin configuration surfaces for the Assessment Window system and
+ * secondary-school promotion, rendered inside SettingsModule as two tabs:
  *
- *   AssessmentsTab        — sub-sectioned: Windows | Exams & venues | Grading
+ *   AssessmentsTab        — sub-sectioned: Windows | Weightings |
+ *                            Exams & venues | Grading & remarks |
+ *                            Report cards
  *   PromotionTabSecondary — promotion rules + the run-preview/apply flow
+ *
+ * Session 86 (owner request — "profiles usable across windows" plus "make
+ * the whole Assessments tab intuitive"): weighting profiles got their own
+ * standalone Weightings sub-section (ProfilesSection) instead of being
+ * managed inline inside a single window's own setup sheet, which implied
+ * a per-window ownership that stopped being true once profiles became
+ * school-wide reusable resources (migration_tier8_s85_reusable_score_
+ * profiles.sql). WindowDetailSheet now only PICKS a profile per class
+ * (a plain dropdown) and links out to the same profile-columns editor
+ * (ProfileColumnsSheet) the standalone section uses — one editor, two
+ * entry points, instead of two different, half-duplicated ways to do the
+ * same thing depending on where you started.
  *
  * Lives outside SettingsModule.tsx deliberately: that file is already the
  * largest in the codebase, and both surfaces are substantial standalone CRUD
@@ -31,7 +45,6 @@ import {
   updateWindowClass,
   hasScoresUnderProfile,
   detachClassFromWindow,
-  loadProfiles,
   loadSchoolProfiles,
   saveProfile,
   deleteProfile,
@@ -107,12 +120,13 @@ function SectionHeader({ title, action }: { title: string; action?: React.ReactN
 // ─── Tab 1: Assessments ───────────────────────────────────────────────────────
 
 export function AssessmentsTab({ schoolId }: { schoolId: string }) {
-  const [section, setSection] = useState<'windows' | 'exams' | 'grading' | 'reportcards'>('windows')
+  const [section, setSection] = useState<'windows' | 'weightings' | 'exams' | 'grading' | 'reportcards'>('windows')
   return (
     <div className="set-tab-content">
       <div className="asw-subnav" role="tablist">
         {([
           ['windows', 'Windows'],
+          ['weightings', 'Weightings'],
           ['exams', 'Exams & venues'],
           ['grading', 'Grading & remarks'],
           ['reportcards', 'Report cards'],
@@ -130,6 +144,7 @@ export function AssessmentsTab({ schoolId }: { schoolId: string }) {
       </div>
 
       {section === 'windows' && <WindowsSection schoolId={schoolId} />}
+      {section === 'weightings' && <ProfilesSection schoolId={schoolId} />}
       {section === 'exams'   && <ExamsSection schoolId={schoolId} />}
       {section === 'grading' && <GradingSection schoolId={schoolId} />}
       {section === 'reportcards' && <ReportCardsSettingsSection schoolId={schoolId} />}
@@ -417,20 +432,23 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
   onClose: () => void
 }) {
   const [profiles, setProfiles] = useState<ComponentProfile[]>([])
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null)
-  const [components, setComponents] = useState<ScoreComponentWithMax[]>([])
   const [attached, setAttached] = useState<AssessmentWindowClassRow[]>([])
   const [allLeafClasses, setAllLeafClasses] = useState<ClassNode[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Profile add/rename
-  const [profileDraft, setProfileDraft] = useState('')
-  const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
-  // Component form
-  const [compForm, setCompForm] = useState<{ id?: string; name: string; weightPct: string; maxScore: string } | null>(null)
-  // Attach selection
+  // Attach flow: which classes are checked, and which profile they'll be
+  // attached with — a single explicit pick at the moment of attaching,
+  // not a leftover "currently active profile" from browsing elsewhere.
   const [attachSelection, setAttachSelection] = useState<Set<string>>(new Set())
+  const [attachProfileId, setAttachProfileId] = useState<string | null>(null)
+
+  // Session 86: managing a profile's own score columns is no longer done
+  // inline in this sheet at all — it opens the same ProfileColumnsSheet
+  // the standalone Weightings section uses, reached from whichever row
+  // (an attached class, or the attach-picker) currently has that profile
+  // selected. One editor, reachable from wherever it's relevant.
+  const [columnsProfile, setColumnsProfile] = useState<ComponentProfile | null>(null)
 
   const loadAll = useCallback(async () => {
     if (!windowRow) return
@@ -446,55 +464,23 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
     setProfiles(profRes.data)
     setAttached(awcRes.data)
     setAllLeafClasses((clsRes.data ?? []).filter(c => c.is_leaf_enrollable))
-    setActiveProfileId(prev => prev ?? profRes.data[0]?.id ?? null)
+    setAttachProfileId(prev => prev ?? profRes.data[0]?.id ?? null)
     setLoading(false)
   }, [windowRow, schoolId])
 
   useEffect(() => { loadAll() }, [loadAll])
 
-  useEffect(() => {
-    if (!activeProfileId) { setComponents([]); return }
-    let cancelled = false
-    loadComponents(activeProfileId).then(res => {
-      if (!cancelled && res.ok) setComponents(res.data)
-      if (!cancelled && !res.ok) setError(res.error)
-    })
-    return () => { cancelled = true }
-  }, [activeProfileId])
-
   if (!windowRow) return null
 
-  const weightSum = components.reduce((a, c) => a + c.weight_pct, 0)
   const attachedIds = new Set(attached.map(a => a.class_node_id))
   const attachable = allLeafClasses.filter(c => !attachedIds.has(c.id))
 
   async function handleAttach() {
-    if (!activeProfileId || attachSelection.size === 0) return
-    const res = await attachClassesToWindow(windowRow!.id, [...attachSelection], activeProfileId)
+    if (!attachProfileId || attachSelection.size === 0) return
+    const res = await attachClassesToWindow(windowRow!.id, [...attachSelection], attachProfileId)
     if (!res.ok) { setError(res.error); return }
     setAttachSelection(new Set())
     await loadAll()
-  }
-
-  async function handleSaveComponent() {
-    if (!compForm || !activeProfileId) return
-    if (!compForm.name.trim()) { setError('Component name is required.'); return }
-    const weight = parseFloat(compForm.weightPct)
-    const max = parseFloat(compForm.maxScore || '100')
-    if (isNaN(weight) || weight < 0 || weight > 100) { setError('Weight must be between 0 and 100.'); return }
-    if (isNaN(max) || max <= 0) { setError("Max score must be a positive number."); return }
-    const res = await saveComponent(schoolId, activeProfileId, {
-      id: compForm.id,
-      name: compForm.name.trim(),
-      weightPct: weight,
-      maxScore: max,
-      sortOrder: compForm.id ? (components.find(c => c.id === compForm.id)?.sort_order ?? 0) : components.length,
-    })
-    if (!res.ok) { setError(res.error); return }
-    setCompForm(null)
-    setError(null)
-    const refreshed = await loadComponents(activeProfileId)
-    if (refreshed.ok) setComponents(refreshed.data)
   }
 
   return (
@@ -508,83 +494,373 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
         </p>
         {loading && <Skeletonish />}
 
-        {/* Weighting profiles */}
-        <SectionHeader
-          title="1 · Weighting profiles — one per class group that scores differently"
-          action={
-            editingProfileId === '__new__' ? null : (
-              <button className="set-add-btn" onClick={() => { setEditingProfileId('__new__'); setProfileDraft('') }}>+ Add</button>
-            )
-          }
-        />
-        <div className="asw-profile-row">
-          {profiles.map(p => (
-            <span key={p.id} className={['asw-chip', p.id === activeProfileId ? 'asw-chip--open' : ''].join(' ')}>
-              <button className="asw-profile-pick" onClick={() => setActiveProfileId(p.id)}>{p.name}</button>
-              <button
-                className="asw-profile-rename"
-                aria-label={`Rename ${p.name}`}
-                onClick={() => { setEditingProfileId(p.id); setProfileDraft(p.name) }}
-              >
-                <Icon name="pencil" size={12} />
-              </button>
-              {profiles.length > 1 && (
-                <button
-                  className="asw-profile-rename"
-                  aria-label={`Delete ${p.name}`}
-                  onClick={async () => {
-                    if (!confirm(`Delete weighting "${p.name}"? Its score columns go with it.`)) return
-                    const res = await deleteProfile(p.id)
+        {!loading && profiles.length === 0 ? (
+          <div className="asw-guide-empty">
+            <span className="asw-guide-empty-icon"><Icon name="bar-chart" size={22} /></span>
+            <p className="asw-guide-empty-title">Set up a weighting first</p>
+            <p className="asw-guide-empty-sub">
+              Before attaching classes to this window, create at least one weighting profile (e.g. CA 40% +
+              Exam 60%) in the Weightings tab — you'll then pick from it here, and can reuse it for any other
+              window too.
+            </p>
+          </div>
+        ) : (
+          <>
+            {/* Attached classes */}
+            <SectionHeader
+              title={windowRow.scope === 'whole_school'
+                ? 'Classes — whole-school window covers every class automatically'
+                : 'Classes in this window'}
+            />
+            {attached.length === 0 && (
+              <p className="set-empty-hint">
+                {windowRow.scope === 'whole_school'
+                  ? 'Whole-school window — every class is covered automatically.'
+                  : 'No classes attached yet — attach some below.'}
+              </p>
+            )}
+            {windowRow.scope === 'selected_classes' && attached.map(a => (
+              <div key={a.id} className="asw-class-row">
+                <span className="asw-class-name">{a.class_node_name}</span>
+                <select
+                  className="set-select asw-class-select"
+                  value={a.score_component_profile_id}
+                  onChange={async e => {
+                    const newProfileId = e.target.value
+                    if (newProfileId === a.score_component_profile_id) return
+                    // Session 84 (owner request): warn before switching a
+                    // class's profile if real scores already exist under the
+                    // CURRENT one — see hasScoresUnderProfile's own comment
+                    // for why this matters (switching doesn't migrate or
+                    // delete those scores, it just makes them invisible from
+                    // the new profile's column set).
+                    const checkRes = await hasScoresUnderProfile({
+                      classNodeId: a.class_node_id,
+                      profileId: a.score_component_profile_id,
+                    })
+                    if (checkRes.ok && checkRes.data) {
+                      const proceed = confirm(
+                        `${a.class_node_name} already has student scores recorded under its current weighting. ` +
+                        `Switching to a different weighting will NOT delete those scores, but they will no longer ` +
+                        `show up under the new weighting's columns. Continue anyway?`
+                      )
+                      if (!proceed) return
+                    }
+                    const res = await updateWindowClass(a.id, { score_component_profile_id: newProfileId })
                     if (!res.ok) { setError(res.error); return }
-                    if (activeProfileId === p.id) setActiveProfileId(null)
+                    await loadAll()
+                  }}
+                  aria-label={`Weighting for ${a.class_node_name}`}
+                >
+                  {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <button
+                  className="asw-manage-cols-btn"
+                  onClick={() => setColumnsProfile(profiles.find(p => p.id === a.score_component_profile_id) ?? null)}
+                >
+                  Columns
+                </button>
+                <label className="asw-check">
+                  <input
+                    type="checkbox"
+                    checked={a.is_promotional}
+                    onChange={async e => {
+                      const res = await updateWindowClass(a.id, { is_promotional: e.target.checked })
+                      if (!res.ok) { setError(res.error); return }
+                      await loadAll()
+                    }}
+                  />
+                  Promotional
+                </label>
+                <label className="asw-check">
+                  <input
+                    type="checkbox"
+                    checked={a.sits_exam}
+                    onChange={async e => {
+                      const res = await updateWindowClass(a.id, { sits_exam: e.target.checked })
+                      if (!res.ok) { setError(res.error); return }
+                      await loadAll()
+                    }}
+                  />
+                  Exam class
+                </label>
+                <button
+                  className="set-delete-btn"
+                  aria-label={`Remove ${a.class_node_name}`}
+                  onClick={async () => {
+                    const res = await detachClassFromWindow(a.id)
+                    if (!res.ok) { setError(res.error); return }
                     await loadAll()
                   }}
                 >
-                  <Icon name="x" size={12} />
+                  <Icon name="x" size={14} />
                 </button>
-              )}
-            </span>
-          ))}
-          {profiles.length === 0 && <span className="set-empty-hint">No profiles yet.</span>}
-        </div>
+              </div>
+            ))}
 
-        {editingProfileId && (
-          <div className="asw-inline-form">
-            <Inputish
-              value={profileDraft}
-              onChange={setProfileDraft}
-              placeholder={editingProfileId === '__new__' ? 'e.g. "Primary weighting"' : 'Profile name'}
-            />
-            <button
-              className="set-save-btn"
-              onClick={async () => {
-                if (!profileDraft.trim()) return
-                const res = await saveProfile(
-                  schoolId,
-                  editingProfileId === '__new__'
-                    ? { name: profileDraft.trim() } // Session 85: no windowId — profiles are school-scoped and reusable across windows now, not tied to whichever window they were first created from.
-                    : { id: editingProfileId, name: profileDraft.trim() },
-                )
-                if (!res.ok) { setError(res.error); return }
-                setEditingProfileId(null)
-                setProfileDraft('')
-                if (res.ok && 'id' in res.data) setActiveProfileId(res.data.id)
-                await loadAll()
-              }}
-            >
-              Save
-            </button>
-            <button className="set-cancel-btn" onClick={() => { setEditingProfileId(null); setProfileDraft('') }}>Cancel</button>
-          </div>
+            {windowRow.scope === 'selected_classes' && attachable.length > 0 && (
+              <>
+                <SectionHeader title="Attach more classes" />
+                <FieldRowish label="Weighting for the classes below">
+                  <select
+                    className="set-select"
+                    value={attachProfileId ?? ''}
+                    onChange={e => setAttachProfileId(e.target.value)}
+                  >
+                    {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </FieldRowish>
+                <div className="asw-attach-grid">
+                  {attachable.map(c => (
+                    <label key={c.id} className="asw-check">
+                      <input
+                        type="checkbox"
+                        checked={attachSelection.has(c.id)}
+                        onChange={e => {
+                          const next = new Set(attachSelection)
+                          if (e.target.checked) next.add(c.id)
+                          else next.delete(c.id)
+                          setAttachSelection(next)
+                        }}
+                      />
+                      {c.name}
+                    </label>
+                  ))}
+                </div>
+                <button className="set-save-btn" onClick={handleAttach} disabled={attachSelection.size === 0 || !attachProfileId}>
+                  Attach {attachSelection.size > 0 ? `${attachSelection.size} class${attachSelection.size > 1 ? 'es' : ''}` : ''}
+                </button>
+              </>
+            )}
+          </>
         )}
 
-        {/* Components of the active profile */}
-        {activeProfileId && (
-          <>
-            <SectionHeader
-              title={`2 · Score columns for "${activeProfileName(profiles, activeProfileId)}" — weights should total 100%`}
-              action={<button className="set-add-btn" onClick={() => setCompForm({ name: '', weightPct: '', maxScore: '100' })}>+ Add column</button>}
+        {error && <p className="set-form-error">{error}</p>}
+        <div className="set-sheet-footer">
+          <button className="set-cancel-btn" onClick={onClose}>Done</button>
+        </div>
+      </div>
+
+      {columnsProfile && (
+        <ProfileColumnsSheet
+          schoolId={schoolId}
+          profile={columnsProfile}
+          onClose={() => setColumnsProfile(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ─── Weightings (score-component profiles) — standalone section ───────────────
+// Session 86 (owner request — "profiles usable across windows" plus "make
+// the whole Assessments tab intuitive and beautiful"): weighting profiles
+// are school-wide resources since migration_tier8_s85_reusable_score_
+// profiles.sql, but the ONLY place to see, create, or manage them was
+// buried inside a specific window's own setup sheet — implying a
+// per-window ownership that no longer reflects reality, and tangling two
+// genuinely separate concerns (a school's set of possible weighting
+// schemes vs. which one a given class/window uses) into one screen. This
+// gives profiles their own home, and WindowDetailSheet below now just
+// PICKS from this list per class rather than managing profile structure
+// itself.
+
+function ProfilesSection({ schoolId }: { schoolId: string }) {
+  const [profiles, setProfiles] = useState<ComponentProfile[]>([])
+  const [usageByProfile, setUsageByProfile] = useState<Map<string, number>>(new Map())
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [profileForm, setProfileForm] = useState<{ id?: string; name: string } | null>(null)
+  const [columnsProfile, setColumnsProfile] = useState<ComponentProfile | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const profRes = await loadSchoolProfiles(schoolId)
+    if (!profRes.ok) { setError(profRes.error); setLoading(false); return }
+    setProfiles(profRes.data)
+
+    // How many classes (across ALL windows) currently use each profile —
+    // shown so an admin can see at a glance whether a weighting is
+    // actively in use before trying to delete it, rather than discovering
+    // that only after an error.
+    if (profRes.data.length > 0) {
+      const usageRes = await supabase
+        .from('assessment_window_classes')
+        .select('score_component_profile_id')
+        .in('score_component_profile_id', profRes.data.map(p => p.id))
+      if (!usageRes.error) {
+        const counts = new Map<string, number>()
+        for (const row of usageRes.data ?? []) {
+          const id = (row as any).score_component_profile_id
+          counts.set(id, (counts.get(id) ?? 0) + 1)
+        }
+        setUsageByProfile(counts)
+      }
+    }
+    setLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Skeletonish />
+
+  return (
+    <div>
+      {error && <ErrorBoxish message={error} onRetry={load} />}
+
+      <SectionHeader
+        title="Weighting profiles"
+        action={<button className="set-add-btn" onClick={() => setProfileForm({ name: '' })}>+ New weighting</button>}
+      />
+      <p className="set-empty-hint">
+        A weighting profile is a set of score columns (e.g. "1st CA" 20% · "2nd CA" 20% · "Exam" 60%) that add up
+        to a subject's total. Create one here, then pick it for whichever classes and windows should use it —
+        the same weighting can cover as many windows as you like.
+      </p>
+
+      {profiles.length === 0 && (
+        <div className="asw-guide-empty">
+          <span className="asw-guide-empty-icon"><Icon name="bar-chart" size={22} /></span>
+          <p className="asw-guide-empty-title">Set up your first weighting</p>
+          <p className="asw-guide-empty-sub">
+            Most schools start with one: CA 40% + Exam 60%, or similar. You can always add more later for
+            classes that are scored differently.
+          </p>
+          <button className="set-save-btn" onClick={() => setProfileForm({ name: '' })}>+ Create a weighting</button>
+        </div>
+      )}
+
+      {profiles.map(p => {
+        const usage = usageByProfile.get(p.id) ?? 0
+        return (
+          <div key={p.id} className="set-list-row">
+            <div className="set-list-row-info">
+              <p className="set-list-row-name">{p.name}</p>
+              <p className="set-list-row-meta">
+                {usage > 0 ? `In use by ${usage} class${usage === 1 ? '' : 'es'}` : 'Not attached to any class yet'}
+              </p>
+            </div>
+            <div className="set-list-row-actions">
+              <button className="set-edit-btn" onClick={() => setColumnsProfile(p)}>
+                <Icon name="bar-chart" size={13} /> Score columns
+              </button>
+              <button className="set-edit-btn" onClick={() => setProfileForm({ id: p.id, name: p.name })}>Rename</button>
+              <button
+                className="set-delete-btn"
+                aria-label={`Delete ${p.name}`}
+                onClick={async () => {
+                  if (!confirm(`Delete weighting "${p.name}"? This only works if it isn't assigned to any class and has no score columns left.`)) return
+                  const res = await deleteProfile(p.id)
+                  if (!res.ok) { alert(res.error); return }
+                  await load()
+                }}
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      {profileForm && (
+        <Sheetish title={profileForm.id ? 'Rename weighting' : 'New weighting'} onClose={() => setProfileForm(null)}>
+          <FieldRowish label="Name">
+            <Inputish
+              value={profileForm.name}
+              onChange={v => setProfileForm({ ...profileForm, name: v })}
+              placeholder='e.g. "Junior secondary weighting"'
             />
+          </FieldRowish>
+          <SheetFooterish
+            onCancel={() => setProfileForm(null)}
+            saving={false}
+            onSave={async () => {
+              if (!profileForm.name.trim()) { alert('Give this weighting a name.'); return }
+              const res = await saveProfile(schoolId, profileForm.id
+                ? { id: profileForm.id, name: profileForm.name.trim() }
+                : { name: profileForm.name.trim() })
+              if (!res.ok) { alert(res.error); return }
+              const wasNew = !profileForm.id
+              setProfileForm(null)
+              await load()
+              if (wasNew && res.ok) setColumnsProfile(res.data)
+            }}
+          />
+        </Sheetish>
+      )}
+
+      {columnsProfile && (
+        <ProfileColumnsSheet
+          schoolId={schoolId}
+          profile={columnsProfile}
+          onClose={() => setColumnsProfile(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * ProfileColumnsSheet
+ * The score-column editor for ONE weighting profile, extracted so it can
+ * be reached both from the standalone Weightings list above (manage a
+ * profile's structure directly) and from a window's class row (Session
+ * 86: "Manage columns" next to a class's weighting pick, for the common
+ * case of wanting to tweak the very weighting you're about to assign
+ * without a context switch) — same component, same behavior, either way.
+ */
+function ProfileColumnsSheet({ schoolId, profile, onClose }: {
+  schoolId: string
+  profile: ComponentProfile
+  onClose: () => void
+}) {
+  const [components, setComponents] = useState<ScoreComponentWithMax[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [compForm, setCompForm] = useState<{ id?: string; name: string; weightPct: string; maxScore: string } | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    const res = await loadComponents(profile.id)
+    if (res.ok) setComponents(res.data)
+    else setError(res.error)
+    setLoading(false)
+  }, [profile.id])
+
+  useEffect(() => { load() }, [load])
+
+  const weightSum = components.reduce((a, c) => a + c.weight_pct, 0)
+
+  async function handleSaveComponent() {
+    if (!compForm) return
+    if (!compForm.name.trim()) { setError('Column name is required.'); return }
+    const weight = parseFloat(compForm.weightPct)
+    const max = parseFloat(compForm.maxScore || '100')
+    if (isNaN(weight) || weight < 0 || weight > 100) { setError('Weight must be between 0 and 100.'); return }
+    if (isNaN(max) || max <= 0) { setError('Max score must be a positive number.'); return }
+    const res = await saveComponent(schoolId, profile.id, {
+      id: compForm.id,
+      name: compForm.name.trim(),
+      weightPct: weight,
+      maxScore: max,
+      sortOrder: compForm.id ? (components.find(c => c.id === compForm.id)?.sort_order ?? 0) : components.length,
+    })
+    if (!res.ok) { setError(res.error); return }
+    setCompForm(null)
+    setError(null)
+    await load()
+  }
+
+  return (
+    <div className="set-overlay" onClick={onClose}>
+      <div className="set-sheet" onClick={e => e.stopPropagation()}>
+        <h2 className="set-sheet-title">{profile.name}</h2>
+        <p className="asw-sheet-sub">Score columns — weights should total 100%</p>
+
+        {loading ? <Skeletonish /> : (
+          <>
             {components.length === 0 && (
               <p className="set-empty-hint">
                 No score columns yet — e.g. "1st CA" (20%), "2nd CA" (20%), "Exam" (60%).
@@ -610,8 +886,7 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
                       if (!confirm(`Delete column "${c.name}"? This can only be done if no student scores are recorded against it yet.`)) return
                       const res = await deleteComponent(c.id)
                       if (!res.ok) { setError(res.error); return }
-                      const refreshed = await loadComponents(activeProfileId)
-                      if (refreshed.ok) setComponents(refreshed.data)
+                      await load()
                     }}
                   >
                     <Icon name="x" size={16} />
@@ -623,7 +898,7 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
               <p className="asw-weight-warn">Weights total {weightSum}% — expected 100%.</p>
             )}
 
-            {compForm && (
+            {compForm ? (
               <div className="asw-inline-form asw-inline-form--stack">
                 <FieldRowish label="Column name">
                   <Inputish value={compForm.name} onChange={v => setCompForm({ ...compForm, name: v })} placeholder='e.g. "1st CA"' />
@@ -639,119 +914,11 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
                   <button className="set-save-btn" onClick={handleSaveComponent}>Save column</button>
                 </div>
               </div>
+            ) : (
+              <button className="set-add-btn" onClick={() => setCompForm({ name: '', weightPct: '', maxScore: '100' })} style={{ marginTop: 'var(--space-2)' }}>
+                + Add column
+              </button>
             )}
-          </>
-        )}
-
-        {/* Attached classes */}
-        <SectionHeader
-          title={windowRow.scope === 'whole_school'
-            ? '3 · Classes — whole-school window covers every class automatically'
-            : '3 · Classes covered by this window'}
-        />
-        {attached.length === 0 && (
-          <p className="set-empty-hint">
-            {windowRow.scope === 'whole_school'
-              ? 'Whole-school window — every class is covered automatically.'
-              : 'No classes attached yet.'}
-          </p>
-        )}
-        {windowRow.scope === 'selected_classes' && attached.map(a => (
-          <div key={a.id} className="asw-class-row">
-            <span className="asw-class-name">{a.class_node_name}</span>
-            <select
-              className="set-select asw-class-select"
-              value={a.score_component_profile_id}
-              onChange={async e => {
-                const newProfileId = e.target.value
-                if (newProfileId === a.score_component_profile_id) return
-                // Session 84 (owner request): warn before switching a
-                // class's profile if real scores already exist under the
-                // CURRENT one — see hasScoresUnderProfile's own comment
-                // for why this matters (switching doesn't migrate or
-                // delete those scores, it just makes them invisible from
-                // the new profile's column set).
-                const checkRes = await hasScoresUnderProfile({
-                  classNodeId: a.class_node_id,
-                  profileId: a.score_component_profile_id,
-                })
-                if (checkRes.ok && checkRes.data) {
-                  const proceed = confirm(
-                    `${a.class_node_name} already has student scores recorded under its current weighting. ` +
-                    `Switching to a different weighting will NOT delete those scores, but they will no longer ` +
-                    `show up under the new weighting's columns. Continue anyway?`
-                  )
-                  if (!proceed) return
-                }
-                const res = await updateWindowClass(a.id, { score_component_profile_id: newProfileId })
-                if (!res.ok) { setError(res.error); return }
-                await loadAll()
-              }}
-              aria-label={`Weighting for ${a.class_node_name}`}
-            >
-              {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <label className="asw-check">
-              <input
-                type="checkbox"
-                checked={a.is_promotional}
-                onChange={async e => {
-                  const res = await updateWindowClass(a.id, { is_promotional: e.target.checked })
-                  if (!res.ok) { setError(res.error); return }
-                  await loadAll()
-                }}
-              />
-              Promotional
-            </label>
-            <label className="asw-check">
-              <input
-                type="checkbox"
-                checked={a.sits_exam}
-                onChange={async e => {
-                  const res = await updateWindowClass(a.id, { sits_exam: e.target.checked })
-                  if (!res.ok) { setError(res.error); return }
-                  await loadAll()
-                }}
-              />
-              Exam class
-            </label>
-            <button
-              className="set-delete-btn"
-              aria-label={`Remove ${a.class_node_name}`}
-              onClick={async () => {
-                const res = await detachClassFromWindow(a.id)
-                if (!res.ok) { setError(res.error); return }
-                await loadAll()
-              }}
-            >
-              <Icon name="x" size={14} />
-            </button>
-          </div>
-        ))}
-
-        {windowRow.scope === 'selected_classes' && attachable.length > 0 && activeProfileId && (
-          <>
-            <SectionHeader title="Attach classes" />
-            <div className="asw-attach-grid">
-              {attachable.map(c => (
-                <label key={c.id} className="asw-check">
-                  <input
-                    type="checkbox"
-                    checked={attachSelection.has(c.id)}
-                    onChange={e => {
-                      const next = new Set(attachSelection)
-                      if (e.target.checked) next.add(c.id)
-                      else next.delete(c.id)
-                      setAttachSelection(next)
-                    }}
-                  />
-                  {c.name}
-                </label>
-              ))}
-            </div>
-            <button className="set-save-btn" onClick={handleAttach} disabled={attachSelection.size === 0}>
-              Attach {attachSelection.size > 0 ? `${attachSelection.size} class${attachSelection.size > 1 ? 'es' : ''}` : ''}
-            </button>
           </>
         )}
 
@@ -762,10 +929,6 @@ function WindowDetailSheet({ schoolId, windowRow, onClose }: {
       </div>
     </div>
   )
-}
-
-function activeProfileName(profiles: ComponentProfile[], id: string): string {
-  return profiles.find(p => p.id === id)?.name ?? ''
 }
 
 function groupEntriesByDate(entries: ExamEntry[]): Array<{ date: string; entries: ExamEntry[] }> {
