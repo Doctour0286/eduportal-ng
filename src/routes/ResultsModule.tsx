@@ -82,6 +82,7 @@ import {
   getGradeLabel,
   isScoreSetComplete,
   isAnyScoreApproved,
+  loadSchoolPendingApprovals,
   type Session,
   type Term,
   type TeachingAssignment,
@@ -90,6 +91,7 @@ import {
   type Score,
   type GradeBand,
   type ScoreMap,
+  type PendingApprovalGroup,
 } from '../services/resultsService'
 import {
   resolveWindowForClass,
@@ -200,7 +202,7 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
 
   // ── Mode: score entry vs report cards vs promotion (Session 49 surface) ────
   const canManageRemarks = useAuthStore((s) => s.can('academics.remarks.manage'))
-  const [mode, setMode] = useState<'scores' | 'reports' | 'promotion'>('scores')
+  const [mode, setMode] = useState<'scores' | 'reports' | 'promotion' | 'pending'>('scores')
 
   // ── Students + scores ─────────────────────────────────────────────────────
   const [students,   setStudents]   = useState<Student[]>([])
@@ -1018,13 +1020,13 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
           {!isOnline && <span className="res-offline-badge"><Icon name="cloud" size={14} /> offline</span>}
         </div>
 
-        {/* Assignment selector — hidden in promotion AND reports mode (both
-            have their own class picker; reports also drops the subject
-            dimension entirely per the owner's explicit request — Session 81). */}
-        {mode !== 'promotion' && mode !== 'reports' && renderAssignmentSelector()}
+        {/* Assignment selector — hidden in promotion, reports, AND pending-
+            approvals mode (all three have their own class picker or, for
+            pending approvals, no picker at all — it's whole-school). */}
+        {mode !== 'promotion' && mode !== 'reports' && mode !== 'pending' && renderAssignmentSelector()}
 
-        {/* Term tabs — only when school uses terms; hidden in promotion/reports for the same reason as above */}
-        {mode !== 'promotion' && mode !== 'reports' && selectedAssign && renderTermSelector()}
+        {/* Term tabs — only when school uses terms; hidden for the same reason as above */}
+        {mode !== 'promotion' && mode !== 'reports' && mode !== 'pending' && selectedAssign && renderTermSelector()}
 
         {/* Mode switcher — report cards need a window + remark permission */}
         {(isAdmin || canManageRemarks) && (
@@ -1045,6 +1047,16 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
             >
               <Icon name="file-text" size={14} /> Report cards
             </button>
+            {isAdmin && (
+              <button
+                role="tab"
+                aria-selected={mode === 'pending'}
+                className={['res-mode-tab', mode === 'pending' ? 'res-mode-tab--active' : ''].join(' ')}
+                onClick={() => setMode('pending')}
+              >
+                <Icon name="circle-check" size={14} /> Approvals
+              </button>
+            )}
             {isAdmin && (
               <button
                 role="tab"
@@ -1089,6 +1101,13 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
           <ReportCardsPanel
             schoolId={schoolId}
             isAdmin={isAdmin}
+          />
+        ) : mode === 'pending' && isAdmin ? (
+          <PendingApprovalsPanel
+            schoolId={schoolId}
+            session={session}
+            terms={terms}
+            staffId={staffId}
           />
         ) : (
           <>
@@ -1315,6 +1334,212 @@ function PromotionPanel({
             Senior classes first — a destination class still holding undecided students blocks the run.
           </p>
         </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * PendingApprovalsPanel
+ * Session 87 (owner request): a school-wide summary of every distinct
+ * (class, subject) combination with unapproved scores, with multi-select
+ * bulk approve — rather than an admin having to open each class/subject
+ * individually via the score-entry grid's own per-subject approve bar to
+ * discover what still needs attention.
+ *
+ * Deliberately its own top-level mode (not a filter inside the scores
+ * grid) since its whole point is showing what's OUTSIDE whatever one
+ * class/subject the grid currently has selected — the two are
+ * complementary, not overlapping: this panel finds and bulk-clears the
+ * backlog, the grid is where you'd go to actually review/correct a
+ * specific subject's numbers before or after approving.
+ */
+function PendingApprovalsPanel({
+  schoolId,
+  session,
+  terms,
+  staffId,
+}: {
+  schoolId: string
+  session: Session | null
+  terms: Term[]
+  staffId: string
+}) {
+  const [selectedTermId, setSelectedTermId] = useState<string | null>(terms[0]?.id ?? null)
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [loadError, setLoadError] = useState('')
+  const [groups, setGroups] = useState<PendingApprovalGroup[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [busyKey, setBusyKey] = useState<string | null>(null) // single-row approve in progress
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+  const [actionError, setActionError] = useState('')
+
+  const groupKey = (g: PendingApprovalGroup) => `${g.classNodeId}::${g.subjectId}`
+
+  const load = useCallback(async () => {
+    if (!session) return
+    setLoadState('loading')
+    setLoadError('')
+    setActionError('')
+    const res = await loadSchoolPendingApprovals({
+      schoolId,
+      sessionId: session.id,
+      termId: selectedTermId,
+    })
+    if (!res.ok) { setLoadError(res.error); setLoadState('error'); return }
+    setGroups(res.data)
+    setSelected(new Set())
+    setLoadState('ready')
+  }, [schoolId, session, selectedTermId])
+
+  useEffect(() => { load() }, [load])
+
+  function toggleOne(key: string) {
+    const next = new Set(selected)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    setSelected(next)
+  }
+
+  function toggleAll() {
+    if (selected.size === groups.length) setSelected(new Set())
+    else setSelected(new Set(groups.map(groupKey)))
+  }
+
+  async function approveOne(g: PendingApprovalGroup) {
+    setBusyKey(groupKey(g))
+    setActionError('')
+    const res = await approveScores({
+      classNodeId: g.classNodeId,
+      subjectId: g.subjectId,
+      sessionId: g.sessionId,
+      termId: g.termId,
+      approvedBy: staffId,
+      studentIds: g.studentIds,
+    })
+    setBusyKey(null)
+    if (!res.ok) {
+      // Real, expected case: a non-admin approver with no teaching
+      // assignment for this specific subject/class will be correctly
+      // refused at the database level (see migration_tier8_hotfix_admin_
+      // scores.sql's own note — admins are unrestricted, but the legacy
+      // per-assignment policy still gates everyone else). Surface that
+      // plainly rather than a generic failure.
+      setActionError(`Could not approve ${g.subjectName} for ${g.className}: ${res.error}`)
+      return
+    }
+    await load()
+  }
+
+  async function approveSelected() {
+    const targets = groups.filter(g => selected.has(groupKey(g)))
+    if (targets.length === 0) return
+    setBulkBusy(true)
+    setActionError('')
+    setBulkProgress({ done: 0, total: targets.length })
+    const failures: string[] = []
+    for (const g of targets) {
+      const res = await approveScores({
+        classNodeId: g.classNodeId,
+        subjectId: g.subjectId,
+        sessionId: g.sessionId,
+        termId: g.termId,
+        approvedBy: staffId,
+        studentIds: g.studentIds,
+      })
+      if (!res.ok) failures.push(`${g.subjectName} (${g.className}): ${res.error}`)
+      setBulkProgress(prev => prev ? { ...prev, done: prev.done + 1 } : null)
+    }
+    setBulkBusy(false)
+    setBulkProgress(null)
+    if (failures.length > 0) {
+      setActionError(`${targets.length - failures.length} of ${targets.length} approved. Failed: ${failures.join('; ')}`)
+    }
+    await load()
+  }
+
+  if (!session) return <div className="res-grid-skel"><div className="res-row-skel skeleton" /></div>
+
+  return (
+    <div className="res-pending-root">
+      {terms.length > 0 && (
+        <div className="res-term-bar">
+          {terms.map(t => (
+            <button
+              key={t.id}
+              className={['res-term-btn', selectedTermId === t.id ? 'res-term-btn--active' : ''].join(' ')}
+              onClick={() => setSelectedTermId(t.id)}
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {loadState === 'loading' ? (
+        <div className="res-grid-skel">
+          {[1, 2, 3].map(i => <div key={i} className="res-row-skel skeleton" />)}
+        </div>
+      ) : loadState === 'error' ? (
+        <div className="res-error-state">
+          <span className="res-error-icon"><Icon name="alert-triangle" style={{ color: 'var(--color-warning, #d97706)' }} /></span>
+          <p className="res-error-msg">{loadError}</p>
+          <button className="res-retry-btn" onClick={load}>Retry</button>
+        </div>
+      ) : groups.length === 0 ? (
+        <div className="res-empty-state">
+          <span className="res-empty-icon"><Icon name="circle-check" /></span>
+          <p className="res-empty-msg">Nothing pending — every subject's scores are approved for this period.</p>
+        </div>
+      ) : (
+        <>
+          <div className="res-pending-toolbar">
+            <label className="rpt-select-all">
+              <input type="checkbox" checked={selected.size === groups.length && groups.length > 0} onChange={toggleAll} />
+              Select all ({groups.length})
+            </label>
+            <button
+              className="rpt-batch-btn rpt-batch-btn--primary"
+              disabled={bulkBusy || selected.size === 0}
+              onClick={approveSelected}
+            >
+              <Icon name="circle-check" size={14} /> Approve selected ({selected.size})
+            </button>
+          </div>
+
+          {bulkProgress && (
+            <p className="rpt-saving-hint">Approving… {bulkProgress.done} of {bulkProgress.total}</p>
+          )}
+          {actionError && <p className="set-form-error">{actionError}</p>}
+
+          <div className="res-pending-list">
+            {groups.map(g => {
+              const key = groupKey(g)
+              return (
+                <div key={key} className="res-pending-row">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(key)}
+                    onChange={() => toggleOne(key)}
+                    aria-label={`Select ${g.subjectName} — ${g.className}`}
+                  />
+                  <div className="res-pending-row-info">
+                    <p className="res-pending-row-title">{g.subjectName}</p>
+                    <p className="res-pending-row-meta">{g.className} · {g.pendingCount} score{g.pendingCount === 1 ? '' : 's'} awaiting approval</p>
+                  </div>
+                  <button
+                    className="set-edit-btn"
+                    disabled={busyKey === key || bulkBusy}
+                    onClick={() => approveOne(g)}
+                  >
+                    {busyKey === key ? 'Approving…' : 'Approve'}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </>
       )}
     </div>
   )

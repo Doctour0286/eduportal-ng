@@ -515,6 +515,94 @@ export async function saveScore(
  * Approval is admin-only in the UI; RLS on the scores table enforces this
  * via the `teaching_assignments` check (admin bypasses via role permission).
  */
+// ─── School-wide pending approvals summary (Session 87, owner request) ────────
+// "I want it to have a school wide option that will give summary of all
+// pending classes and subjects to approve at once or select which to
+// approve." — a single screen listing every distinct (class, subject)
+// combination with unapproved scores across the WHOLE school, not just
+// the one class/subject an admin happens to have open, with the ability
+// to bulk-approve any subset directly from that list.
+
+export interface PendingApprovalGroup {
+  classNodeId: string
+  className: string
+  subjectId: string
+  subjectName: string
+  sessionId: string
+  termId: string | null
+  studentIds: string[]     // needed by approveScores' own .in() filter
+  pendingCount: number     // raw score-row count, shown as a secondary detail — NOT the headline number anywhere this group list itself is counted (see AdminDashboard.tsx/TeacherDashboard.tsx's own Session 87 fix for why)
+}
+
+/**
+ * loadSchoolPendingApprovals
+ * One query for every unapproved score in the school for the given
+ * session (+ term, if provided), grouped into (class, subject) pairs —
+ * the same unit approveScores() itself operates on. Names are resolved
+ * via a second batched query rather than assignments/teaching records,
+ * since this is explicitly a SCHOOL-WIDE, admin-facing view: an admin
+ * reviewing pending approvals may not hold a teaching assignment for
+ * every subject shown, and the list must not silently omit a subject
+ * just because the viewing admin doesn't personally teach it.
+ */
+export async function loadSchoolPendingApprovals(params: {
+  schoolId: string
+  sessionId: string
+  termId: string | null
+}): Promise<{ ok: true; data: PendingApprovalGroup[] } | { ok: false; error: string }> {
+  try {
+    let query = supabase
+      .from('scores')
+      .select('student_id, subject_id, students!inner ( class_node_id )')
+      .eq('school_id', params.schoolId)
+      .eq('session_id', params.sessionId)
+      .is('approved_at', null)
+    query = params.termId ? query.eq('term_id', params.termId) : query.is('term_id', null)
+    const { data, error } = await query
+    if (error) return { ok: false, error: friendlyError(error.message) }
+
+    type GroupKey = string // `${classNodeId}::${subjectId}`
+    const groups = new Map<GroupKey, { classNodeId: string; subjectId: string; studentIds: Set<string>; count: number }>()
+    for (const row of (data ?? []) as any[]) {
+      const classNodeId = Array.isArray(row.students) ? row.students[0]?.class_node_id : row.students?.class_node_id
+      if (!classNodeId || !row.subject_id || !row.student_id) continue
+      const key = `${classNodeId}::${row.subject_id}`
+      if (!groups.has(key)) groups.set(key, { classNodeId, subjectId: row.subject_id, studentIds: new Set(), count: 0 })
+      const g = groups.get(key)!
+      g.studentIds.add(row.student_id)
+      g.count += 1
+    }
+
+    if (groups.size === 0) return { ok: true, data: [] }
+
+    const classIds = [...new Set([...groups.values()].map(g => g.classNodeId))]
+    const subjectIds = [...new Set([...groups.values()].map(g => g.subjectId))]
+    const [clsRes, subRes] = await Promise.all([
+      supabase.from('class_nodes').select('id, name').in('id', classIds),
+      supabase.from('subjects').select('id, name').in('id', subjectIds),
+    ])
+    if (clsRes.error) return { ok: false, error: friendlyError(clsRes.error.message) }
+    if (subRes.error) return { ok: false, error: friendlyError(subRes.error.message) }
+    const classNameById = new Map((clsRes.data ?? []).map((c: any) => [c.id, c.name]))
+    const subjectNameById = new Map((subRes.data ?? []).map((s: any) => [s.id, s.name]))
+
+    const result: PendingApprovalGroup[] = [...groups.values()].map(g => ({
+      classNodeId: g.classNodeId,
+      className: classNameById.get(g.classNodeId) ?? 'Unknown class',
+      subjectId: g.subjectId,
+      subjectName: subjectNameById.get(g.subjectId) ?? 'Unknown subject',
+      sessionId: params.sessionId,
+      termId: params.termId,
+      studentIds: [...g.studentIds],
+      pendingCount: g.count,
+    }))
+    result.sort((a, b) => a.className.localeCompare(b.className) || a.subjectName.localeCompare(b.subjectName))
+    return { ok: true, data: result }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Failed to load pending approvals' }
+  }
+}
+
 export async function approveScores(params: {
   classNodeId: string
   subjectId: string

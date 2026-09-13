@@ -17,6 +17,39 @@ import { getSowSummary, type SowSummary } from '../services/schemeOfWorkService'
 import { TermProgressCard } from '../components/TermProgressCard';
 import type { NavIntent } from '../App';
 
+// ─── Pending subject approvals ──────────────────────────────────────────────
+// Session 87 (owner-reported bug): the dashboard's "scores waiting for
+// approval" card was counting raw `scores` rows (approved_at is null) —
+// one row per student per score COLUMN, so a single unapproved subject
+// for a 30-student class with 3 score columns (1st CA / 2nd CA / Exam)
+// alone showed as up to 90 "pending", making the number meaningless and
+// the >10-triggers-"urgent" threshold nearly always tripped regardless of
+// how many subjects an admin actually needs to act on. What actually
+// matters to an admin is "how many SUBJECTS still need approval" — a
+// subject in a specific class, since the same subject taught in two
+// classes are two separate things to approve.
+//
+// Counts distinct (subject_id, class_node_id) pairs with any unapproved
+// score, not raw score rows. Supabase can't express "count distinct
+// pairs" in a single head-count query, so this fetches the (subject_id,
+// class_node_id) columns for every unapproved score row and dedupes
+// client-side — still one query, same shape/cost as the original, just
+// selecting two id columns instead of using head:true.
+async function countPendingSubjectApprovals(schoolId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('scores')
+    .select('subject_id, students!inner ( class_node_id )')
+    .eq('school_id', schoolId)
+    .is('approved_at', null)
+  if (error || !data) return 0
+  const seen = new Set<string>()
+  for (const row of data as any[]) {
+    const classNodeId = Array.isArray(row.students) ? row.students[0]?.class_node_id : row.students?.class_node_id
+    if (row.subject_id && classNodeId) seen.add(`${row.subject_id}::${classNodeId}`)
+  }
+  return seen.size
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DashboardStats {
@@ -345,16 +378,15 @@ export default function AdminDashboard({
           activeStudentCountRes,
           staffRes,
           todaySessionsRes,
-          pendingScoresRes,
           pendingLeaveRes,
         ] = await Promise.all([
           getActivePlacedStudentCount(school.id),
           supabase.from('staff').select('id', { count: 'exact', head: true }).eq('school_id', school.id).eq('status', 'active'),
           // Sessions held today across every course offering (school-scoped via RLS)
           supabase.from('course_attendance_sessions').select('id').eq('school_id', school.id).eq('session_date', today),
-          supabase.from('scores').select('id', { count: 'exact', head: true }).eq('school_id', school.id).is('approved_at', null),
           supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('school_id', school.id).eq('status', 'pending'),
         ]);
+        const pendingSubjectApprovals = await countPendingSubjectApprovals(school.id);
         const totalStudentsHigherEd = activeStudentCountRes.ok ? activeStudentCountRes.data : 0;
 
         const todaySessionIds = (todaySessionsRes.data ?? []).map((s: { id: string }) => s.id);
@@ -385,7 +417,7 @@ export default function AdminDashboard({
           todayAttendanceTotal: recordsToday.length,
           todayPresentCount: presentToday,
           sessionPaymentsTotal: paymentsTotal,
-          pendingScoreApprovals: pendingScoresRes.count ?? 0,
+          pendingScoreApprovals: pendingSubjectApprovals,
           pendingLeaveRequests: pendingLeaveRes.count ?? 0,
         });
         return;
@@ -398,7 +430,6 @@ export default function AdminDashboard({
         attendanceTodayRes,
         presentTodayRes,
         _sessionRes,
-        pendingScoresRes,
         pendingLeaveRes,
         _placeholder,
       ] = await Promise.all([
@@ -439,14 +470,7 @@ export default function AdminDashboard({
           .eq('is_current', true)
           .maybeSingle(),
 
-        // 6. Pending score approvals (approved_at is null)
-        supabase
-          .from('scores')
-          .select('id', { count: 'exact', head: true })
-          .eq('school_id', school.id)
-          .is('approved_at', null),
-
-        // 7. Pending leave requests
+        // 6. Pending leave requests
         supabase
           .from('leave_requests')
           .select('id', { count: 'exact', head: true })
@@ -456,6 +480,10 @@ export default function AdminDashboard({
         // placeholder — resolved after session query
         Promise.resolve(null),
       ]);
+
+      // 7. Pending score approvals, counted by distinct subject+class, not
+      // raw score rows — see countPendingSubjectApprovals's own comment.
+      const pendingSubjectApprovals = await countPendingSubjectApprovals(school.id);
 
       // 8. Sum all completed payments (school-scoped via RLS)
       // payments links to fee_assignments → session, but for dashboard we sum all completed
@@ -477,7 +505,7 @@ export default function AdminDashboard({
         todayAttendanceTotal: studentsRes.count ?? 0,
         todayPresentCount: presentTodayRes.count ?? 0,
         sessionPaymentsTotal: paymentsTotal,
-        pendingScoreApprovals: pendingScoresRes.count ?? 0,
+        pendingScoreApprovals: pendingSubjectApprovals,
         pendingLeaveRequests: pendingLeaveRes.count ?? 0,
       });
     } catch (err) {

@@ -129,7 +129,7 @@ function isHigherEdSchool(schoolType: string | null | undefined): boolean {
 interface TeacherStats {
   classCount: number;          // distinct class_node_id among this teacher's current-session assignments
   subjectCount: number;        // distinct subject_id among the same
-  pendingScoreCount: number;   // scores.entered_by = self, approved_at is null
+  pendingScoreCount: number;   // distinct subject+class groups with any score where entered_by = self and approved_at is null (NOT a raw score-row count — see the setStats() call for why)
 }
 
 // Local, dashboard-sized shape — announcementsService.ts's Announcement type
@@ -660,7 +660,16 @@ export default function TeacherDashboard({
     setStats({
       classCount,
       subjectCount,
-      pendingScoreCount: (pendingRows ?? []).length,
+      // Session 87 (owner-reported bug, found first in AdminDashboard.tsx's
+      // own equivalent stat, same root cause here): count DISTINCT
+      // subject+class groups needing approval, not raw score rows — a
+      // single unapproved subject already produces one row per student
+      // per score column, so the raw count wildly overstates how many
+      // things actually need a teacher's attention. `groups` (above) was
+      // already correctly computed for the expanded card's own breakdown;
+      // this just uses that same grouping for the headline number instead
+      // of a separate, larger, less meaningful one.
+      pendingScoreCount: groups.length,
     });
 
     // 3. Full-week timetable entries for this teacher — reuses
