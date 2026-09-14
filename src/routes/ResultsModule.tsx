@@ -327,59 +327,18 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
     return () => { cancelled = true }
   }, [isAdmin, staffId, canViewAllAssignments])
 
-  // ─── Intent: auto-select class+subject for pending approvals ──────────────
-  // When navigated here with pendingApprovals intent (e.g. from dashboard
-  // action badge), find the first class with unapproved scores and auto-select
-  // it so the user lands directly on actionable content.
+  // ─── Intent: jump straight to the Approvals tab ────────────────────────────
+  // Session 88 (owner-reported UI bug): navigating here from the dashboard's
+  // "pending approvals" notice used to guess which single class+subject had
+  // the most pending scores and drop the person into the score-entry grid
+  // for just that one — a leftover from before the real, purpose-built
+  // Approvals tab (Session 87) existed. Now that a proper school-wide
+  // summary exists, the intent should just open THAT, not guess at one
+  // subject among what might be many.
   useEffect(() => {
-    if (!intent?.pendingApprovals || bootState !== 'ready' || assignments.length === 0 || !session) return
-    if (selectedClassNodeId) return // already selected, don't override
-
-    let cancelled = false
-    async function autoSelectPending() {
-      // Find classes that have unapproved scores
-      const { data: pendingScores } = await supabase
-        .from('scores')
-        .select('student_id, subject_id, students!inner(class_node_id)', { count: 'exact' })
-        .eq('school_id', schoolId)
-        .eq('session_id', session!.id)
-        .is('approved_at', null)
-
-      if (cancelled || !pendingScores || pendingScores.length === 0) return
-
-      // Group by class_node_id to find the class with the most pending scores
-      const classCounts = new Map<string, number>()
-      const classSubjects = new Map<string, Set<string>>()
-      for (const row of pendingScores as any[]) {
-        const clsId = row.students?.class_node_id
-        if (!clsId) continue
-        classCounts.set(clsId, (classCounts.get(clsId) ?? 0) + 1)
-        if (!classSubjects.has(clsId)) classSubjects.set(clsId, new Set())
-        classSubjects.get(clsId)!.add(row.subject_id)
-      }
-
-      // Pick the class with the most pending scores
-      let bestClass = ''
-      let bestCount = 0
-      for (const [clsId, count] of classCounts) {
-        if (count > bestCount) { bestClass = clsId; bestCount = count }
-      }
-      if (!bestClass) return
-
-      setSelectedClassNodeId(bestClass)
-
-      // Find the first subject for this class that has a matching assignment
-      const subjectsForCls = classSubjects.get(bestClass)
-      const matchingAssignment = assignments.find(
-        a => a.class_node_id === bestClass && subjectsForCls?.has(a.subject_id)
-      )
-      if (matchingAssignment) {
-        setSelectedAssign(matchingAssignment)
-      }
-    }
-    autoSelectPending()
-    return () => { cancelled = true }
-  }, [intent, bootState, assignments, session, schoolId, selectedClassNodeId])
+    if (!intent?.pendingApprovals || !isAdmin) return
+    setMode('pending')
+  }, [intent, isAdmin])
 
   // ─── Load students + scores when assignment / term changes ────────────────
 
@@ -1108,6 +1067,31 @@ function ResultsModuleSecondary({ schoolId, isAdmin, intent }: { schoolId: strin
             session={session}
             terms={terms}
             staffId={staffId}
+            onReview={(g) => {
+              // Session 88 (owner request): "review before approving" — jump
+              // into the normal score-entry grid for this exact class+
+              // subject, same view any teacher would use, rather than only
+              // offering a blind approve. Constructs a synthetic
+              // TeachingAssignment: loadGrid() only ever reads
+              // class_node_id/subject_id off selectedAssign (confirmed by
+              // reading its implementation before doing this) — staff_id is
+              // never consulted there, so a real assignment row isn't
+              // needed just to VIEW scores, and the admin reviewing here
+              // may well not hold a personal teaching assignment for this
+              // subject at all (the whole point of a school-wide approvals
+              // view is covering subjects beyond the viewer's own).
+              setSelectedAssign({
+                id: `pending-review:${g.classNodeId}:${g.subjectId}`,
+                staff_id: staffId,
+                subject_id: g.subjectId,
+                subject_name: g.subjectName,
+                class_node_id: g.classNodeId,
+                class_node_name: g.className,
+                class_path_label: g.className,
+                session_id: g.sessionId,
+              })
+              setMode('scores')
+            }}
           />
         ) : (
           <>
@@ -1359,11 +1343,13 @@ function PendingApprovalsPanel({
   session,
   terms,
   staffId,
+  onReview,
 }: {
   schoolId: string
   session: Session | null
   terms: Term[]
   staffId: string
+  onReview: (group: PendingApprovalGroup) => void
 }) {
   const [selectedTermId, setSelectedTermId] = useState<string | null>(terms[0]?.id ?? null)
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -1374,6 +1360,10 @@ function PendingApprovalsPanel({
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
   const [actionError, setActionError] = useState('')
+  // Session 88 (owner request): filter the list to one class — the school-
+  // wide list can get long once several classes each have a few pending
+  // subjects, and an admin often wants to work through one class at a time.
+  const [classFilter, setClassFilter] = useState<string | null>(null)
 
   const groupKey = (g: PendingApprovalGroup) => `${g.classNodeId}::${g.subjectId}`
 
@@ -1395,6 +1385,25 @@ function PendingApprovalsPanel({
 
   useEffect(() => { load() }, [load])
 
+  // Reset the class filter if it's no longer among the classes actually
+  // pending (e.g. the previously-filtered class just got fully approved).
+  useEffect(() => {
+    if (classFilter && !groups.some(g => g.classNodeId === classFilter)) setClassFilter(null)
+  }, [groups, classFilter])
+
+  const classOptions = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const g of groups) seen.set(g.classNodeId, g.className)
+    return [...seen.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [groups])
+
+  const visibleGroups = useMemo(
+    () => classFilter ? groups.filter(g => g.classNodeId === classFilter) : groups,
+    [groups, classFilter],
+  )
+
   function toggleOne(key: string) {
     const next = new Set(selected)
     if (next.has(key)) next.delete(key)
@@ -1403,8 +1412,12 @@ function PendingApprovalsPanel({
   }
 
   function toggleAll() {
-    if (selected.size === groups.length) setSelected(new Set())
-    else setSelected(new Set(groups.map(groupKey)))
+    const visibleKeys = visibleGroups.map(groupKey)
+    const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every(k => selected.has(k))
+    const next = new Set(selected)
+    if (allVisibleSelected) visibleKeys.forEach(k => next.delete(k))
+    else visibleKeys.forEach(k => next.add(k))
+    setSelected(next)
   }
 
   async function approveOne(g: PendingApprovalGroup) {
@@ -1494,10 +1507,37 @@ function PendingApprovalsPanel({
         </div>
       ) : (
         <>
+          {classOptions.length > 1 && (
+            <div className="att-pill-row att-pill-row--class">
+              <button
+                className={`att-pill${classFilter === null ? ' att-pill--active' : ''}`}
+                onClick={() => setClassFilter(null)}
+              >
+                All classes ({groups.length})
+              </button>
+              {classOptions.map(c => {
+                const count = groups.filter(g => g.classNodeId === c.id).length
+                return (
+                  <button
+                    key={c.id}
+                    className={`att-pill${classFilter === c.id ? ' att-pill--active' : ''}`}
+                    onClick={() => setClassFilter(c.id)}
+                  >
+                    {c.name} ({count})
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
           <div className="res-pending-toolbar">
             <label className="rpt-select-all">
-              <input type="checkbox" checked={selected.size === groups.length && groups.length > 0} onChange={toggleAll} />
-              Select all ({groups.length})
+              <input
+                type="checkbox"
+                checked={visibleGroups.length > 0 && visibleGroups.every(g => selected.has(groupKey(g)))}
+                onChange={toggleAll}
+              />
+              Select all{classFilter ? ' shown' : ''} ({visibleGroups.length})
             </label>
             <button
               className="rpt-batch-btn rpt-batch-btn--primary"
@@ -1514,7 +1554,7 @@ function PendingApprovalsPanel({
           {actionError && <p className="set-form-error">{actionError}</p>}
 
           <div className="res-pending-list">
-            {groups.map(g => {
+            {visibleGroups.map(g => {
               const key = groupKey(g)
               return (
                 <div key={key} className="res-pending-row">
@@ -1528,13 +1568,18 @@ function PendingApprovalsPanel({
                     <p className="res-pending-row-title">{g.subjectName}</p>
                     <p className="res-pending-row-meta">{g.className} · {g.pendingCount} score{g.pendingCount === 1 ? '' : 's'} awaiting approval</p>
                   </div>
-                  <button
-                    className="set-edit-btn"
-                    disabled={busyKey === key || bulkBusy}
-                    onClick={() => approveOne(g)}
-                  >
-                    {busyKey === key ? 'Approving…' : 'Approve'}
-                  </button>
+                  <div className="res-pending-row-actions">
+                    <button className="set-edit-btn" onClick={() => onReview(g)}>
+                      Review
+                    </button>
+                    <button
+                      className="set-edit-btn"
+                      disabled={busyKey === key || bulkBusy}
+                      onClick={() => approveOne(g)}
+                    >
+                      {busyKey === key ? 'Approving…' : 'Approve'}
+                    </button>
+                  </div>
                 </div>
               )
             })}

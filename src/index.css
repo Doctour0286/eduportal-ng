@@ -7490,6 +7490,7 @@ body {
 
 .res-pending-row-title { font-size: var(--text-sm); font-weight: 600; margin: 0; }
 .res-pending-row-meta { font-size: var(--text-xs); color: var(--color-text-muted); margin: 2px 0 0; }
+.res-pending-row-actions { display: flex; gap: var(--space-2); }
 
 /* ── Error states ─────────────────────────────────────────────────────────── */
 
