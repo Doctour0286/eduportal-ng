@@ -181,10 +181,19 @@ function getSlugFromHostname(hostname: string): string | null {
   if (hostname.endsWith('.localhost')) {
     const parts = hostname.split('.')
     if (parts[0] !== 'localhost') return parts[0]
-  } else {
-    // Production: {slug}.eduskola.com — 3+ labels means a subdomain is present.
-    // A bare apex domain (eduskola.com) or www.eduskola.com has only 2
-    // meaningful labels and must NOT be treated as a school slug.
+  } else if (hostname === 'eduskola.com' || hostname.endsWith('.eduskola.com')) {
+    // Production: {slug}.eduskola.com — 3+ labels under our own apex means a
+    // subdomain is present. A bare apex domain (eduskola.com) or
+    // www.eduskola.com has only 2 meaningful labels and must NOT be treated
+    // as a school slug.
+    //
+    // Deliberately scoped to our own apex (rather than "any host with 3+
+    // labels") because preview/staging hosts such as
+    // {site-name}.netlify.app or {project}.vercel.app also have 3 labels —
+    // treating those generically would misread the site name itself
+    // (e.g. "eduskola" in eduskola.netlify.app) as a school slug and break
+    // every path on the preview deploy. Those hosts fall through to the
+    // path-based lookup below instead.
     const parts = hostname.split('.')
     if (parts.length >= 3 && parts[0] !== 'www') {
       return parts[0]
