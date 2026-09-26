@@ -8749,6 +8749,44 @@ body {
   white-space: nowrap;
 }
 
+/* migration_attendance_auto_deactivation.sql — same pill shape as
+   .stu-role-tag above, distinct colors so a glance at the list tells staff
+   apart: a plain inactive student, one auto-deactivated for attendance, one
+   already over the threshold and pending its next check, and one merely
+   approaching it. */
+.stu-attendance-auto-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.stu-attendance-risk-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--color-warning-subtle, var(--color-warning));
+  color: var(--color-warning, var(--color-text-inverse));
+  white-space: nowrap;
+}
+
+.stu-attendance-risk-tag--pending {
+  background: var(--color-danger-subtle, var(--color-danger));
+  color: var(--color-danger, var(--color-text-inverse));
+}
+
 .stu-status-badge--active {
   background: var(--color-success-subtle);
   color: var(--color-success);

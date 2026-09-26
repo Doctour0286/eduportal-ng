@@ -9,7 +9,13 @@
  *   schools, school_public_config, school_week_days, periods,
  *   subjects, class_nodes, roles, permissions, role_permissions,
  *   staff, staff_roles, sessions, terms, audit_log,
- *   student_roles, student_role_assignments (Session 13, §7.8a)
+ *   student_roles, student_role_assignments (Session 13, §7.8a),
+ *   attendance_deactivation_settings (migration_attendance_auto_deactivation.sql)
+ *
+ * Attendance auto-deactivation exports (migration_attendance_auto_deactivation.sql):
+ *   loadAttendanceDeactivationSettings()  — this school's setting (safe defaults if unconfigured)
+ *   saveAttendanceDeactivationSettings()  — create/update it; resets every active student's
+ *                                            counters when this is a fresh off->on activation
  *
  * Student-role exports (Session 13, PRD Problem 5.5):
  *   loadStudentRoles()   — the school's defined student roles
@@ -550,6 +556,108 @@ export async function savePublicConfig(
     .upsert({ school_id: schoolId, ...cfg, updated_at: new Date().toISOString() }, { onConflict: 'school_id' })
 
   return { error: error?.message ?? null }
+}
+
+// ─── Attendance auto-deactivation (migration_attendance_auto_deactivation.sql) ─
+//
+// See that migration's header comment for the full rule set. This section
+// only manages the setting itself (Settings module, admin-only per
+// SettingsModule.tsx's own gate) — the actual per-student check lives in
+// studentsService.ts's runAttendanceAutoDeactivationCheck(), gated on
+// students.records.manage instead, since that's a different screen with a
+// different, narrower permission requirement.
+
+export interface AttendanceDeactivationSettings {
+  enabled: boolean
+  mode: 'consecutive' | 'cumulative'
+  consecutive_threshold: number
+  cumulative_threshold: number
+  activated_at: string | null   // ISO timestamp; null if never yet turned on
+}
+
+const DEFAULT_ATTENDANCE_DEACTIVATION_SETTINGS: AttendanceDeactivationSettings = {
+  enabled: false,
+  mode: 'consecutive',
+  consecutive_threshold: 5,
+  cumulative_threshold: 5,
+  activated_at: null,
+}
+
+export async function loadAttendanceDeactivationSettings(
+  schoolId: string,
+): Promise<{ data: AttendanceDeactivationSettings; error: string | null }> {
+  const { data, error } = await supabase
+    .from('attendance_deactivation_settings')
+    .select('enabled, mode, consecutive_threshold, cumulative_threshold, activated_at')
+    .eq('school_id', schoolId)
+    .maybeSingle()
+
+  if (error) return { data: DEFAULT_ATTENDANCE_DEACTIVATION_SETTINGS, error: error.message }
+  if (!data) return { data: DEFAULT_ATTENDANCE_DEACTIVATION_SETTINGS, error: null } // never configured — a normal state, not an error
+
+  return { data: data as AttendanceDeactivationSettings, error: null }
+}
+
+/**
+ * Saves the setting. When `enabled` transitions from off to on (either the
+ * row never existed, or its previous `enabled` was false), this is treated
+ * as a brand-new activation, per the owner's explicit call: a fresh
+ * `activated_at` is stamped, and — in the same call — every currently
+ * active student in the school has both attendance counters, last_absent_date
+ * and deactivation_reason reset, so no count from a previous (possibly
+ * long-past) active period can silently carry into this one. If `enabled`
+ * is already true and stays true (just changing mode/thresholds), or is
+ * being turned off, `activated_at` and every student's counters are left
+ * untouched.
+ */
+export async function saveAttendanceDeactivationSettings(
+  schoolId: string,
+  updates: Pick<AttendanceDeactivationSettings, 'enabled' | 'mode' | 'consecutive_threshold' | 'cumulative_threshold'>,
+): Promise<{ error: string | null }> {
+  const { data: existing, error: loadError } = await supabase
+    .from('attendance_deactivation_settings')
+    .select('enabled')
+    .eq('school_id', schoolId)
+    .maybeSingle()
+
+  if (loadError) return { error: loadError.message }
+
+  const isFreshActivation = updates.enabled && !existing?.enabled
+  const nowIso = new Date().toISOString()
+
+  const { error } = await supabase
+    .from('attendance_deactivation_settings')
+    .upsert(
+      {
+        school_id: schoolId,
+        ...updates,
+        ...(isFreshActivation ? { activated_at: nowIso } : {}),
+      },
+      { onConflict: 'school_id' },
+    )
+
+  if (error) return { error: error.message }
+
+  if (isFreshActivation) {
+    const { error: resetError } = await supabase
+      .from('students')
+      .update({
+        consecutive_absent_count: 0,
+        cumulative_absent_count: 0,
+        last_absent_date: null,
+        deactivation_reason: null,
+      })
+      .eq('school_id', schoolId)
+      .eq('status', 'active')
+
+    // The setting itself already saved successfully at this point — surface
+    // the reset failure distinctly rather than implying the whole save
+    // failed, so the admin knows specifically that a re-check/retry of the
+    // reset (not the toggle) is what's needed.
+    if (resetError) return { error: `Setting saved, but resetting student counters failed: ${resetError.message}` }
+  }
+
+  return { error: null }
 }
 
 // ─── Welcome post images ────────────────────────────────────────────────────

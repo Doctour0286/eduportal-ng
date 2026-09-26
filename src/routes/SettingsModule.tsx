@@ -68,7 +68,9 @@ import {
   runProgrammePromotion, recordManualPromotionDecision, type PromotionRunResultRow,
   loadCourseOfferings,      upsertCourseOffering, deleteCourseOffering,
   loadProgrammeLevelsTeachingCourse, createCourseOfferingsForProgrammeLevels,
+  loadAttendanceDeactivationSettings, saveAttendanceDeactivationSettings,
   type CourseCurriculumProgrammeLevel,
+  type AttendanceDeactivationSettings,
   type SchoolSettings,
   type SchoolPublicConfig,
   type WelcomePost,
@@ -1737,6 +1739,23 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   const [calFormError, setCalFormError] = useState<string | null>(null)
   const [calBulkResult, setCalBulkResult] = useState<string | null>(null)
 
+  // Attendance auto-deactivation (migration_attendance_auto_deactivation.sql).
+  // Lives in this tab, not a new one, for the same reason school_week_days
+  // does — it's a global, easy-to-misfire setting other modules key off of,
+  // grouped with the rest of this tab's school-day/hours configuration.
+  const [adSettings, setAdSettings] = useState<AttendanceDeactivationSettings>({
+    enabled: false,
+    mode: 'consecutive',
+    consecutive_threshold: 5,
+    cumulative_threshold: 5,
+    activated_at: null,
+  })
+  const [adLoading, setAdLoading] = useState(true)
+  const [adError, setAdError] = useState<string | null>(null)
+  const [adSaving, setAdSaving] = useState(false)
+  const [adSaveError, setAdSaveError] = useState<string | null>(null)
+  const [adSaveOk, setAdSaveOk] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -1775,6 +1794,36 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   }, [schoolId])
 
   useEffect(() => { loadCalendar() }, [loadCalendar])
+
+  const loadAttendanceDeactivation = useCallback(async () => {
+    setAdLoading(true)
+    setAdError(null)
+    const { data, error } = await loadAttendanceDeactivationSettings(schoolId)
+    if (error) { setAdError(error); setAdLoading(false); return }
+    setAdSettings(data)
+    setAdLoading(false)
+  }, [schoolId])
+
+  useEffect(() => { loadAttendanceDeactivation() }, [loadAttendanceDeactivation])
+
+  async function handleSaveAttendanceDeactivation() {
+    setAdSaving(true)
+    setAdSaveError(null)
+    setAdSaveOk(false)
+    const { error } = await saveAttendanceDeactivationSettings(schoolId, {
+      enabled: adSettings.enabled,
+      mode: adSettings.mode,
+      consecutive_threshold: adSettings.consecutive_threshold,
+      cumulative_threshold: adSettings.cumulative_threshold,
+    })
+    setAdSaving(false)
+    if (error) { setAdSaveError(error); return }
+    setAdSaveOk(true)
+    // Re-fetch rather than assuming — a fresh off->on activation stamps a
+    // real activated_at server-side that this component doesn't compute
+    // itself, and the readout below should show that real value.
+    await loadAttendanceDeactivation()
+  }
 
   function toggleDay(day: number) {
     setWeekDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
@@ -2065,6 +2114,79 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
             </div>
           </div>
         </div>
+      )}
+
+      <div className="set-section-header set-section-header--spaced">
+        <SectionLabel>Attendance auto-deactivation</SectionLabel>
+      </div>
+      <p className="set-field-hint">
+        When on, a student is automatically set to inactive after too many absences. This check
+        runs the next time a staff member who can manage student records opens the Students
+        module after the qualifying school day has ended — not instantly, and not on a schedule.
+        Only absences from the moment this is turned on count; nothing before that matters, even
+        if a student was already partway through a run of absences.
+      </p>
+
+      {adLoading ? (
+        <Skeleton lines={2} />
+      ) : adError ? (
+        <ErrorState message={adError} onRetry={loadAttendanceDeactivation} />
+      ) : (
+        <>
+          <Toggle
+            checked={adSettings.enabled}
+            onChange={(v) => setAdSettings(prev => ({ ...prev, enabled: v }))}
+            label="Auto-deactivate students after too many absences"
+          />
+
+          {adSettings.enabled && adSettings.activated_at && (
+            <p className="set-field-hint">
+              Active since {new Date(adSettings.activated_at).toLocaleString()}. Turning this off
+              and back on later starts counting from zero again, for every student — it will not
+              resume any earlier count.
+            </p>
+          )}
+
+          <FieldRow label="Count absences as">
+            <select
+              className="set-select"
+              value={adSettings.mode}
+              onChange={e => setAdSettings(prev => ({ ...prev, mode: e.target.value as 'consecutive' | 'cumulative' }))}
+            >
+              <option value="consecutive">Consecutive school days in a row</option>
+              <option value="cumulative">Total absences (does not reset each term)</option>
+            </select>
+          </FieldRow>
+
+          {adSettings.mode === 'consecutive' ? (
+            <FieldRow label="Consecutive absent days before deactivation">
+              <Input
+                value={String(adSettings.consecutive_threshold)}
+                onChange={v => setAdSettings(prev => ({ ...prev, consecutive_threshold: Math.max(1, Number(v) || 1) }))}
+                type="number"
+              />
+            </FieldRow>
+          ) : (
+            <FieldRow label="Total absences before deactivation">
+              <Input
+                value={String(adSettings.cumulative_threshold)}
+                onChange={v => setAdSettings(prev => ({ ...prev, cumulative_threshold: Math.max(1, Number(v) || 1) }))}
+                type="number"
+              />
+            </FieldRow>
+          )}
+          <p className="set-field-hint">
+            Both numbers are kept even when only one mode is active — switching modes later won't
+            lose whichever threshold isn't currently in use.
+          </p>
+
+          {adSaveError && <p className="set-form-error">{adSaveError}</p>}
+          {adSaveOk && <p className="set-save-ok"><Icon name="circle-check" size={16} style={{ color: 'var(--color-success, #16a34a)' }} /> Saved.</p>}
+
+          <button className="set-save-btn" onClick={handleSaveAttendanceDeactivation} disabled={adSaving}>
+            {adSaving ? 'Saving…' : 'Save'}
+          </button>
+        </>
       )}
     </div>
   )

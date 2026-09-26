@@ -28,7 +28,10 @@
  * Write exports:
  *   createStudent()               — insert new student row
  *   updateStudent()               — update editable fields on an existing student
- *   updateStudentStatus()         — set status (inactive / alumni / active)
+ *   updateStudentStatus()         — set status (inactive / alumni / active); note required on reactivation
+ *   runAttendanceAutoDeactivationCheck() — migration_attendance_auto_deactivation.sql:
+ *                                   "looks automatic" per-school check, call from a
+ *                                   students.records.manage-gated screen on load
  *   addGuardian()                 — create guardian + link to student in one transaction
  *   updateGuardianLink()          — toggle has_platform_access on a student_guardians row
  *   unlinkGuardian()              — remove student_guardians row (does not delete guardian)
@@ -113,6 +116,14 @@ export interface Student {
   // UI falls back to initials.
   photo_url: string | null
   created_at: string
+  // Attendance auto-deactivation (migration_attendance_auto_deactivation.sql)
+  // — all four maintained by the DB trigger / updateStudentStatus(), never
+  // set directly from a form. See that migration's header comment for the
+  // full rule set.
+  consecutive_absent_count: number
+  cumulative_absent_count: number
+  last_absent_date: string | null
+  deactivation_reason: 'attendance_auto' | null
 }
 
 export interface StudentUpsertParams {
@@ -206,6 +217,8 @@ export interface AttendanceSummary {
   excused: number
   percent: number | null   // null when there are zero markable (present+absent+late) records yet
 }
+
+import { getSchoolHoursEndMoment, isWithinEditWindow } from './attendanceService'
 
 // Consistent Result shape
 type Ok<T>     = { ok: true; data: T }
@@ -412,7 +425,11 @@ export async function loadStudents(params: {
         email,
         phone,
         photo_url,
-        created_at
+        created_at,
+        consecutive_absent_count,
+        cumulative_absent_count,
+        last_absent_date,
+        deactivation_reason
       `)
       .eq('school_id', params.schoolId)
       .order('full_name')
@@ -473,6 +490,10 @@ function mapStudentRow(r: any): Student {
     phone: r.phone ?? null,
     photo_url: r.photo_url ?? null,
     created_at: r.created_at,
+    consecutive_absent_count: r.consecutive_absent_count ?? 0,
+    cumulative_absent_count: r.cumulative_absent_count ?? 0,
+    last_absent_date: r.last_absent_date ?? null,
+    deactivation_reason: r.deactivation_reason ?? null,
   }
 }
 
@@ -734,7 +755,7 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
   try {
     const { data, error } = await supabase
       .from('students')
-      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, matric_number, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, photo_url, created_at')
+      .select('id, full_name, date_of_birth, gender, class_node_id, admission_date, student_code, matric_number, status, blood_group, address, medical_notes, emergency_contact_name, emergency_contact_phone, hobbies, email, phone, photo_url, created_at, consecutive_absent_count, cumulative_absent_count, last_absent_date, deactivation_reason')
       .eq('id', studentId)
       .maybeSingle()
 
@@ -764,6 +785,10 @@ export async function loadStudent(studentId: string): Promise<Result<Student>> {
         phone: data.phone ?? null,
         photo_url: data.photo_url ?? null,
         created_at: data.created_at,
+        consecutive_absent_count: data.consecutive_absent_count ?? 0,
+        cumulative_absent_count: data.cumulative_absent_count ?? 0,
+        last_absent_date: data.last_absent_date ?? null,
+        deactivation_reason: data.deactivation_reason ?? null,
       },
     }
   } catch (err: any) {
@@ -1210,21 +1235,169 @@ export async function updateStudent(
  * This is a deliberate admin action, not an edit-form field. The UI must
  * show a confirmation dialog before calling this for irreversible statuses
  * (alumni). §4.3: "Confirmation dialogs only for irreversible actions."
+ *
+ * `note` (migration_attendance_auto_deactivation.sql, owner decision):
+ * required when reactivating (status: 'active') — enforced here, not just
+ * in the UI, since this is the one function every reactivation path (manual
+ * or previously auto-deactivated) goes through. Optional for 'inactive'/
+ * 'alumni'. Stored in the generic status_change_note column rather than a
+ * reactivation-specific one, so any future status-change flow can reuse it.
+ *
+ * Reactivating also resets both attendance-deactivation counters and clears
+ * deactivation_reason, regardless of whether this particular student was
+ * ever auto-deactivated — otherwise a student reactivated today could be
+ * auto-deactivated again on their very next absence, which would look like
+ * a bug to staff even though the raw numbers would technically justify it.
  */
 export async function updateStudentStatus(
   studentId: string,
   status: 'active' | 'inactive' | 'alumni',
+  note?: string,
 ): Promise<Result<void>> {
+  const trimmedNote = note?.trim() || null
+
+  if (status === 'active' && !trimmedNote) {
+    return { ok: false, error: 'A note is required to reactivate a student.' }
+  }
+
   try {
+    const updates: Record<string, unknown> = { status, status_change_note: trimmedNote }
+
+    if (status === 'active') {
+      updates.consecutive_absent_count = 0
+      updates.cumulative_absent_count = 0
+      updates.last_absent_date = null
+      updates.deactivation_reason = null
+    }
+
     const { error } = await supabase
       .from('students')
-      .update({ status })
+      .update(updates)
       .eq('id', studentId)
 
     if (error) return { ok: false, error: friendlyStatusError(error.message) }
     return { ok: true, data: undefined }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to update student status' }
+  }
+}
+
+// ─── Attendance auto-deactivation (migration_attendance_auto_deactivation.sql) ─
+//
+// See that migration's header comment for the full rule set. Summary:
+// client-triggered (no server cron), gated on students.records.manage (the
+// same permission updateStudentStatus() already requires via RLS), and only
+// acts on a school day once that day's school hours have actually ended.
+
+export interface AttendanceDeactivationCandidate {
+  student_id: string
+  full_name: string
+  count: number       // whichever counter (consecutive or cumulative) is live
+}
+
+export interface AttendanceDeactivationCheckResult {
+  deactivated: AttendanceDeactivationCandidate[]
+}
+
+/**
+ * Sets one student to inactive specifically for the attendance rule —
+ * distinct from updateStudentStatus() because this is a system decision,
+ * not a staff member choosing a status in a form: it tags
+ * deactivation_reason so the Students list can badge it, and deliberately
+ * does NOT accept or require a note (there's no human to write one at the
+ * moment this fires — the note requirement is reactivation's, not this
+ * function's).
+ */
+async function autoDeactivateForAttendance(studentId: string): Promise<Result<void>> {
+  try {
+    const { error } = await supabase
+      .from('students')
+      .update({ status: 'inactive', deactivation_reason: 'attendance_auto' })
+      .eq('id', studentId)
+
+    if (error) return { ok: false, error: friendlyStatusError(error.message) }
+    return { ok: true, data: undefined }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to auto-deactivate student' }
+  }
+}
+
+/**
+ * Runs the "looks automatic" check: finds every active student in this
+ * school whose live counter (consecutive or cumulative, per the setting's
+ * mode) has reached the configured threshold, and — only for students whose
+ * qualifying school day has actually elapsed — sets them to inactive.
+ *
+ * Call this from a screen only staff with students.records.manage actually
+ * reach (StudentsModule.tsx on load), not from the Attendance-marking
+ * screen: a teacher with only academics.attendance.mark would have this
+ * silently do nothing useful, since the deactivation write below goes
+ * through the same RLS as a manual status change and would simply fail for
+ * that role. Returns an empty `deactivated` array (not an error) when the
+ * setting is off, unconfigured, or nothing currently qualifies — all normal,
+ * common states, not failures.
+ *
+ * "Elapsed" is checked via last_absent_date + attendanceService.ts's own
+ * getSchoolHoursEndMoment()/isWithinEditWindow() — the same after-hours
+ * lock the register itself uses — so a student isn't deactivated mid-day
+ * before staff have had the rest of that day to correct a mis-tap.
+ */
+export async function runAttendanceAutoDeactivationCheck(
+  schoolId: string,
+): Promise<Result<AttendanceDeactivationCheckResult>> {
+  try {
+    const { data: settings, error: settingsError } = await supabase
+      .from('attendance_deactivation_settings')
+      .select('enabled, mode, consecutive_threshold, cumulative_threshold')
+      .eq('school_id', schoolId)
+      .maybeSingle()
+
+    if (settingsError) return { ok: false, error: settingsError.message }
+    if (!settings || !settings.enabled) return { ok: true, data: { deactivated: [] } }
+
+    const isConsecutive = settings.mode === 'consecutive'
+    const counterColumn = isConsecutive ? 'consecutive_absent_count' : 'cumulative_absent_count'
+    const threshold = isConsecutive ? settings.consecutive_threshold : settings.cumulative_threshold
+
+    const { data: candidates, error: candidatesError } = await supabase
+      .from('students')
+      .select('id, full_name, last_absent_date, consecutive_absent_count, cumulative_absent_count')
+      .eq('school_id', schoolId)
+      .eq('status', 'active')
+      .is('deactivation_reason', null)
+      .gte(counterColumn, threshold)
+
+    if (candidatesError) return { ok: false, error: candidatesError.message }
+    if (!candidates || candidates.length === 0) return { ok: true, data: { deactivated: [] } }
+
+    const deactivated: AttendanceDeactivationCandidate[] = []
+
+    for (const c of candidates) {
+      const lastAbsentDate = c.last_absent_date as string | null
+      if (!lastAbsentDate) continue // shouldn't happen if a counter is >= threshold, but fails safe
+
+      const hoursEndRes = await getSchoolHoursEndMoment(lastAbsentDate, schoolId)
+      if (!hoursEndRes.ok) continue // skip this student rather than fail the whole check
+
+      // Still within the qualifying day's edit window -> that day hasn't
+      // elapsed yet. Wait for a later run rather than acting mid-day.
+      if (isWithinEditWindow(hoursEndRes.data)) continue
+
+      const count = isConsecutive
+        ? (c.consecutive_absent_count as number)
+        : (c.cumulative_absent_count as number)
+
+      const res = await autoDeactivateForAttendance(c.id as string)
+      if (res.ok) {
+        deactivated.push({ student_id: c.id as string, full_name: c.full_name as string, count })
+      }
+      // A single failed write (e.g. a rare race) doesn't abort the rest —
+      // every other qualifying student is still worth checking this run.
+    }
+
+    return { ok: true, data: { deactivated } }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to run attendance auto-deactivation check' }
   }
 }
 

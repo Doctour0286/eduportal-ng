@@ -74,6 +74,8 @@ import {
   getStudentStatusCounts,
   getHigherEdStudentStatusCounts,
   type StudentStatusCounts,
+  runAttendanceAutoDeactivationCheck,
+  type AttendanceDeactivationCandidate,
   // Problem 9.8 (Tier 9)
   loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
@@ -94,7 +96,7 @@ import { printStudentIdCards, type IdCardStudent } from '../services/printStuden
 // service code, this file only adds a rendering layer around them.
 import { loadStudentTranscript, type StudentTranscript } from '../services/courseResultsService'
 import { downloadTranscriptPdf } from '../services/transcriptPdf'
-import { loadStudentCurrentPlacement, loadProgrammes, loadProgrammeLevels, upsertPlacement, type StudentCurrentPlacement, type Programme, type ProgrammeLevel } from '../services/settingsService'
+import { loadStudentCurrentPlacement, loadProgrammes, loadProgrammeLevels, upsertPlacement, type StudentCurrentPlacement, type Programme, type ProgrammeLevel, loadAttendanceDeactivationSettings, type AttendanceDeactivationSettings } from '../services/settingsService'
 import { loadCurrentSession } from '../services/attendanceService'
 import { loadStudentOverallAttendance, type StudentOverallAttendance } from '../services/courseAttendanceService'
 
@@ -669,7 +671,12 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // ── Status management (detail panel) ─────────────────────────────────────
   const [statusSaving,   setStatusSaving]   = useState(false)
   const [statusError,    setStatusError]    = useState('')
-  const [statusConfirm,  setStatusConfirm]  = useState<'inactive' | 'alumni' | null>(null)
+  const [statusConfirm,  setStatusConfirm]  = useState<'active' | 'inactive' | 'alumni' | null>(null)
+  // migration_attendance_auto_deactivation.sql — required specifically for
+  // the 'active' (reactivation) case, enforced both here (button stays
+  // disabled) and again in updateStudentStatus() itself, since that
+  // function is the one place every reactivation path goes through.
+  const [reactivateNote, setReactivateNote] = useState('')
 
   // ── Transfer (detail panel) ───────────────────────────────────────────────
   const [transferRequest,  setTransferRequest]  = useState<TransferRequest | null | undefined>(undefined) // undefined = not loaded
@@ -875,6 +882,49 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
     if (bootState === 'ready') loadList()
   }, [bootState, loadList])
 
+  // ─── Attendance auto-deactivation (migration_attendance_auto_deactivation.sql) ─
+  // "Looks automatic" — runs once when this module loads, not on a real
+  // schedule. Gated on canManageStudents specifically (not just bootState
+  // ready) because the deactivation write inside
+  // runAttendanceAutoDeactivationCheck() goes through the same RLS as a
+  // manual status change: a staff member without students.records.manage
+  // (e.g. a teacher who can only mark attendance) opening this module would
+  // have every write silently rejected, so there is no point attempting it
+  // for them — the next admin/records-manager to open this screen still
+  // catches it. hasRunAutoDeactivationCheck guards against this firing more
+  // than once per mount (e.g. bootState briefly flickering), since running
+  // it twice in a row is wasted work, not incorrect, but still worth
+  // avoiding.
+  const hasRunAutoDeactivationCheck = useRef(false)
+  const [attendanceDeactivationSettings, setAttendanceDeactivationSettings] =
+    useState<AttendanceDeactivationSettings | null>(null)
+
+  useEffect(() => {
+    // Read-only, cheap, and useful even for staff without
+    // students.records.manage (it only drives the threshold-1 "at risk"
+    // badge below, never a write) — so this loads independently of the
+    // check itself and its own permission gate.
+    loadAttendanceDeactivationSettings(schoolId).then(({ data, error }) => {
+      if (!error) setAttendanceDeactivationSettings(data)
+    })
+  }, [schoolId])
+
+  useEffect(() => {
+    if (bootState !== 'ready' || !canManageStudents || hasRunAutoDeactivationCheck.current) return
+    hasRunAutoDeactivationCheck.current = true
+
+    runAttendanceAutoDeactivationCheck(schoolId).then(res => {
+      if (!res.ok || res.data.deactivated.length === 0) return
+      const names = res.data.deactivated.map((d: AttendanceDeactivationCandidate) => d.full_name)
+      const summary = names.length === 1
+        ? `${names[0]} was auto-deactivated for attendance.`
+        : `${names.length} students were auto-deactivated for attendance: ${names.join(', ')}.`
+      setListSuccessMsg(summary)
+      window.setTimeout(() => setListSuccessMsg(''), 6000) // longer than the 3s default — this can name several students, worth more time to read
+      loadList()
+    })
+  }, [bootState, canManageStudents, schoolId, loadList])
+
   // ─── Load status counts whenever CLASS filter changes ──────────────────────
   // Deliberately separate from loadList()/statusFilter above: the stat strip
   // must keep showing every status's count even while the visible list is
@@ -907,6 +957,24 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
         s.full_name.toLowerCase().includes(searchQuery.toLowerCase())
       )
     : students
+
+  // migration_attendance_auto_deactivation.sql — 'pending' means this
+  // student has already reached the threshold but is still 'active' because
+  // the qualifying day hasn't elapsed yet (runAttendanceAutoDeactivationCheck
+  // defers exactly that case); 'at-risk' means one more qualifying absence
+  // would cross it. Returns null whenever the rule doesn't apply at all
+  // (disabled, or the student isn't currently active).
+  function attendanceRiskInfo(student: Student): 'pending' | 'at-risk' | null {
+    if (!attendanceDeactivationSettings?.enabled || student.status !== 'active') return null
+    const isConsecutive = attendanceDeactivationSettings.mode === 'consecutive'
+    const count = isConsecutive ? student.consecutive_absent_count : student.cumulative_absent_count
+    const threshold = isConsecutive
+      ? attendanceDeactivationSettings.consecutive_threshold
+      : attendanceDeactivationSettings.cumulative_threshold
+    if (count >= threshold) return 'pending'
+    if (count === threshold - 1) return 'at-risk'
+    return null
+  }
 
   // ─── Status stat strip (PRD Session 22, Problem 5.4) ──────────────────────
   // Sourced from statusCounts (a dedicated getStudentStatusCounts() query,
@@ -1277,19 +1345,25 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
 
   // ─── Status management ────────────────────────────────────────────────────
 
-  async function handleStatusChange(newStatus: 'active' | 'inactive' | 'alumni') {
+  async function handleStatusChange(newStatus: 'active' | 'inactive' | 'alumni', note?: string) {
     if (!detailStudent) return
     setStatusSaving(true)
     setStatusError('')
     setStatusConfirm(null)
-    const res = await updateStudentStatus(detailStudent.id, newStatus)
+    const res = await updateStudentStatus(detailStudent.id, newStatus, note)
     setStatusSaving(false)
     if (!res.ok) {
       setStatusError(res.error)
       return
     }
-    // Update the detail student and list without a full reload
-    const updated: Student = { ...detailStudent, status: newStatus }
+    setReactivateNote('')
+    // Update the detail student and list without a full reload. Reactivating
+    // also resets the attendance auto-deactivation counters server-side
+    // (updateStudentStatus()) — mirrored here so the at-risk/pending badges
+    // don't show stale numbers until the next full list reload.
+    const updated: Student = newStatus === 'active'
+      ? { ...detailStudent, status: newStatus, consecutive_absent_count: 0, cumulative_absent_count: 0, last_absent_date: null, deactivation_reason: null }
+      : { ...detailStudent, status: newStatus }
     setDetailStudent(updated)
     setStudents(prev => prev.map(s => s.id === updated.id ? updated : s))
   }
@@ -1989,6 +2063,25 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
                   {student.gender ? ` · ${student.gender}` : ''}
                   {student.student_code ? ` · ${student.student_code}` : ''}
                 </span>
+                {/* migration_attendance_auto_deactivation.sql — distinguishes
+                    an auto-deactivation from every other reason a student
+                    might be inactive (manual, alumni, transfer), and warns
+                    staff before it happens rather than only after. */}
+                {student.status === 'inactive' && student.deactivation_reason === 'attendance_auto' && (
+                  <span className="stu-attendance-auto-tag" title="Automatically set to inactive by the attendance rule">
+                    Auto-deactivated (attendance)
+                  </span>
+                )}
+                {attendanceRiskInfo(student) === 'pending' && (
+                  <span className="stu-attendance-risk-tag stu-attendance-risk-tag--pending" title="Over the attendance threshold — will be deactivated once staff next open this screen after the day ends">
+                    Attendance: pending deactivation
+                  </span>
+                )}
+                {attendanceRiskInfo(student) === 'at-risk' && (
+                  <span className="stu-attendance-risk-tag" title="One more qualifying absence away from auto-deactivation">
+                    Attendance: at risk
+                  </span>
+                )}
                 {/* Session 14 — role tags directly on the list row. Silent
                     when a student holds no role, same treatment as the
                     detail header and the Guardians page: no "Unassigned"
@@ -2200,6 +2293,19 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               <span className={`stu-status-badge stu-status-badge--${detailStudent.status}`}>
                 {statusLabel(detailStudent.status)}
               </span>
+              {detailStudent.status === 'inactive' && detailStudent.deactivation_reason === 'attendance_auto' && (
+                <span className="stu-attendance-auto-tag" title="Automatically set to inactive by the attendance rule">
+                  Auto-deactivated (attendance)
+                </span>
+              )}
+              {attendanceRiskInfo(detailStudent) === 'pending' && (
+                <span className="stu-attendance-risk-tag stu-attendance-risk-tag--pending">
+                  Attendance: pending deactivation
+                </span>
+              )}
+              {attendanceRiskInfo(detailStudent) === 'at-risk' && (
+                <span className="stu-attendance-risk-tag">Attendance: at risk</span>
+              )}
               {/* Session 13 (PRD Problem 5.5) — role tags, "visible from
                   anywhere" per owner decision. Header-level so it's the same
                   row regardless of which subtab is open. Silent when empty/
@@ -3407,22 +3513,39 @@ function renderGuardiansTab() {
             <p className="stu-confirm-text">
               {statusConfirm === 'alumni'
                 ? `Mark ${detailStudent.full_name} as alumni? This is a permanent record and cannot be undone here.`
+                : statusConfirm === 'active'
+                ? `Reactivate ${detailStudent.full_name}?`
                 : `Mark ${detailStudent.full_name} as inactive?`}
             </p>
+            {statusConfirm === 'active' && (
+              <>
+                <label className="stu-label" htmlFor="stu-reactivate-note">
+                  Note (required)
+                </label>
+                <textarea
+                  id="stu-reactivate-note"
+                  className="stu-textarea"
+                  value={reactivateNote}
+                  onChange={e => setReactivateNote(e.target.value)}
+                  placeholder="Why is this student being reactivated?"
+                  rows={2}
+                />
+              </>
+            )}
             <div className="stu-confirm-actions">
               <button
                 className="stu-confirm-cancel"
-                onClick={() => setStatusConfirm(null)}
+                onClick={() => { setStatusConfirm(null); setReactivateNote('') }}
                 disabled={statusSaving}
               >
                 Cancel
               </button>
               <button
                 className={statusConfirm === 'alumni' ? 'stu-confirm-danger' : 'stu-confirm-warn'}
-                onClick={() => handleStatusChange(statusConfirm)}
-                disabled={statusSaving}
+                onClick={() => handleStatusChange(statusConfirm, statusConfirm === 'active' ? reactivateNote : undefined)}
+                disabled={statusSaving || (statusConfirm === 'active' && !reactivateNote.trim())}
               >
-                {statusSaving ? 'Saving…' : statusConfirm === 'alumni' ? 'Mark as alumni' : 'Mark as inactive'}
+                {statusSaving ? 'Saving…' : statusConfirm === 'alumni' ? 'Mark as alumni' : statusConfirm === 'active' ? 'Reactivate' : 'Mark as inactive'}
               </button>
             </div>
           </div>
@@ -3437,10 +3560,10 @@ function renderGuardiansTab() {
             {s !== 'active' && (
               <button
                 className="stu-status-action-btn stu-status-action-btn--activate"
-                onClick={() => handleStatusChange('active')}
+                onClick={() => setStatusConfirm('active')}
                 disabled={statusSaving}
               >
-                {statusSaving ? 'Saving…' : 'Reactivate student'}
+                Reactivate student
               </button>
             )}
             {s === 'active' && (
