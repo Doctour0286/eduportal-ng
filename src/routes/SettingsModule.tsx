@@ -1755,6 +1755,14 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   const [adSaving, setAdSaving] = useState(false)
   const [adSaveError, setAdSaveError] = useState<string | null>(null)
   const [adSaveOk, setAdSaveOk] = useState(false)
+  // Kept as free-typed strings, separate from adSettings' numeric fields —
+  // clamping to "at least 1" on every keystroke (the original bug) meant an
+  // in-progress edit (briefly empty while backspacing to retype) instantly
+  // snapped back to "1" before a new digit could be entered at all. Only
+  // digits are allowed as you type; the "at least 1" floor is enforced once,
+  // at save time, in handleSaveAttendanceDeactivation.
+  const [adConsecutiveInput, setAdConsecutiveInput] = useState('5')
+  const [adCumulativeInput, setAdCumulativeInput] = useState('5')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1801,6 +1809,8 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
     const { data, error } = await loadAttendanceDeactivationSettings(schoolId)
     if (error) { setAdError(error); setAdLoading(false); return }
     setAdSettings(data)
+    setAdConsecutiveInput(String(data.consecutive_threshold))
+    setAdCumulativeInput(String(data.cumulative_threshold))
     setAdLoading(false)
   }, [schoolId])
 
@@ -1810,18 +1820,24 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
     setAdSaving(true)
     setAdSaveError(null)
     setAdSaveOk(false)
+    // Parsed and floored to at least 1 here, once, rather than on every
+    // keystroke — an emptied field (mid-edit) or a stray non-digit falls
+    // back to 1 rather than blocking the save.
+    const consecutiveThreshold = Math.max(1, parseInt(adConsecutiveInput, 10) || 1)
+    const cumulativeThreshold = Math.max(1, parseInt(adCumulativeInput, 10) || 1)
     const { error } = await saveAttendanceDeactivationSettings(schoolId, {
       enabled: adSettings.enabled,
       mode: adSettings.mode,
-      consecutive_threshold: adSettings.consecutive_threshold,
-      cumulative_threshold: adSettings.cumulative_threshold,
+      consecutive_threshold: consecutiveThreshold,
+      cumulative_threshold: cumulativeThreshold,
     })
     setAdSaving(false)
     if (error) { setAdSaveError(error); return }
     setAdSaveOk(true)
     // Re-fetch rather than assuming — a fresh off->on activation stamps a
     // real activated_at server-side that this component doesn't compute
-    // itself, and the readout below should show that real value.
+    // itself, and the readout below should show that real value. This also
+    // re-syncs the two input strings to the clamped values actually saved.
     await loadAttendanceDeactivation()
   }
 
@@ -2161,17 +2177,17 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
           {adSettings.mode === 'consecutive' ? (
             <FieldRow label="Consecutive absent days before deactivation">
               <Input
-                value={String(adSettings.consecutive_threshold)}
-                onChange={v => setAdSettings(prev => ({ ...prev, consecutive_threshold: Math.max(1, Number(v) || 1) }))}
-                type="number"
+                value={adConsecutiveInput}
+                onChange={v => setAdConsecutiveInput(v.replace(/[^0-9]/g, ''))}
+                type="text"
               />
             </FieldRow>
           ) : (
             <FieldRow label="Total absences before deactivation">
               <Input
-                value={String(adSettings.cumulative_threshold)}
-                onChange={v => setAdSettings(prev => ({ ...prev, cumulative_threshold: Math.max(1, Number(v) || 1) }))}
-                type="number"
+                value={adCumulativeInput}
+                onChange={v => setAdCumulativeInput(v.replace(/[^0-9]/g, ''))}
+                type="text"
               />
             </FieldRow>
           )}
