@@ -102,7 +102,6 @@ import {
 import CourseResultsModule from './CourseResultsModule'
 import ReportCardsPanel from './ReportCardsPanel'
 import type { NavIntent } from '../App'
-import { supabase } from '../lib/supabase'
 import {
   previewPromotion,
   applyPromotions,
