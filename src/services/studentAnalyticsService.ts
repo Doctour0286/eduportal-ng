@@ -155,7 +155,10 @@ export type DayStatus = 'present' | 'absent' | 'late' | 'excused' | 'unmarked'
 export interface AttendanceDetail {
   summary: AttendanceSummary
   days: { date: string; status: DayStatus }[]      // school days only
-  weekdayAbsences: { label: string; count: number }[]
+  // One entry per weekday the school actually holds classes (from the school
+  // calendar, so a Saturday school or a short week is respected), in
+  // Monday-first order. percent = present+late over marked days.
+  byWeekday: { label: string; present: number; absent: number; percent: number | null }[]
   longestAbsentRun: number
   lateCount: number
   monthly: { key: string; label: string; percent: number | null; absent: number }[]
@@ -230,7 +233,8 @@ async function settle<T>(fn: () => Promise<T>): Promise<SectionResult<T>> {
 
 // ─── Attendance ──────────────────────────────────────────────────────────────
 
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0]
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 async function buildAttendance(schoolId: string, studentId: string, range: DateRange): Promise<AttendanceDetail> {
@@ -256,19 +260,32 @@ async function buildAttendance(schoolId: string, studentId: string, range: DateR
     if (dayMap.get(d) ?? false) days.push({ date: d, status: recs.get(d) ?? 'unmarked' })
   }
 
-  const weekday = WEEKDAYS.map(label => ({ label, count: 0 }))
+  const perDow = new Map<number, { present: number; absent: number }>()
   let run = 0, longest = 0, late = 0
   for (const d of days) {
+    const dow = new Date(d.date + 'T00:00:00').getDay()
+    const bucket = perDow.get(dow) ?? { present: 0, absent: 0 }
     if (d.status === 'absent') {
       run += 1
       if (run > longest) longest = run
-      const dow = new Date(d.date + 'T00:00:00').getDay() // 1..5 = Mon..Fri
-      if (dow >= 1 && dow <= 5) weekday[dow - 1].count += 1
+      bucket.absent += 1
     } else {
       run = 0
     }
+    if (d.status === 'present' || d.status === 'late') bucket.present += 1
     if (d.status === 'late') late += 1
+    perDow.set(dow, bucket)
   }
+  const byWeekday = DOW_ORDER.filter(dow => perDow.has(dow)).map(dow => {
+    const b = perDow.get(dow)!
+    const marked = b.present + b.absent
+    return {
+      label: DOW_LABELS[dow],
+      present: b.present,
+      absent: b.absent,
+      percent: marked > 0 ? Math.round((b.present / marked) * 100) : null,
+    }
+  })
 
   const monthly: AttendanceDetail['monthly'] = []
   const span = (new Date(range.to).getTime() - new Date(range.from).getTime()) / 86_400_000
@@ -292,7 +309,7 @@ async function buildAttendance(schoolId: string, studentId: string, range: DateR
     }
   }
 
-  return { summary, days, weekdayAbsences: weekday, longestAbsentRun: longest, lateCount: late, monthly }
+  return { summary, days, byWeekday, longestAbsentRun: longest, lateCount: late, monthly }
 }
 
 // ─── Academics ───────────────────────────────────────────────────────────────

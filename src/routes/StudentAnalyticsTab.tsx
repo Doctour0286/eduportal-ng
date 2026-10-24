@@ -258,18 +258,30 @@ export default function StudentAnalyticsTab({
                     {att.summary.absent} absent · {att.lateCount} late · {att.summary.excused} excused · longest absence run {att.longestAbsentRun} day{att.longestAbsentRun === 1 ? '' : 's'}
                   </p>
 
-                  {att.summary.absent >= 3 && (() => {
-                    const max = Math.max(...att.weekdayAbsences.map(w => w.count), 1)
-                    const top = [...att.weekdayAbsences].sort((a, b) => b.count - a.count)[0]
+                  {(() => {
+                    const rated = att.byWeekday.filter(w => w.percent !== null)
+                    const markedDays = att.byWeekday.reduce((n, w) => n + w.present + w.absent, 0)
+                    if (rated.length < 2 || markedDays < 5) return null
+                    const lowest = [...rated].sort((a, b) => (a.percent! - b.percent!) || (b.absent - a.absent))[0]
+                    const highest = Math.max(...rated.map(w => w.percent!))
+                    const gap = highest - lowest.percent!
                     return (
                       <div className="san-weekday">
-                        <p className="san-sub">Absences by weekday{top.count >= 2 && top.count / att.summary.absent >= 0.4 ? ` — mostly ${top.label}s` : ''}</p>
+                        <p className="san-sub">
+                          Attendance by school day{gap >= 15 && lowest.absent >= 2 ? ` — lowest on ${lowest.label}s (${lowest.percent}%)` : ''}
+                        </p>
                         <div className="san-wd-bars">
-                          {att.weekdayAbsences.map(w => (
-                            <div key={w.label} className="san-wd">
-                              <div className="san-wd-col"><div className="san-wd-fill" style={{ height: `${(w.count / max) * 100}%` }} /></div>
-                              <span className="san-wd-n">{w.count}</span>
+                          {att.byWeekday.map(w => (
+                            <div key={w.label} className="san-wd" title={`${w.label}: ${w.present} present, ${w.absent} absent`}>
+                              <div className="san-wd-col">
+                                <div
+                                  className={`san-mo-fill${w.percent !== null && w.percent < 80 ? ' san-mo-fill--low' : ''}`}
+                                  style={{ height: `${w.percent ?? 0}%` }}
+                                />
+                              </div>
+                              <span className="san-wd-n">{w.percent === null ? '—' : `${w.percent}%`}</span>
                               <span className="san-wd-l">{w.label}</span>
+                              <span className="san-wd-l">{w.absent} abs.</span>
                             </div>
                           ))}
                         </div>
