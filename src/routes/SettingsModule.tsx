@@ -111,6 +111,7 @@ import {
 // with their own domain services — they live in AssessmentsSettings.tsx (see
 // that file's header for why), imported here as tab bodies only.
 import { AssessmentsTab, PromotionTabSecondary } from './AssessmentsSettings'
+import AttendanceClassRules from './AttendanceClassRules'
 // SESSION 65c — admission pipeline/field-settings/master-switch authoring.
 // Deliberately a separate import from admissionService.ts, not folded into
 // the block above: that file's own header comment (added in 65b) explains
@@ -2202,6 +2203,15 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
           <button className="set-save-btn" onClick={handleSaveAttendanceDeactivation} disabled={adSaving}>
             {adSaving ? 'Saving…' : 'Save'}
           </button>
+
+          <AttendanceClassRules
+            schoolId={schoolId}
+            school={{
+              mode: adSettings.mode,
+              consecutive_threshold: adSettings.consecutive_threshold,
+              cumulative_threshold: adSettings.cumulative_threshold,
+            }}
+          />
         </>
       )}
     </div>

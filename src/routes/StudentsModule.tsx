@@ -79,6 +79,18 @@ import {
   // Problem 9.8 (Tier 9)
   loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
+import ObligationFields from '../components/ObligationFields'
+import {
+  loadPendingObligations,
+  loadStudentObligations,
+  createObligation,
+  resolveObligation,
+  obligationBadge,
+  formatObligationAmount,
+  validateObligationDraft,
+  type Obligation,
+  type ObligationDraft,
+} from '../services/obligationsService'
 import {
   searchGuardians,
   linkGuardianToStudent,
@@ -671,6 +683,19 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // ── Status management (detail panel) ─────────────────────────────────────
   const [statusSaving,   setStatusSaving]   = useState(false)
   const [statusError,    setStatusError]    = useState('')
+
+  // Fines / tasks (migration_attendance_class_rules_and_obligations.sql).
+  // pendingObl feeds the list/detail badges school-wide; stuObligations is
+  // the selected student's full history for the Status tab.
+  const actorRecordId = useAuthStore(s => s.actorRecordId)
+  const [reactivateDraft, setReactivateDraft] = useState<ObligationDraft | null>(null)
+  const [pendingObl,      setPendingObl]      = useState<Map<string, Obligation[]>>(new Map())
+  const [stuObligations,  setStuObligations]  = useState<Obligation[]>([])
+  const [stuOblLoading,   setStuOblLoading]   = useState(false)
+  const [resolvingId,     setResolvingId]     = useState<string | null>(null)
+  const [resolveNote,     setResolveNote]     = useState('')
+  const [resolveSaving,   setResolveSaving]   = useState(false)
+  const [oblError,        setOblError]        = useState('')
   const [statusConfirm,  setStatusConfirm]  = useState<'active' | 'inactive' | 'alumni' | null>(null)
   // migration_attendance_auto_deactivation.sql — required specifically for
   // the 'active' (reactivation) case, enforced both here (button stays
@@ -1005,6 +1030,41 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // can open a row straight into the Status tab (where "Assign to level"
   // lives) instead of always defaulting to Brief. Every existing caller
   // omits it and keeps today's Brief-first behavior unchanged.
+  const refreshPendingObl = useCallback(async () => {
+    if (!canManageStudents) return
+    const res = await loadPendingObligations(schoolId)
+    if (res.ok) setPendingObl(res.data)
+  }, [schoolId, canManageStudents])
+
+  useEffect(() => { void refreshPendingObl() }, [refreshPendingObl])
+
+  const detailStudentId = detailStudent?.id ?? null
+  const refreshStuObl = useCallback(async () => {
+    if (!detailStudentId || !canManageStudents) { setStuObligations([]); return }
+    setStuOblLoading(true)
+    const res = await loadStudentObligations(detailStudentId)
+    setStuOblLoading(false)
+    if (res.ok) setStuObligations(res.data)
+    else setOblError(res.error)
+  }, [detailStudentId, canManageStudents])
+
+  useEffect(() => {
+    setOblError('')
+    setResolvingId(null)
+    void refreshStuObl()
+  }, [refreshStuObl])
+
+  async function handleResolveObligation(id: string, status: 'fulfilled' | 'waived') {
+    setResolveSaving(true)
+    setOblError('')
+    const res = await resolveObligation({ id, status, note: resolveNote, resolvedBy: actorRecordId ?? null })
+    setResolveSaving(false)
+    if (!res.ok) { setOblError(res.error); return }
+    setResolvingId(null)
+    setResolveNote('')
+    await Promise.all([refreshStuObl(), refreshPendingObl()])
+  }
+
   function openDetail(student: Student, initialTab: DetailTab = 'brief') {
     setDetailStudent(student)
     setDetailTab(initialTab)
@@ -1357,6 +1417,14 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
       return
     }
     setReactivateNote('')
+    if (newStatus === 'active' && reactivateDraft) {
+      const ob = await createObligation({
+        schoolId, studentId: detailStudent.id, draft: reactivateDraft, createdBy: actorRecordId ?? null,
+      })
+      if (!ob.ok) setStatusError(`Reactivated, but the fine/task could not be saved: ${ob.error}`)
+      await Promise.all([refreshStuObl(), refreshPendingObl()])
+    }
+    setReactivateDraft(null)
     // Update the detail student and list without a full reload. Reactivating
     // also resets the attendance auto-deactivation counters server-side
     // (updateStudentStatus()) — mirrored here so the at-risk/pending badges
@@ -2056,6 +2124,10 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               </div>
               <div className="stu-row-body">
                 <span className="stu-row-name">{student.full_name}</span>
+                {(() => {
+                  const b = canManageStudents ? obligationBadge(pendingObl.get(student.id)) : null
+                  return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
+                })()}
                 <span className="stu-row-meta">
                   {isHigherEd
                     ? (student.matric_number ?? 'No matric number yet')
@@ -2288,6 +2360,10 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               <span className={`stu-status-badge stu-status-badge--${detailStudent.status}`}>
                 {statusLabel(detailStudent.status)}
               </span>
+              {(() => {
+                const b = canManageStudents ? obligationBadge(pendingObl.get(detailStudent.id)) : null
+                return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
+              })()}
               {detailStudent.status === 'inactive' && detailStudent.deactivation_reason === 'attendance_auto' && (
                 <span className="stu-attendance-auto-tag" title="Automatically set to inactive by the attendance rule">
                   Auto-deactivated (attendance)
@@ -3522,12 +3598,13 @@ function renderGuardiansTab() {
                   placeholder="Why is this student being reactivated?"
                   rows={2}
                 />
+                <ObligationFields value={reactivateDraft} onChange={setReactivateDraft} />
               </>
             )}
             <div className="stu-confirm-actions">
               <button
                 className="stu-confirm-cancel"
-                onClick={() => { setStatusConfirm(null); setReactivateNote('') }}
+                onClick={() => { setStatusConfirm(null); setReactivateNote(''); setReactivateDraft(null) }}
                 disabled={statusSaving}
               >
                 Cancel
@@ -3535,7 +3612,11 @@ function renderGuardiansTab() {
               <button
                 className={statusConfirm === 'alumni' ? 'stu-confirm-danger' : 'stu-confirm-warn'}
                 onClick={() => handleStatusChange(statusConfirm, statusConfirm === 'active' ? reactivateNote : undefined)}
-                disabled={statusSaving || (statusConfirm === 'active' && !reactivateNote.trim())}
+                disabled={
+                  statusSaving ||
+                  (statusConfirm === 'active' && (!reactivateNote.trim() ||
+                    (reactivateDraft !== null && validateObligationDraft(reactivateDraft) !== null)))
+                }
               >
                 {statusSaving ? 'Saving…' : statusConfirm === 'alumni' ? 'Mark as alumni' : statusConfirm === 'active' ? 'Reactivate' : 'Mark as inactive'}
               </button>
@@ -3576,6 +3657,75 @@ function renderGuardiansTab() {
                 Mark as alumni
               </button>
             )}
+          </div>
+        )}
+
+        {/* Fines & tasks — pending items with fulfil/waive, plus the full
+            history (who assigned, when, who resolved) for this student. */}
+        {canManageStudents && !isHigherEd && (
+          <div className="stu-status-section obl-section">
+            <p className="stu-status-section-label">Fines &amp; tasks</p>
+            {oblError && <p className="stu-status-note stu-status-note--error">{oblError}</p>}
+            {stuOblLoading && <div className="stu-transfer-skel skeleton" />}
+            {!stuOblLoading && stuObligations.length === 0 && (
+              <p className="stu-status-note">None recorded. A fine or task can be added when reactivating a student.</p>
+            )}
+            <ul className="obl-list">
+              {stuObligations.map(o => {
+                const fmt = (d: string) => new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+                return (
+                  <li key={o.id} className={`obl-item obl-item--${o.status}`}>
+                    <div className="obl-item-top">
+                      <strong>{o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task'}</strong>
+                      <span className={`obl-status obl-status--${o.status}`}>
+                        {o.status === 'pending' ? 'Unfulfilled' : o.status === 'fulfilled' ? 'Fulfilled' : 'Waived'}
+                      </span>
+                    </div>
+                    <span className="obl-item-desc">{o.description}</span>
+                    <span className="obl-item-meta">
+                      Assigned {fmt(o.created_at)}{o.created_by_name ? ` by ${o.created_by_name}` : ''}
+                      {o.due_date ? ` · due ${fmt(o.due_date + 'T00:00:00')}` : ''}
+                    </span>
+                    {o.status !== 'pending' && o.resolved_at && (
+                      <span className="obl-item-meta">
+                        {o.status === 'fulfilled' ? 'Fulfilled' : 'Waived'} {fmt(o.resolved_at)}
+                        {o.resolved_by_name ? ` by ${o.resolved_by_name}` : ''}
+                        {o.resolution_note ? ` — ${o.resolution_note}` : ''}
+                      </span>
+                    )}
+                    {o.status === 'pending' && (
+                      resolvingId === o.id ? (
+                        <div className="obl-resolve">
+                          <input
+                            className="obl-input obl-input--wide"
+                            type="text"
+                            value={resolveNote}
+                            onChange={e => setResolveNote(e.target.value)}
+                            placeholder="Note (optional)"
+                          />
+                          <button className="stu-confirm-warn" disabled={resolveSaving}
+                            onClick={() => void handleResolveObligation(o.id, 'fulfilled')}>
+                            {resolveSaving ? 'Saving…' : 'Mark fulfilled'}
+                          </button>
+                          <button className="stu-confirm-cancel" disabled={resolveSaving}
+                            onClick={() => void handleResolveObligation(o.id, 'waived')}>
+                            Waive
+                          </button>
+                          <button className="stu-confirm-cancel" disabled={resolveSaving}
+                            onClick={() => { setResolvingId(null); setResolveNote('') }}>
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button className="stu-status-action-btn" onClick={() => { setResolvingId(o.id); setResolveNote('') }}>
+                          Resolve…
+                        </button>
+                      )
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
           </div>
         )}
 

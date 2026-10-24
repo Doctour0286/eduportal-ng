@@ -90,6 +90,16 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
 import { updateStudentStatus } from '../services/studentsService'
+import ObligationFields from '../components/ObligationFields'
+import {
+  loadPendingObligations,
+  createObligation,
+  obligationBadge,
+  validateObligationDraft,
+  type Obligation,
+  type ObligationDraft,
+} from '../services/obligationsService'
+import { loadRulesContext, resolveEffectiveRule, type RulesContext } from '../services/attendanceRules'
 import {
   loadAttendanceDeactivationSettings,
   type AttendanceDeactivationSettings,
@@ -244,15 +254,23 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [detail,           setDetail]           = useState<SuspensionDetail | null>(null)
   const [detailLoading,    setDetailLoading]    = useState(false)
   const [studentsReloadTick, setStudentsReloadTick] = useState(0)
+  const [rulesCtx,         setRulesCtx]         = useState<RulesContext | null>(null)
+  const [obligationDraft,  setObligationDraft]  = useState<ObligationDraft | null>(null)
+  const [pendingObl,       setPendingObl]       = useState<Map<string, Obligation[]>>(new Map())
+  const [reactivateNotice, setReactivateNotice] = useState('')
 
   const reloadSuspended = useCallback(async () => {
     if (!canManageStudents) return
-    const [res, rule] = await Promise.all([
+    const [res, rule, ctxRes, oblRes] = await Promise.all([
       loadSuspendedStudents(schoolId),
       loadAttendanceDeactivationSettings(schoolId),
+      loadRulesContext(schoolId),
+      loadPendingObligations(schoolId),
     ])
     if (res.ok) setSuspended(res.data)
     setSuspendedRule(rule.data)
+    if (ctxRes.ok) setRulesCtx(ctxRes.data)
+    if (oblRes.ok) setPendingObl(oblRes.data)
   }, [schoolId, canManageStudents])
 
   useEffect(() => { void reloadSuspended() }, [reloadSuspended])
@@ -270,6 +288,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     setReactivateId(s.student_id)
     setReactivateNote('')
     setReactivateError('')
+    setObligationDraft(null)
     setDetail(null)
     setDetailLoading(true)
     const res = await loadSuspensionDetail(schoolId, s.student_id, s.last_absent_date)
@@ -279,15 +298,33 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   }
 
   async function confirmReactivate(studentId: string) {
+    if (obligationDraft) {
+      const problem = validateObligationDraft(obligationDraft)
+      if (problem) { setReactivateError(problem); return }
+    }
     setReactivateSaving(true)
     setReactivateError('')
     const res = await updateStudentStatus(studentId, 'active', reactivateNote)
+    if (!res.ok) { setReactivateSaving(false); setReactivateError(res.error); return }
+
+    // Reactivation succeeded. The fine/task is a second write — if it fails
+    // the student is still reactivated, so say so plainly rather than
+    // leaving the preview open on a student who is no longer suspended.
+    if (obligationDraft) {
+      const ob = await createObligation({
+        schoolId, studentId, draft: obligationDraft, createdBy: actorRecordId ?? null,
+      })
+      if (!ob.ok) {
+        setReactivateNotice(`The student was reactivated, but the fine/task could not be saved: ${ob.error}. Add it from Students → Status.`)
+      }
+    }
     setReactivateSaving(false)
-    if (!res.ok) { setReactivateError(res.error); return }
     setReactivateId(null)
     setReactivateNote('')
+    setObligationDraft(null)
     setDetail(null)
     setSuspended(prev => prev.filter(x => x.student_id !== studentId))
+    void reloadSuspended()
     // The reactivated student belongs back in the active register.
     setStudentsReloadTick(t => t + 1)
   }
@@ -980,10 +1017,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (list.length === 0) return null
 
     const isOpen = suspendedOpen.has(classId)
-    const mode = suspendedRule?.mode ?? 'consecutive'
-    const threshold = mode === 'consecutive'
-      ? (suspendedRule?.consecutive_threshold ?? 5)
-      : (suspendedRule?.cumulative_threshold ?? 5)
+    const schoolRule = {
+      mode: suspendedRule?.mode ?? 'consecutive',
+      consecutive_threshold: suspendedRule?.consecutive_threshold ?? 5,
+      cumulative_threshold: suspendedRule?.cumulative_threshold ?? 5,
+    } as const
     const fmtDate = (d: string) =>
       new Date(d.length > 10 ? d : d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
     const fmtShort = (d: string) =>
@@ -1008,6 +1046,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         {isOpen && (
           <ul className="att-susp-list">
             {list.map(st => {
+              const eff = rulesCtx
+                ? resolveEffectiveRule(st.class_node_id, rulesCtx, schoolRule)
+                : resolveEffectiveRule(null, { rules: new Map(), parentById: new Map() }, schoolRule)
+              const mode = eff.mode
+              const threshold = eff.threshold
               const count = mode === 'consecutive' ? st.consecutive_count : st.cumulative_count
               const pct = Math.min(100, Math.round((count / Math.max(1, threshold)) * 100))
               const open = reactivateId === st.student_id
@@ -1091,6 +1134,12 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
                           )}
                         </>
                       )}
+
+                      <ObligationFields
+                        value={obligationDraft}
+                        onChange={setObligationDraft}
+                        disabled={reactivateSaving}
+                      />
 
                       <div className="att-susp-form">
                         <input
@@ -1471,6 +1520,10 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
             {student.full_name}
             <span className="att-history-chevron">{isHistOpen ? '▲' : '▼'}</span>
           </button>
+          {(() => {
+            const b = canManageStudents ? obligationBadge(pendingObl.get(student.id)) : null
+            return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
+          })()}
 
           {/* Status buttons */}
           <div className="att-btn-group">
@@ -1709,6 +1762,15 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     <div className="att-root">
       {/* Whole-school analytics — independent of class/date selection below */}
       {renderAnalyticsPanel()}
+
+      {reactivateNotice && (
+        <div className="att-permission-notice" role="alert">
+          {reactivateNotice}{' '}
+          <button type="button" className="btn btn--secondary btn--sm" onClick={() => setReactivateNotice('')}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Header */}
       <div className="att-header">

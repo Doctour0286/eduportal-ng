@@ -52,6 +52,7 @@
  */
 
 import { supabase } from '../lib/supabase'
+import { loadRulesContext, resolveEffectiveRule, type SchoolRule } from './attendanceRules'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1367,17 +1368,26 @@ export async function runAttendanceAutoDeactivationCheck(
     if (settingsError) return { ok: false, error: settingsError.message }
     if (!settings || !settings.enabled) return { ok: true, data: { deactivated: [] } }
 
-    const isConsecutive = settings.mode === 'consecutive'
-    const counterColumn = isConsecutive ? 'consecutive_absent_count' : 'cumulative_absent_count'
-    const threshold = isConsecutive ? settings.consecutive_threshold : settings.cumulative_threshold
+    // Per-class overrides (migration_attendance_class_rules_and_obligations.sql).
+    // If the rules can't be read, do nothing rather than risk suspending
+    // students in a class that is actually exempt.
+    const ctxRes = await loadRulesContext(schoolId)
+    if (!ctxRes.ok) return { ok: false, error: ctxRes.error }
+    const school: SchoolRule = {
+      mode: settings.mode,
+      consecutive_threshold: settings.consecutive_threshold,
+      cumulative_threshold: settings.cumulative_threshold,
+    }
 
+    // Any student with a live counter is a candidate; whether they actually
+    // qualify depends on their class's effective rule, resolved below.
     const { data: candidates, error: candidatesError } = await supabase
       .from('students')
-      .select('id, full_name, last_absent_date, consecutive_absent_count, cumulative_absent_count')
+      .select('id, full_name, class_node_id, last_absent_date, consecutive_absent_count, cumulative_absent_count')
       .eq('school_id', schoolId)
       .eq('status', 'active')
       .is('deactivation_reason', null)
-      .gte(counterColumn, threshold)
+      .or('consecutive_absent_count.gt.0,cumulative_absent_count.gt.0')
 
     if (candidatesError) return { ok: false, error: candidatesError.message }
     if (!candidates || candidates.length === 0) return { ok: true, data: { deactivated: [] } }
@@ -1385,6 +1395,14 @@ export async function runAttendanceAutoDeactivationCheck(
     const deactivated: AttendanceDeactivationCandidate[] = []
 
     for (const c of candidates) {
+      const rule = resolveEffectiveRule((c.class_node_id as string | null) ?? null, ctxRes.data, school)
+      if (rule.exempt) continue
+      const isConsecutive = rule.mode === 'consecutive'
+      const liveCount = isConsecutive
+        ? (c.consecutive_absent_count as number)
+        : (c.cumulative_absent_count as number)
+      if (liveCount < rule.threshold) continue
+
       const lastAbsentDate = c.last_absent_date as string | null
       if (!lastAbsentDate) continue // shouldn't happen if a counter is >= threshold, but fails safe
 
@@ -1395,9 +1413,7 @@ export async function runAttendanceAutoDeactivationCheck(
       // elapsed yet. Wait for a later run rather than acting mid-day.
       if (isWithinEditWindow(hoursEndRes.data)) continue
 
-      const count = isConsecutive
-        ? (c.consecutive_absent_count as number)
-        : (c.cumulative_absent_count as number)
+      const count = liveCount
 
       const res = await autoDeactivateForAttendance(c.id as string)
       if (res.ok) {
