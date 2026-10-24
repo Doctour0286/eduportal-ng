@@ -555,6 +555,96 @@ export async function loadAttendanceHistory(
   }
 }
 
+// ─── Suspended (auto-deactivated) students ───────────────────────────────────
+
+export interface SuspendedStudentEvidence {
+  student_id: string
+  full_name: string
+  class_node_id: string | null
+  last_absent_date: string | null
+  consecutive_count: number
+  cumulative_count: number
+  // Most recent school days (oldest → newest) ending at the student's last
+  // absence, so the strip shows the run that triggered the suspension.
+  days: { date: string; status: AttendanceStatus | null }[]
+}
+
+const SUSPENDED_STRIP_DAYS = 14
+
+/**
+ * Students the attendance rule suspended (status 'inactive' +
+ * deactivation_reason 'attendance_auto'), each with the school-day
+ * attendance strip that explains why. Read-only; reactivation goes through
+ * studentsService.updateStudentStatus().
+ */
+export async function loadSuspendedStudents(
+  schoolId: string,
+): Promise<Result<SuspendedStudentEvidence[]>> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('students')
+      .select('id, full_name, class_node_id, consecutive_absent_count, cumulative_absent_count, last_absent_date')
+      .eq('school_id', schoolId)
+      .eq('status', 'inactive')
+      .eq('deactivation_reason', 'attendance_auto')
+      .order('full_name')
+
+    if (error) return { ok: false, error: error.message }
+    if (!rows || rows.length === 0) return { ok: true, data: [] }
+
+    // Window: 45 calendar days back from the latest absence is plenty to
+    // find 14 school days, even across a break.
+    const lastDates = rows.map(r => r.last_absent_date).filter(Boolean) as string[]
+    const newest = lastDates.length ? lastDates.sort().slice(-1)[0] : todayDateString()
+    const startD = new Date(newest + 'T00:00:00')
+    startD.setDate(startD.getDate() - 45)
+    const startDate = formatDate(startD)
+
+    const ids = rows.map(r => r.id)
+    const [recRes, dayMapRes] = await Promise.all([
+      supabase
+        .from('attendance_records')
+        .select('student_id, date, status')
+        .in('student_id', ids)
+        .gte('date', startDate)
+        .lte('date', newest),
+      getSchoolDayMap(startDate, newest, schoolId),
+    ])
+    if (recRes.error) return { ok: false, error: recRes.error.message }
+    const dayMap = dayMapRes.ok ? dayMapRes.data : new Map<string, boolean>()
+
+    const byStudent = new Map<string, Map<string, AttendanceStatus>>()
+    for (const r of recRes.data ?? []) {
+      if (!byStudent.has(r.student_id)) byStudent.set(r.student_id, new Map())
+      byStudent.get(r.student_id)!.set(r.date, r.status as AttendanceStatus)
+    }
+
+    const out: SuspendedStudentEvidence[] = rows.map(r => {
+      const end = r.last_absent_date ?? newest
+      const recs = byStudent.get(r.id) ?? new Map<string, AttendanceStatus>()
+      const days: SuspendedStudentEvidence['days'] = []
+      const cur = new Date(end + 'T00:00:00')
+      while (days.length < SUSPENDED_STRIP_DAYS && formatDate(cur) >= startDate) {
+        const d = formatDate(cur)
+        if (dayMap.get(d) ?? true) days.unshift({ date: d, status: recs.get(d) ?? null })
+        cur.setDate(cur.getDate() - 1)
+      }
+      return {
+        student_id: r.id,
+        full_name: r.full_name,
+        class_node_id: r.class_node_id ?? null,
+        last_absent_date: r.last_absent_date ?? null,
+        consecutive_count: r.consecutive_absent_count ?? 0,
+        cumulative_count: r.cumulative_absent_count ?? 0,
+        days,
+      }
+    })
+    return { ok: true, data: out }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load suspended students' }
+  }
+}
+
 // ─── Write: single record ─────────────────────────────────────────────────────
 
 /**

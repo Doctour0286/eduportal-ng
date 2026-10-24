@@ -89,6 +89,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
+import { updateStudentStatus } from '../services/studentsService'
+import {
+  loadAttendanceDeactivationSettings,
+  type AttendanceDeactivationSettings,
+} from '../services/settingsService'
 import {
   loadCurrentSession,
   loadCurrentTerm,
@@ -97,6 +102,7 @@ import {
   loadStudentsForClass,
   loadAttendanceRecords,
   loadAttendanceHistory,
+  loadSuspendedStudents,
   saveAttendanceRecord,
   saveBatchAttendance,
   flushAttendanceQueue,
@@ -115,6 +121,7 @@ import {
   type AttendanceMap,
   type AttendanceStatus,
   type StudentAttendanceHistory,
+  type SuspendedStudentEvidence,
   type AttendanceUpsertParams,
   type AttendanceAnalyticsScope,
   type SchoolAttendanceAnalytics,
@@ -219,6 +226,41 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [analyticsData,    setAnalyticsData]    = useState<SchoolAttendanceAnalytics | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsError,   setAnalyticsError]   = useState<string>('')
+
+  // ── Suspended students panel ──────────────────────────────────────────────
+  // Students the attendance rule auto-deactivated, with the evidence strip
+  // and a one-tap reactivate (note required, same rule as StudentsModule).
+  const canManageStudents = useAuthStore(s => s.can('students.records.manage'))
+  const [suspended,        setSuspended]        = useState<SuspendedStudentEvidence[]>([])
+  const [suspendedRule,    setSuspendedRule]    = useState<AttendanceDeactivationSettings | null>(null)
+  const [suspendedOpen,    setSuspendedOpen]    = useState(true)
+  const [reactivateId,     setReactivateId]     = useState<string | null>(null)
+  const [reactivateNote,   setReactivateNote]   = useState('')
+  const [reactivateSaving, setReactivateSaving] = useState(false)
+  const [reactivateError,  setReactivateError]  = useState('')
+
+  const reloadSuspended = useCallback(async () => {
+    if (!canManageStudents) return
+    const [res, rule] = await Promise.all([
+      loadSuspendedStudents(schoolId),
+      loadAttendanceDeactivationSettings(schoolId),
+    ])
+    if (res.ok) setSuspended(res.data)
+    setSuspendedRule(rule.data)
+  }, [schoolId, canManageStudents])
+
+  useEffect(() => { void reloadSuspended() }, [reloadSuspended])
+
+  async function confirmReactivate(studentId: string) {
+    setReactivateSaving(true)
+    setReactivateError('')
+    const res = await updateStudentStatus(studentId, 'active', reactivateNote)
+    setReactivateSaving(false)
+    if (!res.ok) { setReactivateError(res.error); return }
+    setReactivateId(null)
+    setReactivateNote('')
+    setSuspended(prev => prev.filter(x => x.student_id !== studentId))
+  }
 
   // ── Class selector ────────────────────────────────────────────────────────
   // Two-tier picker (owner request, Session 31: "filter by a parent class as
@@ -902,6 +944,108 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     session: 'This Session',
   }
 
+  function renderSuspendedPanel() {
+    if (!canManageStudents || suspended.length === 0) return null
+    const mode = suspendedRule?.mode ?? 'consecutive'
+    const threshold = mode === 'consecutive'
+      ? (suspendedRule?.consecutive_threshold ?? 5)
+      : (suspendedRule?.cumulative_threshold ?? 5)
+    const className = (id: string | null) => classes.find(c => c.id === id)?.path_label ?? ''
+    const fmt = (d: string) => new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+
+    return (
+      <div className="att-susp-panel">
+        <button
+          type="button"
+          className="att-susp-head"
+          onClick={() => setSuspendedOpen(o => !o)}
+          aria-expanded={suspendedOpen}
+        >
+          <span className="att-susp-title">Suspended for absences</span>
+          <span className="att-susp-count">{suspended.length}</span>
+          <span className="att-susp-chevron" aria-hidden="true">{suspendedOpen ? '▾' : '▸'}</span>
+        </button>
+
+        {suspendedOpen && (
+          <ul className="att-susp-list">
+            {suspended.map(s => {
+              const count = mode === 'consecutive' ? s.consecutive_count : s.cumulative_count
+              const pct = Math.min(100, Math.round((count / Math.max(1, threshold)) * 100))
+              const open = reactivateId === s.student_id
+              return (
+                <li key={s.student_id} className="att-susp-item">
+                  <div className="att-susp-row">
+                    <div className="att-susp-who">
+                      <span className="att-susp-name">{s.full_name}</span>
+                      {className(s.class_node_id) && (
+                        <span className="att-susp-class">{className(s.class_node_id)}</span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      onClick={() => {
+                        setReactivateId(open ? null : s.student_id)
+                        setReactivateNote('')
+                        setReactivateError('')
+                      }}
+                    >
+                      {open ? 'Cancel' : 'Reactivate'}
+                    </button>
+                  </div>
+
+                  <div className="att-susp-bar" role="img"
+                    aria-label={`${count} of ${threshold} ${mode} absences`}>
+                    <div className="att-susp-bar-fill" style={{ width: `${pct}%` }} />
+                  </div>
+                  <p className="att-susp-reason">
+                    {count} of {threshold} {mode === 'consecutive' ? 'consecutive' : 'total'} absences
+                    {s.last_absent_date ? ` · last absent ${fmt(s.last_absent_date)}` : ''}
+                  </p>
+
+                  <div className="att-susp-strip" aria-label="Recent school days">
+                    {s.days.map(d => (
+                      <span
+                        key={d.date}
+                        className={[
+                          'att-dot',
+                          d.status ? HISTORY_DOT_CLS[d.status] : 'att-dot--unmarked',
+                        ].join(' ')}
+                        title={`${fmt(d.date)}: ${d.status ?? 'not marked'}`}
+                      />
+                    ))}
+                  </div>
+
+                  {open && (
+                    <div className="att-susp-form">
+                      <input
+                        className="att-susp-note"
+                        type="text"
+                        value={reactivateNote}
+                        onChange={e => setReactivateNote(e.target.value)}
+                        placeholder="Why is this student being reactivated?"
+                        autoFocus
+                      />
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        disabled={reactivateSaving || !reactivateNote.trim()}
+                        onClick={() => void confirmReactivate(s.student_id)}
+                      >
+                        {reactivateSaving ? 'Saving…' : 'Confirm'}
+                      </button>
+                      {reactivateError && <p className="att-susp-error">{reactivateError}</p>}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    )
+  }
+
   function renderAnalyticsPanel() {
     const data = analyticsData
 
@@ -1484,6 +1628,9 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     <div className="att-root">
       {/* Whole-school analytics — independent of class/date selection below */}
       {renderAnalyticsPanel()}
+
+      {/* Students suspended by the attendance rule — reactivate from here */}
+      {renderSuspendedPanel()}
 
       {/* Header */}
       <div className="att-header">
