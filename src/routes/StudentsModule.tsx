@@ -2077,11 +2077,6 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
                     Attendance: pending deactivation
                   </span>
                 )}
-                {attendanceRiskInfo(student) === 'at-risk' && (
-                  <span className="stu-attendance-risk-tag" title="One more qualifying absence away from auto-deactivation">
-                    Attendance: at risk
-                  </span>
-                )}
                 {/* Session 14 — role tags directly on the list row. Silent
                     when a student holds no role, same treatment as the
                     detail header and the Guardians page: no "Unassigned"
@@ -2302,9 +2297,6 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
                 <span className="stu-attendance-risk-tag stu-attendance-risk-tag--pending">
                   Attendance: pending deactivation
                 </span>
-              )}
-              {attendanceRiskInfo(detailStudent) === 'at-risk' && (
-                <span className="stu-attendance-risk-tag">Attendance: at risk</span>
               )}
               {/* Session 13 (PRD Problem 5.5) — role tags, "visible from
                   anywhere" per owner decision. Header-level so it's the same
