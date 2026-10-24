@@ -80,13 +80,14 @@ import {
   loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
 import ObligationFields from '../components/ObligationFields'
+import ObligationBadges from '../components/ObligationBadges'
+import ObligationResolveDialog from '../components/ObligationResolveDialog'
 import {
   loadPendingObligations,
   loadStudentObligations,
   createObligation,
-  resolveObligation,
-  obligationBadge,
   formatObligationAmount,
+  obligationStatusLabel,
   validateObligationDraft,
   type Obligation,
   type ObligationDraft,
@@ -692,9 +693,9 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   const [pendingObl,      setPendingObl]      = useState<Map<string, Obligation[]>>(new Map())
   const [stuObligations,  setStuObligations]  = useState<Obligation[]>([])
   const [stuOblLoading,   setStuOblLoading]   = useState(false)
-  const [resolvingId,     setResolvingId]     = useState<string | null>(null)
-  const [resolveNote,     setResolveNote]     = useState('')
-  const [resolveSaving,   setResolveSaving]   = useState(false)
+  // Which student's items the mark-paid/done dialog is open for (optionally
+  // narrowed to one item, from the Status tab).
+  const [resolveFor,      setResolveFor]      = useState<{ studentId: string; name: string; onlyId?: string } | null>(null)
   const [oblError,        setOblError]        = useState('')
   const [statusConfirm,  setStatusConfirm]  = useState<'active' | 'inactive' | 'alumni' | null>(null)
   // migration_attendance_auto_deactivation.sql — required specifically for
@@ -1050,20 +1051,8 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
 
   useEffect(() => {
     setOblError('')
-    setResolvingId(null)
     void refreshStuObl()
   }, [refreshStuObl])
-
-  async function handleResolveObligation(id: string, status: 'fulfilled' | 'waived') {
-    setResolveSaving(true)
-    setOblError('')
-    const res = await resolveObligation({ id, status, note: resolveNote, resolvedBy: actorRecordId ?? null })
-    setResolveSaving(false)
-    if (!res.ok) { setOblError(res.error); return }
-    setResolvingId(null)
-    setResolveNote('')
-    await Promise.all([refreshStuObl(), refreshPendingObl()])
-  }
 
   function openDetail(student: Student, initialTab: DetailTab = 'brief') {
     setDetailStudent(student)
@@ -2124,10 +2113,12 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               </div>
               <div className="stu-row-body">
                 <span className="stu-row-name">{student.full_name}</span>
-                {(() => {
-                  const b = canManageStudents ? obligationBadge(pendingObl.get(student.id)) : null
-                  return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
-                })()}
+                {canManageStudents && (
+                  <ObligationBadges
+                    items={pendingObl.get(student.id)}
+                    onOpen={() => setResolveFor({ studentId: student.id, name: student.full_name })}
+                  />
+                )}
                 <span className="stu-row-meta">
                   {isHigherEd
                     ? (student.matric_number ?? 'No matric number yet')
@@ -2360,10 +2351,12 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               <span className={`stu-status-badge stu-status-badge--${detailStudent.status}`}>
                 {statusLabel(detailStudent.status)}
               </span>
-              {(() => {
-                const b = canManageStudents ? obligationBadge(pendingObl.get(detailStudent.id)) : null
-                return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
-              })()}
+              {canManageStudents && (
+                <ObligationBadges
+                  items={pendingObl.get(detailStudent.id)}
+                  onOpen={() => setResolveFor({ studentId: detailStudent.id, name: detailStudent.full_name })}
+                />
+              )}
               {detailStudent.status === 'inactive' && detailStudent.deactivation_reason === 'attendance_auto' && (
                 <span className="stu-attendance-auto-tag" title="Automatically set to inactive by the attendance rule">
                   Auto-deactivated (attendance)
@@ -3678,7 +3671,7 @@ function renderGuardiansTab() {
                     <div className="obl-item-top">
                       <strong>{o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task'}</strong>
                       <span className={`obl-status obl-status--${o.status}`}>
-                        {o.status === 'pending' ? 'Unfulfilled' : o.status === 'fulfilled' ? 'Fulfilled' : 'Waived'}
+                        {obligationStatusLabel(o)}
                       </span>
                     </div>
                     <span className="obl-item-desc">{o.description}</span>
@@ -3688,39 +3681,19 @@ function renderGuardiansTab() {
                     </span>
                     {o.status !== 'pending' && o.resolved_at && (
                       <span className="obl-item-meta">
-                        {o.status === 'fulfilled' ? 'Fulfilled' : 'Waived'} {fmt(o.resolved_at)}
+                        {obligationStatusLabel(o)} {fmt(o.resolved_at)}
                         {o.resolved_by_name ? ` by ${o.resolved_by_name}` : ''}
                         {o.resolution_note ? ` — ${o.resolution_note}` : ''}
                       </span>
                     )}
                     {o.status === 'pending' && (
-                      resolvingId === o.id ? (
-                        <div className="obl-resolve">
-                          <input
-                            className="obl-input obl-input--wide"
-                            type="text"
-                            value={resolveNote}
-                            onChange={e => setResolveNote(e.target.value)}
-                            placeholder="Note (optional)"
-                          />
-                          <button className="stu-confirm-warn" disabled={resolveSaving}
-                            onClick={() => void handleResolveObligation(o.id, 'fulfilled')}>
-                            {resolveSaving ? 'Saving…' : 'Mark fulfilled'}
-                          </button>
-                          <button className="stu-confirm-cancel" disabled={resolveSaving}
-                            onClick={() => void handleResolveObligation(o.id, 'waived')}>
-                            Waive
-                          </button>
-                          <button className="stu-confirm-cancel" disabled={resolveSaving}
-                            onClick={() => { setResolvingId(null); setResolveNote('') }}>
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button className="stu-status-action-btn" onClick={() => { setResolvingId(o.id); setResolveNote('') }}>
-                          Resolve…
-                        </button>
-                      )
+                      <button
+                        type="button"
+                        className="obl-btn obl-btn--primary obl-btn--inline"
+                        onClick={() => setResolveFor({ studentId: o.student_id, name: detailStudent.full_name, onlyId: o.id })}
+                      >
+                        {o.kind === 'fine' ? 'Mark paid' : 'Mark done'}
+                      </button>
                     )}
                   </li>
                 )
@@ -4364,6 +4337,30 @@ function renderGuardiansTab() {
         {renderList()}
       </div>
       {renderDetailPanel()}
+
+      <ObligationResolveDialog
+        open={resolveFor !== null}
+        studentName={resolveFor?.name ?? ''}
+        items={resolveFor
+          ? (pendingObl.get(resolveFor.studentId) ?? []).filter(o => !resolveFor.onlyId || o.id === resolveFor.onlyId)
+          : []}
+        actorRecordId={actorRecordId ?? null}
+        onClose={() => setResolveFor(null)}
+        onResolved={async () => { await Promise.all([refreshPendingObl(), refreshStuObl()]) }}
+      />
+
+      <ObligationResolveDialog
+        open={resolveFor !== null}
+        studentName={resolveFor?.name ?? ''}
+        items={
+          resolveFor
+            ? (pendingObl.get(resolveFor.studentId) ?? []).filter(o => !resolveFor.onlyId || o.id === resolveFor.onlyId)
+            : []
+        }
+        actorRecordId={actorRecordId ?? null}
+        onClose={() => setResolveFor(null)}
+        onResolved={async () => { await Promise.all([refreshStuObl(), refreshPendingObl()]) }}
+      />
       {renderAddForm()}
       {renderGuardianBrief()}
     </div>
