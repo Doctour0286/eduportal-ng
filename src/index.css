@@ -8783,8 +8783,9 @@ body {
 }
 
 .stu-attendance-risk-tag--pending {
-  background: var(--color-danger-subtle, var(--color-danger));
-  color: var(--color-danger, var(--color-text-inverse));
+  background: var(--color-bg-subtle);
+  color: var(--color-text-muted);
+  font-weight: 500;
 }
 
 .stu-status-badge--active {

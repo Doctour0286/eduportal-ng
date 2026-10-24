@@ -1268,6 +1268,18 @@ export async function updateStudentStatus(
       updates.cumulative_absent_count = 0
       updates.last_absent_date = null
       updates.deactivation_reason = null
+      // Absences on or before today never count again for this student.
+      // Without this baseline, the DB trigger re-derives both counters from
+      // the old attendance rows on the next attendance write and the
+      // student is deactivated again immediately. Counting restarts from
+      // the next calendar day (school's local date, not UTC).
+      const d = new Date()
+      d.setDate(d.getDate() + 1)
+      updates.attendance_count_start = [
+        d.getFullYear(),
+        String(d.getMonth() + 1).padStart(2, '0'),
+        String(d.getDate()).padStart(2, '0'),
+      ].join('-')
     }
 
     const { error } = await supabase
