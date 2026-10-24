@@ -22213,3 +22213,24 @@ body {
 .san-tl-date { min-width: 92px; font-size: var(--text-xs); color: var(--color-text-secondary); padding-top: 2px; }
 .san-tl-body { flex: 1; color: var(--color-text-primary); }
 .san-tl-by { color: var(--color-text-secondary); font-size: var(--text-xs); }
+
+/* Analytics icon in the attendance history strip + pop-up sizing */
+.att-analytics-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  flex-shrink: 0;
+  position: sticky;
+  right: 0;
+  align-self: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.att-analytics-btn:hover { color: var(--color-brand-600); border-color: var(--color-brand-600); }
+.modal .san.stu-detail-tab-content { padding: 0; }

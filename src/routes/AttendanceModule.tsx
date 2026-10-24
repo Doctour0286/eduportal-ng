@@ -92,6 +92,8 @@ import { Icon } from '../components/icons'
 import { updateStudentStatus } from '../services/studentsService'
 import ObligationFields from '../components/ObligationFields'
 import ObligationBadges from '../components/ObligationBadges'
+import StudentAnalyticsTab from './StudentAnalyticsTab'
+import { Modal } from '../components/Modal'
 import ObligationResolveDialog from '../components/ObligationResolveDialog'
 import {
   loadPendingObligations,
@@ -260,6 +262,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [pendingObl,       setPendingObl]       = useState<Map<string, Obligation[]>>(new Map())
   const [reactivateNotice, setReactivateNotice] = useState('')
   const [resolveForId,     setResolveForId]     = useState<string | null>(null)
+  const [analyticsFor,     setAnalyticsFor]     = useState<{ id: string; name: string } | null>(null)
 
   const reloadSuspended = useCallback(async () => {
     if (!canManageStudents) return
@@ -1442,6 +1445,20 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     )
   }
 
+  function renderAnalyticsButton(student: Student) {
+    return (
+      <button
+        type="button"
+        className="att-analytics-btn"
+        title={`View ${student.full_name}'s analytics`}
+        aria-label={`View ${student.full_name}'s analytics`}
+        onClick={() => setAnalyticsFor({ id: student.id, name: student.full_name })}
+      >
+        <Icon name="bar-chart" size={16} />
+      </button>
+    )
+  }
+
   function renderHistoryStrip(student: Student) {
     const isOpen    = historyOpen.has(student.id)
     const isLoading = historyLoading.has(student.id)
@@ -1453,6 +1470,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       return (
         <div className="att-history-strip">
           <div className="att-history-skel skeleton" />
+          {renderAnalyticsButton(student)}
         </div>
       )
     }
@@ -1495,6 +1513,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
             </div>
           )
         })}
+        {renderAnalyticsButton(student)}
       </div>
     )
   }
@@ -1766,6 +1785,23 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     <div className="att-root">
       {/* Whole-school analytics — independent of class/date selection below */}
       {renderAnalyticsPanel()}
+
+      <Modal
+        open={analyticsFor !== null}
+        onClose={() => setAnalyticsFor(null)}
+        title={analyticsFor ? `${analyticsFor.name} — analytics` : undefined}
+        maxWidth="780px"
+      >
+        {analyticsFor && (
+          <StudentAnalyticsTab
+            key={analyticsFor.id}
+            schoolId={schoolId}
+            studentId={analyticsFor.id}
+            studentName={analyticsFor.name}
+            canSeeFinanceAndConduct={canManageStudents}
+          />
+        )}
+      </Modal>
 
       <ObligationResolveDialog
         open={resolveForId !== null}
