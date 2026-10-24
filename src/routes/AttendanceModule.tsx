@@ -103,6 +103,7 @@ import {
   loadAttendanceRecords,
   loadAttendanceHistory,
   loadSuspendedStudents,
+  loadSuspensionDetail,
   saveAttendanceRecord,
   saveBatchAttendance,
   flushAttendanceQueue,
@@ -121,7 +122,8 @@ import {
   type AttendanceMap,
   type AttendanceStatus,
   type StudentAttendanceHistory,
-  type SuspendedStudentEvidence,
+  type SuspendedStudent,
+  type SuspensionDetail,
   type AttendanceUpsertParams,
   type AttendanceAnalyticsScope,
   type SchoolAttendanceAnalytics,
@@ -227,17 +229,21 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsError,   setAnalyticsError]   = useState<string>('')
 
-  // ── Suspended students panel ──────────────────────────────────────────────
-  // Students the attendance rule auto-deactivated, with the evidence strip
-  // and a one-tap reactivate (note required, same rule as StudentsModule).
+  // ── Suspended students (per class, under the active register) ─────────────
+  // Auto-deactivated students, most recently suspended first. The evidence
+  // preview (calendar strip, days inactive, history) is loaded and shown
+  // only once someone starts a reactivation — not for the whole list.
   const canManageStudents = useAuthStore(s => s.can('students.records.manage'))
-  const [suspended,        setSuspended]        = useState<SuspendedStudentEvidence[]>([])
+  const [suspended,        setSuspended]        = useState<SuspendedStudent[]>([])
   const [suspendedRule,    setSuspendedRule]    = useState<AttendanceDeactivationSettings | null>(null)
-  const [suspendedOpen,    setSuspendedOpen]    = useState(true)
+  const [suspendedOpen,    setSuspendedOpen]    = useState<Set<string>>(new Set())  // class ids expanded
   const [reactivateId,     setReactivateId]     = useState<string | null>(null)
   const [reactivateNote,   setReactivateNote]   = useState('')
   const [reactivateSaving, setReactivateSaving] = useState(false)
   const [reactivateError,  setReactivateError]  = useState('')
+  const [detail,           setDetail]           = useState<SuspensionDetail | null>(null)
+  const [detailLoading,    setDetailLoading]    = useState(false)
+  const [studentsReloadTick, setStudentsReloadTick] = useState(0)
 
   const reloadSuspended = useCallback(async () => {
     if (!canManageStudents) return
@@ -251,6 +257,27 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
   useEffect(() => { void reloadSuspended() }, [reloadSuspended])
 
+  function toggleSuspendedClass(classId: string) {
+    setSuspendedOpen(prev => {
+      const next = new Set(prev)
+      if (next.has(classId)) next.delete(classId); else next.add(classId)
+      return next
+    })
+  }
+
+  async function startReactivate(s: SuspendedStudent) {
+    if (reactivateId === s.student_id) { setReactivateId(null); return }
+    setReactivateId(s.student_id)
+    setReactivateNote('')
+    setReactivateError('')
+    setDetail(null)
+    setDetailLoading(true)
+    const res = await loadSuspensionDetail(schoolId, s.student_id, s.last_absent_date)
+    setDetailLoading(false)
+    if (res.ok) setDetail(res.data)
+    else setReactivateError(res.error)
+  }
+
   async function confirmReactivate(studentId: string) {
     setReactivateSaving(true)
     setReactivateError('')
@@ -259,7 +286,10 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     if (!res.ok) { setReactivateError(res.error); return }
     setReactivateId(null)
     setReactivateNote('')
+    setDetail(null)
     setSuspended(prev => prev.filter(x => x.student_id !== studentId))
+    // The reactivated student belongs back in the active register.
+    setStudentsReloadTick(t => t + 1)
   }
 
   // ── Class selector ────────────────────────────────────────────────────────
@@ -568,7 +598,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
 
     loadClassData()
     return () => { cancelled = true }
-  }, [effectiveSelectionKey])
+  }, [effectiveSelectionKey, studentsReloadTick])
 
   // Derived: does the currently selected date look like a real school day?
   // Fails open (true) while loading, on error, or before the first check has
@@ -944,97 +974,143 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     session: 'This Session',
   }
 
-  function renderSuspendedPanel() {
-    if (!canManageStudents || suspended.length === 0) return null
+  function renderSuspendedForClass(classId: string) {
+    if (!canManageStudents) return null
+    const list = suspended.filter(x => x.class_node_id === classId)
+    if (list.length === 0) return null
+
+    const isOpen = suspendedOpen.has(classId)
     const mode = suspendedRule?.mode ?? 'consecutive'
     const threshold = mode === 'consecutive'
       ? (suspendedRule?.consecutive_threshold ?? 5)
       : (suspendedRule?.cumulative_threshold ?? 5)
-    const className = (id: string | null) => classes.find(c => c.id === id)?.path_label ?? ''
-    const fmt = (d: string) => new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+    const fmtDate = (d: string) =>
+      new Date(d.length > 10 ? d : d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+    const fmtShort = (d: string) =>
+      new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+    const daysSince = (iso: string) =>
+      Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000))
+    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
 
     return (
       <div className="att-susp-panel">
         <button
           type="button"
           className="att-susp-head"
-          onClick={() => setSuspendedOpen(o => !o)}
-          aria-expanded={suspendedOpen}
+          onClick={() => toggleSuspendedClass(classId)}
+          aria-expanded={isOpen}
         >
-          <span className="att-susp-title">Suspended for absences</span>
-          <span className="att-susp-count">{suspended.length}</span>
-          <span className="att-susp-chevron" aria-hidden="true">{suspendedOpen ? '▾' : '▸'}</span>
+          <span className="att-susp-title">Suspended students</span>
+          <span className="att-susp-count">{list.length}</span>
+          <span className="att-susp-chevron" aria-hidden="true">{isOpen ? '▾' : '▸'}</span>
         </button>
 
-        {suspendedOpen && (
+        {isOpen && (
           <ul className="att-susp-list">
-            {suspended.map(s => {
-              const count = mode === 'consecutive' ? s.consecutive_count : s.cumulative_count
+            {list.map(st => {
+              const count = mode === 'consecutive' ? st.consecutive_count : st.cumulative_count
               const pct = Math.min(100, Math.round((count / Math.max(1, threshold)) * 100))
-              const open = reactivateId === s.student_id
+              const open = reactivateId === st.student_id
+              const days = daysSince(st.inactivated_at)
               return (
-                <li key={s.student_id} className="att-susp-item">
+                <li key={st.student_id} className="att-susp-item">
                   <div className="att-susp-row">
                     <div className="att-susp-who">
-                      <span className="att-susp-name">{s.full_name}</span>
-                      {className(s.class_node_id) && (
-                        <span className="att-susp-class">{className(s.class_node_id)}</span>
-                      )}
+                      <span className="att-susp-name">{st.full_name}</span>
+                      <span className="att-susp-class">
+                        Suspended {fmtDate(st.inactivated_at)}{st.inactivated_approx ? ' (approx.)' : ''}
+                      </span>
                     </div>
                     <button
                       type="button"
                       className="btn btn--secondary btn--sm"
-                      onClick={() => {
-                        setReactivateId(open ? null : s.student_id)
-                        setReactivateNote('')
-                        setReactivateError('')
-                      }}
+                      onClick={() => void startReactivate(st)}
                     >
                       {open ? 'Cancel' : 'Reactivate'}
                     </button>
                   </div>
 
-                  <div className="att-susp-bar" role="img"
-                    aria-label={`${count} of ${threshold} ${mode} absences`}>
-                    <div className="att-susp-bar-fill" style={{ width: `${pct}%` }} />
-                  </div>
-                  <p className="att-susp-reason">
-                    {count} of {threshold} {mode === 'consecutive' ? 'consecutive' : 'total'} absences
-                    {s.last_absent_date ? ` · last absent ${fmt(s.last_absent_date)}` : ''}
-                  </p>
-
-                  <div className="att-susp-strip" aria-label="Recent school days">
-                    {s.days.map(d => (
-                      <span
-                        key={d.date}
-                        className={[
-                          'att-dot',
-                          d.status ? HISTORY_DOT_CLS[d.status] : 'att-dot--unmarked',
-                        ].join(' ')}
-                        title={`${fmt(d.date)}: ${d.status ?? 'not marked'}`}
-                      />
-                    ))}
-                  </div>
-
                   {open && (
-                    <div className="att-susp-form">
-                      <input
-                        className="att-susp-note"
-                        type="text"
-                        value={reactivateNote}
-                        onChange={e => setReactivateNote(e.target.value)}
-                        placeholder="Why is this student being reactivated?"
-                        autoFocus
-                      />
-                      <button
-                        type="button"
-                        className="btn btn--primary btn--sm"
-                        disabled={reactivateSaving || !reactivateNote.trim()}
-                        onClick={() => void confirmReactivate(s.student_id)}
-                      >
-                        {reactivateSaving ? 'Saving…' : 'Confirm'}
-                      </button>
-                      {reactivateError && <p className="att-susp-error">{reactivateError}</p>}
+                    <div className="att-susp-preview">
+                      <p className="att-susp-days">
+                        Inactive for <strong>{plural(days, 'day')}</strong>
+                      </p>
+
+                      <div className="att-susp-bar" role="img"
+                        aria-label={`${count} of ${threshold} ${mode} absences`}>
+                        <div className="att-susp-bar-fill" style={{ width: `${pct}%` }} />
+                      </div>
+                      <p className="att-susp-reason">
+                        {count} of {threshold} {mode === 'consecutive' ? 'consecutive' : 'total'} absences
+                        {st.last_absent_date ? ` · last absent ${fmtShort(st.last_absent_date)}` : ''}
+                      </p>
+
+                      {detailLoading && <div className="att-history-skel skeleton" />}
+
+                      {detail && (
+                        <>
+                          <div className="att-susp-strip" aria-label="Recent school days">
+                            {detail.days.map(d => (
+                              <span
+                                key={d.date}
+                                className={[
+                                  'att-dot',
+                                  d.status ? HISTORY_DOT_CLS[d.status] : 'att-dot--unmarked',
+                                ].join(' ')}
+                                title={`${fmtShort(d.date)}: ${d.status ?? 'not marked'}`}
+                              />
+                            ))}
+                          </div>
+
+                          <h4 className="att-susp-subhead">Suspension history</h4>
+                          {detail.history.length === 0 ? (
+                            <p className="att-susp-reason">No history recorded yet.</p>
+                          ) : (
+                            <ul className="att-susp-history">
+                              {detail.history.map(h => (
+                                <li key={h.id} className="att-susp-hist-item">
+                                  <span className="att-susp-hist-top">
+                                    <strong>{h.event === 'inactivated' ? 'Suspended' : 'Reactivated'}</strong>
+                                    {' · '}{fmtDate(h.created_at)}{h.approximate ? ' (approx.)' : ''}
+                                  </span>
+                                  <span className="att-susp-hist-body">
+                                    {h.event === 'inactivated'
+                                      ? (h.reason === 'attendance_auto'
+                                          ? `Automatic — ${h.consecutive_count ?? 0} consecutive / ${h.cumulative_count ?? 0} total absences`
+                                          : `Manual${h.note ? ` — ${h.note}` : ''}`)
+                                      : (h.note ?? 'No note')}
+                                  </span>
+                                  <span className="att-susp-hist-by">
+                                    {h.changed_by_name
+                                      ? `Recorded by ${h.changed_by_name}`
+                                      : 'Recorder not available'}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
+                      )}
+
+                      <div className="att-susp-form">
+                        <input
+                          className="att-susp-note"
+                          type="text"
+                          value={reactivateNote}
+                          onChange={e => setReactivateNote(e.target.value)}
+                          placeholder="Why is this student being reactivated?"
+                          autoFocus
+                        />
+                        <button
+                          type="button"
+                          className="btn btn--primary btn--sm"
+                          disabled={reactivateSaving || !reactivateNote.trim()}
+                          onClick={() => void confirmReactivate(st.student_id)}
+                        >
+                          {reactivateSaving ? 'Saving…' : 'Confirm'}
+                        </button>
+                        {reactivateError && <p className="att-susp-error">{reactivateError}</p>}
+                      </div>
                     </div>
                   )}
                 </li>
@@ -1513,6 +1589,9 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
           <span className="att-empty-icon"><Icon name="users" size={40} /></span>
           <p className="att-empty-msg">No students enrolled in {effectiveLabel} yet.</p>
           {isAdmin && <p className="att-empty-sub">Add students in the Students module.</p>}
+          {effectiveClassIds.map(id => (
+            <div key={id} className="att-arm-group">{renderSuspendedForClass(id)}</div>
+          ))}
         </div>
       )
     }
@@ -1576,11 +1655,11 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
         byClassId.set(s.class_node_id, arr)
       })
       const arms = armLeafIds
-        .filter(id => byClassId.has(id))
+        .filter(id => byClassId.has(id) || suspended.some(x => x.class_node_id === id))
         .map(id => ({
           id,
           name: classes.find(c => c.id === id)?.path_label ?? classes.find(c => c.id === id)?.name ?? 'Class',
-          students: byClassId.get(id)!,
+          students: byClassId.get(id) ?? [],
         }))
 
       return (
@@ -1598,6 +1677,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
             <div key={arm.id} className="att-arm-group">
               <h3 className="att-arm-heading">{arm.name}</h3>
               {arm.students.map(renderStudentRow)}
+              {renderSuspendedForClass(arm.id)}
             </div>
           ))}
         </div>
@@ -1618,6 +1698,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
           <p className="att-empty-sub">No students match "{studentSearch}".</p>
         )}
         {filteredStudents.map(renderStudentRow)}
+        {selectedClass && renderSuspendedForClass(selectedClass.id)}
       </div>
     )
   }
@@ -1628,9 +1709,6 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     <div className="att-root">
       {/* Whole-school analytics — independent of class/date selection below */}
       {renderAnalyticsPanel()}
-
-      {/* Students suspended by the attendance rule — reactivate from here */}
-      {renderSuspendedPanel()}
 
       {/* Header */}
       <div className="att-header">
