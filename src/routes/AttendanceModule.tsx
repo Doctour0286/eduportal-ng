@@ -91,10 +91,11 @@ import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
 import { updateStudentStatus } from '../services/studentsService'
 import ObligationFields from '../components/ObligationFields'
+import ObligationBadges from '../components/ObligationBadges'
+import ObligationResolveDialog from '../components/ObligationResolveDialog'
 import {
   loadPendingObligations,
   createObligation,
-  obligationBadge,
   validateObligationDraft,
   type Obligation,
   type ObligationDraft,
@@ -258,6 +259,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
   const [obligationDraft,  setObligationDraft]  = useState<ObligationDraft | null>(null)
   const [pendingObl,       setPendingObl]       = useState<Map<string, Obligation[]>>(new Map())
   const [reactivateNotice, setReactivateNotice] = useState('')
+  const [resolveForId,     setResolveForId]     = useState<string | null>(null)
 
   const reloadSuspended = useCallback(async () => {
     if (!canManageStudents) return
@@ -1520,10 +1522,12 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
             {student.full_name}
             <span className="att-history-chevron">{isHistOpen ? '▲' : '▼'}</span>
           </button>
-          {(() => {
-            const b = canManageStudents ? obligationBadge(pendingObl.get(student.id)) : null
-            return b ? <span className="obl-badge" title={b.title}>{b.label}</span> : null
-          })()}
+          {canManageStudents && (
+            <ObligationBadges
+              items={pendingObl.get(student.id)}
+              onOpen={() => setResolveForId(student.id)}
+            />
+          )}
 
           {/* Status buttons */}
           <div className="att-btn-group">
@@ -1762,6 +1766,18 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
     <div className="att-root">
       {/* Whole-school analytics — independent of class/date selection below */}
       {renderAnalyticsPanel()}
+
+      <ObligationResolveDialog
+        open={resolveForId !== null}
+        studentName={students.find(x => x.id === resolveForId)?.full_name ?? ''}
+        items={resolveForId ? (pendingObl.get(resolveForId) ?? []) : []}
+        actorRecordId={actorRecordId ?? null}
+        onClose={() => setResolveForId(null)}
+        onResolved={async () => {
+          const r = await loadPendingObligations(schoolId)
+          if (r.ok) setPendingObl(r.data)
+        }}
+      />
 
       {reactivateNotice && (
         <div className="att-permission-notice" role="alert">

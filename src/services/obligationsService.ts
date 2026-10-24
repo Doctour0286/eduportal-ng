@@ -55,18 +55,39 @@ export function formatObligationAmount(n: number): string {
   return `₦${n.toLocaleString('en-NG', { maximumFractionDigits: 2 })}`
 }
 
-/** Compact badge text for a student's pending items. */
-export function obligationBadge(list: Obligation[] | undefined): { label: string; title: string } | null {
-  if (!list || list.length === 0) return null
-  const title = list
-    .map(o => `${o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task'}: ${o.description}`)
-    .join('\n')
-  if (list.length > 1) return { label: `${list.length} pending`, title }
-  const o = list[0]
-  return {
-    label: o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task pending',
-    title,
-  }
+export interface ObligationBadgeInfo {
+  id: string
+  kind: ObligationKind
+  label: string
+  title: string
+}
+
+const BADGE_TEXT_MAX = 26
+
+/**
+ * One badge per pending item, specific about what it is: a fine shows its
+ * amount ("₦5,000 fine"), a task shows its text ("Task: Clean the lab").
+ */
+export function obligationBadges(list: Obligation[] | undefined): ObligationBadgeInfo[] {
+  if (!list) return []
+  return list.map(o => {
+    const text = o.description.length > BADGE_TEXT_MAX
+      ? o.description.slice(0, BADGE_TEXT_MAX - 1).trimEnd() + '…'
+      : o.description
+    return {
+      id: o.id,
+      kind: o.kind,
+      label: o.kind === 'fine' ? `${formatObligationAmount(o.amount ?? 0)} fine` : `Task: ${text}`,
+      title: o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)} — ${o.description}` : o.description,
+    }
+  })
+}
+
+/** Human status wording that fits the kind: fines are paid, tasks are done. */
+export function obligationStatusLabel(o: Pick<Obligation, 'kind' | 'status'>): string {
+  if (o.status === 'waived') return 'Waived'
+  if (o.status === 'pending') return o.kind === 'fine' ? 'Unpaid' : 'Not done'
+  return o.kind === 'fine' ? 'Paid' : 'Done'
 }
 
 async function staffNames(ids: (string | null)[]): Promise<Map<string, string>> {
@@ -110,9 +131,10 @@ export async function loadPendingObligations(
       .eq('status', 'pending')
       .order('created_at')
     if (error) return { ok: false, error: error.message }
+    const names = await staffNames((data ?? []).map(r => r.created_by))
     const out = new Map<string, Obligation[]>()
     for (const r of data ?? []) {
-      const o = mapRow(r, new Map())
+      const o = mapRow(r, names)
       const arr = out.get(o.student_id) ?? []
       arr.push(o)
       out.set(o.student_id, arr)

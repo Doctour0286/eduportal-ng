@@ -118,17 +118,23 @@ export default function AttendanceClassRules({
 
   if (loading) return <p className="set-field-hint">Loading class rules…</p>
 
+  const CHOICES: { value: Choice; label: string }[] = [
+    { value: 'default', label: 'Default' },
+    { value: 'custom',  label: 'Custom'  },
+    { value: 'exempt',  label: 'Exempt'  },
+  ]
+
   return (
-    <div className="acr-wrap">
-      <h4 className="acr-title">Class rules</h4>
-      <p className="set-field-hint">
-        Exempt a class from automatic deactivation, or give it its own rule. A rule on a parent
-        class applies to every class under it unless that class has its own. Classes with no
-        rule use the school-wide setting above. Counting continues for exempt classes — it just
-        never suspends anyone. Tightening a class's rule can suspend students who already meet
-        it the next time a staff member opens the Students module.
-      </p>
-      {error && <p className="set-form-error">{error}</p>}
+    <div className="acr-card">
+      <div className="acr-head">
+        <h4 className="acr-title">Class rules</h4>
+        <p className="acr-sub">
+          Exempt a class, or give it its own rule. A rule on a parent class covers every class
+          under it unless that class has its own. Exempt classes are still counted — they are
+          just never suspended.
+        </p>
+      </div>
+      {error && <p className="set-form-error acr-error">{error}</p>}
 
       <ul className="acr-list">
         {ordered.map(({ node, depth }) => {
@@ -136,60 +142,76 @@ export default function AttendanceClassRules({
           const dirty = drafts.has(node.id)
           const eff = ctx ? resolveEffectiveRule(node.id, ctx, school) : null
           const own = ctx?.rules.has(node.id) ?? false
-          let effText = ''
+
+          let chipClass = 'acr-chip'
+          let chipText = ''
+          let chipNote = ''
           if (eff) {
-            const base = eff.exempt
+            chipText = eff.exempt
               ? 'Exempt'
-              : `${eff.threshold} ${eff.mode === 'consecutive' ? 'consecutive days' : 'total absences'}`
-            effText = own
-              ? base
-              : eff.sourceClassId
-                ? `${base} (from ${nameOf(eff.sourceClassId)})`
-                : `${base} (school rule)`
+              : `${eff.threshold} ${eff.mode === 'consecutive' ? 'days in a row' : 'absences total'}`
+            chipClass += eff.exempt ? ' acr-chip--exempt' : own ? ' acr-chip--custom' : ''
+            if (!own) {
+              chipNote = eff.sourceClassId ? `from ${nameOf(eff.sourceClassId)}` : 'school rule'
+            }
           }
+
           return (
-            <li key={node.id} className="acr-row" style={{ paddingLeft: `${depth * 18}px` }}>
-              <div className="acr-name">
-                <span>{node.name}</span>
-                <span className="acr-eff">{effText}</span>
+            <li
+              key={node.id}
+              className={`acr-row${depth === 0 ? ' acr-row--parent' : ''}`}
+              style={{ paddingLeft: `${12 + depth * 20}px` }}
+            >
+              <div className="acr-main">
+                <span className="acr-name">{node.name}</span>
+                <span className="acr-status">
+                  <span className={chipClass}>{chipText}</span>
+                  {chipNote && <span className="acr-note">{chipNote}</span>}
+                </span>
               </div>
+
               <div className="acr-controls">
-                <select
-                  className="set-select"
-                  value={d.choice}
-                  onChange={e => setDraft(node.id, { choice: e.target.value as Choice })}
-                  aria-label={`Rule for ${node.name}`}
-                >
-                  <option value="default">{depth === 0 ? 'School rule' : 'Inherit'}</option>
-                  <option value="custom">Custom rule</option>
-                  <option value="exempt">Exempt</option>
-                </select>
-                {d.choice === 'custom' && (
-                  <>
-                    <select
-                      className="set-select"
-                      value={d.mode}
-                      onChange={e => setDraft(node.id, { mode: e.target.value as RuleMode })}
-                      aria-label="Count absences as"
+                <div className="acr-seg" role="group" aria-label={`Rule for ${node.name}`}>
+                  {CHOICES.map(c => (
+                    <button
+                      key={c.value}
+                      type="button"
+                      className={`acr-seg-btn${d.choice === c.value ? ' acr-seg-btn--on' : ''}`}
+                      aria-pressed={d.choice === c.value}
+                      onClick={() => setDraft(node.id, { choice: c.value })}
                     >
-                      <option value="consecutive">Consecutive days</option>
-                      <option value="cumulative">Total absences</option>
-                    </select>
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+
+                {d.choice === 'custom' && (
+                  <div className="acr-custom">
                     <input
-                      className="acr-threshold"
+                      className="acr-number"
                       type="text"
                       inputMode="numeric"
                       value={d.threshold}
                       onChange={e => setDraft(node.id, { threshold: e.target.value.replace(/[^0-9]/g, '') })}
-                      placeholder="No."
+                      placeholder="5"
                       aria-label="Threshold"
                     />
-                  </>
+                    <select
+                      className="acr-mini-select"
+                      value={d.mode}
+                      onChange={e => setDraft(node.id, { mode: e.target.value as RuleMode })}
+                      aria-label="Count absences as"
+                    >
+                      <option value="consecutive">days in a row</option>
+                      <option value="cumulative">absences total</option>
+                    </select>
+                  </div>
                 )}
+
                 {dirty && (
                   <button
                     type="button"
-                    className="set-save-btn"
+                    className="acr-save"
                     onClick={() => void saveRow(node.id)}
                     disabled={savingId === node.id}
                   >
@@ -201,6 +223,10 @@ export default function AttendanceClassRules({
           )
         })}
       </ul>
+      <p className="acr-foot">
+        Tightening a class's rule can suspend students who already meet it the next time a staff
+        member opens the Students module.
+      </p>
     </div>
   )
 }
