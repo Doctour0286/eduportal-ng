@@ -556,30 +556,49 @@ export async function loadAttendanceHistory(
 }
 
 // ─── Suspended (auto-deactivated) students ───────────────────────────────────
+// History rows come from student_status_history (migration_student_status_history.sql).
 
-export interface SuspendedStudentEvidence {
+export interface SuspendedStudent {
   student_id: string
   full_name: string
   class_node_id: string | null
-  last_absent_date: string | null
   consecutive_count: number
   cumulative_count: number
-  // Most recent school days (oldest → newest) ending at the student's last
-  // absence, so the strip shows the run that triggered the suspension.
+  last_absent_date: string | null
+  inactivated_at: string          // ISO; falls back to last absence if no history row
+  inactivated_approx: boolean
+}
+
+export interface StatusHistoryEvent {
+  id: string
+  event: 'inactivated' | 'reactivated'
+  reason: 'attendance_auto' | 'manual'
+  note: string | null
+  consecutive_count: number | null
+  cumulative_count: number | null
+  last_absent_date: string | null
+  changed_by_name: string | null
+  created_at: string
+  approximate: boolean
+}
+
+export interface SuspensionDetail {
+  // School days (oldest → newest) ending at the last absence — the
+  // calendar strip that shows what triggered the suspension.
   days: { date: string; status: AttendanceStatus | null }[]
+  history: StatusHistoryEvent[]   // newest first
 }
 
 const SUSPENDED_STRIP_DAYS = 14
 
 /**
- * Students the attendance rule suspended (status 'inactive' +
- * deactivation_reason 'attendance_auto'), each with the school-day
- * attendance strip that explains why. Read-only; reactivation goes through
- * studentsService.updateStudentStatus().
+ * Students the attendance rule suspended (inactive + attendance_auto),
+ * most recently suspended first. Light query — the evidence strip and full
+ * history are loaded on demand by loadSuspensionDetail().
  */
 export async function loadSuspendedStudents(
   schoolId: string,
-): Promise<Result<SuspendedStudentEvidence[]>> {
+): Promise<Result<SuspendedStudent[]>> {
   try {
     const { data: rows, error } = await supabase
       .from('students')
@@ -587,61 +606,107 @@ export async function loadSuspendedStudents(
       .eq('school_id', schoolId)
       .eq('status', 'inactive')
       .eq('deactivation_reason', 'attendance_auto')
-      .order('full_name')
 
     if (error) return { ok: false, error: error.message }
     if (!rows || rows.length === 0) return { ok: true, data: [] }
 
-    // Window: 45 calendar days back from the latest absence is plenty to
-    // find 14 school days, even across a break.
-    const lastDates = rows.map(r => r.last_absent_date).filter(Boolean) as string[]
-    const newest = lastDates.length ? lastDates.sort().slice(-1)[0] : todayDateString()
-    const startD = new Date(newest + 'T00:00:00')
-    startD.setDate(startD.getDate() - 45)
-    const startDate = formatDate(startD)
-
     const ids = rows.map(r => r.id)
-    const [recRes, dayMapRes] = await Promise.all([
-      supabase
-        .from('attendance_records')
-        .select('student_id, date, status')
-        .in('student_id', ids)
-        .gte('date', startDate)
-        .lte('date', newest),
-      getSchoolDayMap(startDate, newest, schoolId),
-    ])
-    if (recRes.error) return { ok: false, error: recRes.error.message }
-    const dayMap = dayMapRes.ok ? dayMapRes.data : new Map<string, boolean>()
+    const { data: hist } = await supabase
+      .from('student_status_history')
+      .select('student_id, created_at, approximate')
+      .in('student_id', ids)
+      .eq('event', 'inactivated')
+      .order('created_at', { ascending: false })
 
-    const byStudent = new Map<string, Map<string, AttendanceStatus>>()
-    for (const r of recRes.data ?? []) {
-      if (!byStudent.has(r.student_id)) byStudent.set(r.student_id, new Map())
-      byStudent.get(r.student_id)!.set(r.date, r.status as AttendanceStatus)
+    const latest = new Map<string, { at: string; approx: boolean }>()
+    for (const h of hist ?? []) {
+      if (!latest.has(h.student_id)) latest.set(h.student_id, { at: h.created_at, approx: !!h.approximate })
     }
 
-    const out: SuspendedStudentEvidence[] = rows.map(r => {
-      const end = r.last_absent_date ?? newest
-      const recs = byStudent.get(r.id) ?? new Map<string, AttendanceStatus>()
-      const days: SuspendedStudentEvidence['days'] = []
-      const cur = new Date(end + 'T00:00:00')
-      while (days.length < SUSPENDED_STRIP_DAYS && formatDate(cur) >= startDate) {
-        const d = formatDate(cur)
-        if (dayMap.get(d) ?? true) days.unshift({ date: d, status: recs.get(d) ?? null })
-        cur.setDate(cur.getDate() - 1)
-      }
+    const out: SuspendedStudent[] = rows.map(r => {
+      const l = latest.get(r.id)
       return {
         student_id: r.id,
         full_name: r.full_name,
         class_node_id: r.class_node_id ?? null,
-        last_absent_date: r.last_absent_date ?? null,
         consecutive_count: r.consecutive_absent_count ?? 0,
         cumulative_count: r.cumulative_absent_count ?? 0,
-        days,
+        last_absent_date: r.last_absent_date ?? null,
+        inactivated_at: l?.at ?? (r.last_absent_date ? r.last_absent_date + 'T12:00:00' : new Date().toISOString()),
+        inactivated_approx: l ? l.approx : true,
       }
     })
+    out.sort((a, b) => b.inactivated_at.localeCompare(a.inactivated_at))
     return { ok: true, data: out }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load suspended students' }
+  }
+}
+
+/** Calendar strip + full inactivation/reactivation history for one student. */
+export async function loadSuspensionDetail(
+  schoolId: string,
+  studentId: string,
+  lastAbsentDate: string | null,
+): Promise<Result<SuspensionDetail>> {
+  try {
+    const end = lastAbsentDate ?? todayDateString()
+    const startD = new Date(end + 'T00:00:00')
+    startD.setDate(startD.getDate() - 45)   // plenty to find 14 school days across a break
+    const startDate = formatDate(startD)
+
+    const [recRes, dayMapRes, histRes] = await Promise.all([
+      supabase
+        .from('attendance_records')
+        .select('date, status')
+        .eq('student_id', studentId)
+        .gte('date', startDate)
+        .lte('date', end),
+      getSchoolDayMap(startDate, end, schoolId),
+      supabase
+        .from('student_status_history')
+        .select('id, event, reason, note, consecutive_count, cumulative_count, last_absent_date, changed_by, approximate, created_at')
+        .eq('student_id', studentId)
+        .order('created_at', { ascending: false }),
+    ])
+    if (recRes.error) return { ok: false, error: recRes.error.message }
+    if (histRes.error) return { ok: false, error: histRes.error.message }
+
+    const dayMap = dayMapRes.ok ? dayMapRes.data : new Map<string, boolean>()
+    const recs = new Map<string, AttendanceStatus>()
+    for (const r of recRes.data ?? []) recs.set(r.date, r.status as AttendanceStatus)
+
+    const days: SuspensionDetail['days'] = []
+    const cur = new Date(end + 'T00:00:00')
+    while (days.length < SUSPENDED_STRIP_DAYS && formatDate(cur) >= startDate) {
+      const d = formatDate(cur)
+      if (dayMap.get(d) ?? true) days.unshift({ date: d, status: recs.get(d) ?? null })
+      cur.setDate(cur.getDate() - 1)
+    }
+
+    const staffIds = [...new Set((histRes.data ?? []).map(h => h.changed_by).filter(Boolean))] as string[]
+    const names = new Map<string, string>()
+    if (staffIds.length > 0) {
+      const { data: staffRows } = await supabase.from('staff').select('id, full_name').in('id', staffIds)
+      for (const st of staffRows ?? []) names.set(st.id, st.full_name)
+    }
+
+    const history: StatusHistoryEvent[] = (histRes.data ?? []).map(h => ({
+      id: h.id,
+      event: h.event,
+      reason: h.reason,
+      note: h.note ?? null,
+      consecutive_count: h.consecutive_count ?? null,
+      cumulative_count: h.cumulative_count ?? null,
+      last_absent_date: h.last_absent_date ?? null,
+      changed_by_name: h.changed_by ? (names.get(h.changed_by) ?? null) : null,
+      created_at: h.created_at,
+      approximate: !!h.approximate,
+    }))
+
+    return { ok: true, data: { days, history } }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load suspension details' }
   }
 }
 
