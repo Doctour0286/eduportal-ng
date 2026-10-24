@@ -80,6 +80,7 @@ import {
   loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
 import ObligationFields from '../components/ObligationFields'
+import StudentAnalyticsTab from './StudentAnalyticsTab'
 import ObligationBadges from '../components/ObligationBadges'
 import ObligationResolveDialog from '../components/ObligationResolveDialog'
 import {
@@ -233,7 +234,7 @@ const EMPTY_GUARDIAN_FORM: GuardianFormState = {
 // would see and tap into for no reason). editSheetOpen (below) controls its
 // visibility instead of DetailTab; the type keeps 'info' only as an internal
 // label for which body renderDetailBody() should show, not a tab-bar entry.
-type DetailTab = 'brief' | 'info' | 'guardians' | 'status' | 'transcript'
+type DetailTab = 'brief' | 'info' | 'guardians' | 'status' | 'analytics' | 'transcript'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -2404,7 +2405,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
               content (renderInfoTab) is now reached via the "Edit" button
               inside the Brief tab instead, gated on students.records.edit. */}
           <div className="stu-detail-tabs" role="tablist">
-            {(['brief', 'guardians', 'status', ...(isHigherEd ? (['transcript'] as DetailTab[]) : [])] as DetailTab[]).map(tab => (
+            {(['brief', 'guardians', 'status', ...(isHigherEd ? ([] as DetailTab[]) : (['analytics'] as DetailTab[])), ...(isHigherEd ? (['transcript'] as DetailTab[]) : [])] as DetailTab[]).map(tab => (
               <button
                 key={tab}
                 className={`stu-detail-tab${detailTab === tab ? ' stu-detail-tab--active' : ''}`}
@@ -2412,7 +2413,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
                 aria-selected={detailTab === tab}
                 onClick={() => switchDetailTab(tab)}
               >
-                {tab === 'brief' ? 'Brief' : tab === 'guardians' ? 'Guardians' : tab === 'status' ? 'Status' : 'Transcript'}
+                {tab === 'brief' ? 'Brief' : tab === 'guardians' ? 'Guardians' : tab === 'status' ? 'Status' : tab === 'analytics' ? 'Analytics' : 'Transcript'}
               </button>
             ))}
           </div>
@@ -2425,6 +2426,15 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
             {detailTab === 'info' && renderInfoTab()}
             {detailTab === 'guardians' && renderGuardiansTab()}
             {detailTab === 'status' && renderStatusTab()}
+            {detailTab === 'analytics' && !isHigherEd && (
+              <StudentAnalyticsTab
+                key={detailStudent.id}
+                schoolId={schoolId}
+                studentId={detailStudent.id}
+                studentName={detailStudent.full_name}
+                canSeeFinanceAndConduct={canManageStudents}
+              />
+            )}
             {detailTab === 'transcript' && isHigherEd && (
               <StudentTranscriptTab schoolName={schoolName} studentId={detailStudent.id} />
             )}
