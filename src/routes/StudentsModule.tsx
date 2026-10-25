@@ -80,6 +80,7 @@ import {
   loadUnplacedHigherEdStudents,
 } from '../services/studentsService'
 import ObligationFields from '../components/ObligationFields'
+import IssueObligationForm from '../components/IssueObligationForm'
 import StudentAnalyticsTab from './StudentAnalyticsTab'
 import ObligationBadges from '../components/ObligationBadges'
 import ObligationResolveDialog from '../components/ObligationResolveDialog'
@@ -698,6 +699,7 @@ export default function StudentsModule({ schoolId, schoolName, schoolLogoUrl, sc
   // narrowed to one item, from the Status tab).
   const [resolveFor,      setResolveFor]      = useState<{ studentId: string; name: string; onlyId?: string } | null>(null)
   const [oblError,        setOblError]        = useState('')
+  const [issuing,         setIssuing]         = useState(false)
   const [statusConfirm,  setStatusConfirm]  = useState<'active' | 'inactive' | 'alumni' | null>(null)
   // migration_attendance_auto_deactivation.sql — required specifically for
   // the 'active' (reactivation) case, enforced both here (button stays
@@ -3667,11 +3669,24 @@ function renderGuardiansTab() {
             history (who assigned, when, who resolved) for this student. */}
         {canManageStudents && !isHigherEd && (
           <div className="stu-status-section obl-section">
-            <p className="stu-status-section-label">Fines &amp; tasks</p>
+            <p className="stu-status-section-label">Queries, fines &amp; tasks</p>
+            {issuing ? (
+              <IssueObligationForm
+                schoolId={schoolId}
+                studentId={detailStudent.id}
+                actorRecordId={actorRecordId ?? null}
+                onCancel={() => setIssuing(false)}
+                onIssued={async () => { setIssuing(false); await Promise.all([refreshStuObl(), refreshPendingObl()]) }}
+              />
+            ) : (
+              <button type="button" className="obl-btn obl-btn--primary obl-btn--inline" onClick={() => setIssuing(true)}>
+                Issue a query, fine or task
+              </button>
+            )}
             {oblError && <p className="stu-status-note stu-status-note--error">{oblError}</p>}
             {stuOblLoading && <div className="stu-transfer-skel skeleton" />}
             {!stuOblLoading && stuObligations.length === 0 && (
-              <p className="stu-status-note">None recorded. A fine or task can be added when reactivating a student.</p>
+              <p className="stu-status-note">None recorded. Issue one above, or add one when reactivating a student.</p>
             )}
             <ul className="obl-list">
               {stuObligations.map(o => {
@@ -3679,7 +3694,7 @@ function renderGuardiansTab() {
                 return (
                   <li key={o.id} className={`obl-item obl-item--${o.status}`}>
                     <div className="obl-item-top">
-                      <strong>{o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task'}</strong>
+                      <strong>{o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : o.kind === 'query' ? 'Query' : 'Task'}{o.origin === 'direct' ? ' · issued directly' : ''}</strong>
                       <span className={`obl-status obl-status--${o.status}`}>
                         {obligationStatusLabel(o)}
                       </span>
@@ -3702,7 +3717,7 @@ function renderGuardiansTab() {
                         className="obl-btn obl-btn--primary obl-btn--inline"
                         onClick={() => setResolveFor({ studentId: o.student_id, name: detailStudent.full_name, onlyId: o.id })}
                       >
-                        {o.kind === 'fine' ? 'Mark paid' : 'Mark done'}
+                        {o.kind === 'fine' ? 'Mark paid' : o.kind === 'query' ? 'Mark responded' : 'Mark done'}
                       </button>
                     )}
                   </li>

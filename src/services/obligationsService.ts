@@ -12,7 +12,7 @@ type Ok<T> = { ok: true; data: T }
 type Err = { ok: false; error: string }
 type Result<T> = Ok<T> | Err
 
-export type ObligationKind = 'fine' | 'task'
+export type ObligationKind = 'fine' | 'task' | 'query'
 export type ObligationStatus = 'pending' | 'fulfilled' | 'waived'
 
 export interface Obligation {
@@ -22,6 +22,7 @@ export interface Obligation {
   description: string
   amount: number | null
   due_date: string | null
+  origin: 'reactivation' | 'direct'
   status: ObligationStatus
   created_by_name: string | null
   created_at: string
@@ -43,7 +44,7 @@ export const EMPTY_OBLIGATION_DRAFT: ObligationDraft = {
 }
 
 export function validateObligationDraft(d: ObligationDraft): string | null {
-  if (!d.description.trim()) return 'Describe the fine or task.'
+  if (!d.description.trim()) return d.kind === 'query' ? 'Say what the student is being queried about.' : 'Describe the fine or task.'
   if (d.kind === 'fine') {
     const n = Number(d.amount)
     if (!d.amount.trim() || !Number.isFinite(n) || n < 0) return 'Enter a valid fine amount.'
@@ -77,8 +78,12 @@ export function obligationBadges(list: Obligation[] | undefined): ObligationBadg
     return {
       id: o.id,
       kind: o.kind,
-      label: o.kind === 'fine' ? `${formatObligationAmount(o.amount ?? 0)} fine` : `Task: ${text}`,
-      title: o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)} — ${o.description}` : o.description,
+      label: o.kind === 'fine'
+        ? `${formatObligationAmount(o.amount ?? 0)} fine`
+        : o.kind === 'query' ? `Query: ${text}` : `Task: ${text}`,
+      title: o.kind === 'fine'
+        ? `Fine ${formatObligationAmount(o.amount ?? 0)} — ${o.description}`
+        : `${o.kind === 'query' ? 'Query' : 'Task'} — ${o.description}`,
     }
   })
 }
@@ -86,8 +91,8 @@ export function obligationBadges(list: Obligation[] | undefined): ObligationBadg
 /** Human status wording that fits the kind: fines are paid, tasks are done. */
 export function obligationStatusLabel(o: Pick<Obligation, 'kind' | 'status'>): string {
   if (o.status === 'waived') return 'Waived'
-  if (o.status === 'pending') return o.kind === 'fine' ? 'Unpaid' : 'Not done'
-  return o.kind === 'fine' ? 'Paid' : 'Done'
+  if (o.status === 'pending') return o.kind === 'fine' ? 'Unpaid' : o.kind === 'query' ? 'Awaiting response' : 'Not done'
+  return o.kind === 'fine' ? 'Paid' : o.kind === 'query' ? 'Responded' : 'Done'
 }
 
 async function staffNames(ids: (string | null)[]): Promise<Map<string, string>> {
@@ -107,6 +112,7 @@ function mapRow(r: any, names: Map<string, string>): Obligation {
     description: r.description,
     amount: r.amount === null || r.amount === undefined ? null : Number(r.amount),
     due_date: r.due_date ?? null,
+    origin: r.origin ?? 'reactivation',
     status: r.status,
     created_by_name: r.created_by ? (names.get(r.created_by) ?? null) : null,
     created_at: r.created_at,
@@ -117,7 +123,7 @@ function mapRow(r: any, names: Map<string, string>): Obligation {
 }
 
 const COLS =
-  'id, student_id, kind, description, amount, due_date, status, created_by, created_at, resolved_by, resolved_at, resolution_note'
+  'id, student_id, kind, description, amount, due_date, origin, status, created_by, created_at, resolved_by, resolved_at, resolution_note'
 
 /** Every pending item in the school, grouped by student — for list badges. */
 export async function loadPendingObligations(
@@ -166,6 +172,7 @@ export async function createObligation(params: {
   studentId: string
   draft: ObligationDraft
   createdBy: string | null   // staff.id (actorRecordId)
+  origin?: 'reactivation' | 'direct'
 }): Promise<Result<void>> {
   const problem = validateObligationDraft(params.draft)
   if (problem) return { ok: false, error: problem }
@@ -176,6 +183,7 @@ export async function createObligation(params: {
     description: params.draft.description.trim(),
     amount: params.draft.kind === 'fine' ? Number(params.draft.amount) : null,
     due_date: params.draft.dueDate || null,
+    origin: params.origin ?? 'reactivation',
     created_by: params.createdBy,
   })
   if (error) return { ok: false, error: error.message }

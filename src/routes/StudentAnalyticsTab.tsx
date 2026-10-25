@@ -14,6 +14,8 @@ import {
   type SubjectAnalytics,
 } from '../services/studentAnalyticsService'
 import { formatNaira } from '../services/portalService'
+import IssueObligationForm from '../components/IssueObligationForm'
+import { useAuthStore } from '../stores/authStore'
 import { getStudentPhotoSignedUrl } from '../services/studentsService'
 
 /**
@@ -91,6 +93,8 @@ export default function StudentAnalyticsTab({
   const [identity, setIdentity] = useState<StudentIdentity | null>(null)
   const [photoUrl, setPhotoUrl] = useState<string | null>(null)
   const [showAllPayments, setShowAllPayments] = useState(false)
+  const [issuing, setIssuing] = useState(false)
+  const actorRecordId = useAuthStore(st => st.actorRecordId)
   const sectionRefs = useRef<Record<FlagSection, HTMLElement | null>>({ attendance: null, academics: null, fees: null, record: null })
 
   // Passport + identity header. photo_url is a private-bucket path, so it
@@ -164,10 +168,25 @@ export default function StudentAnalyticsTab({
             {[identity?.class_name, identity?.student_code, identity?.gender].filter(Boolean).join(' · ')}
           </p>
         </div>
+        {canSeeFinanceAndConduct && (
+          <button type="button" className="obl-btn" onClick={() => setIssuing(v => !v)}>
+            {issuing ? 'Close' : 'Issue query / fine / task'}
+          </button>
+        )}
         {identity && identity.status !== 'active' && (
           <span className="san-id-status">{identity.status === 'inactive' ? 'Inactive' : identity.status}</span>
         )}
       </div>
+
+      {issuing && (
+        <IssueObligationForm
+          schoolId={schoolId}
+          studentId={studentId}
+          actorRecordId={actorRecordId ?? null}
+          onCancel={() => setIssuing(false)}
+          onIssued={async () => { setIssuing(false); await load() }}
+        />
+      )}
 
       {/* Duration filter */}
       <div className="san-filter">

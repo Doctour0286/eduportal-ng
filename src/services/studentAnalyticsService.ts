@@ -212,7 +212,7 @@ export interface StudentIdentity {
   gender: string | null
 }
 
-export type RecordKind = 'suspended' | 'reactivated' | 'fine' | 'task' | 'resolved'
+export type RecordKind = 'suspended' | 'reactivated' | 'fine' | 'task' | 'query' | 'resolved'
 
 export interface RecordEntry {
   id: string
@@ -554,15 +554,15 @@ async function buildRecord(schoolId: string, studentId: string, range: DateRange
   }
 
   for (const o of oblRes.data) {
-    const label = o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : 'Task assigned'
+    const label = o.kind === 'fine' ? `Fine ${formatObligationAmount(o.amount ?? 0)}` : o.kind === 'query' ? 'Query issued' : 'Task assigned'
     if (inRange(o.created_at)) {
-      entries.push({ id: `o-${o.id}`, at: o.created_at, kind: o.kind === 'fine' ? 'fine' : 'task', by: o.created_by_name, title: label, detail: o.description })
+      entries.push({ id: `o-${o.id}`, at: o.created_at, kind: o.kind, by: o.created_by_name, title: label, detail: o.description })
     }
     if (o.status !== 'pending' && o.resolved_at && inRange(o.resolved_at)) {
-      const verb = o.status === 'waived' ? 'waived' : o.kind === 'fine' ? 'paid' : 'done'
+      const verb = o.status === 'waived' ? 'waived' : o.kind === 'fine' ? 'paid' : o.kind === 'query' ? 'responded' : 'done'
       entries.push({
         id: `r-${o.id}`, at: o.resolved_at, kind: 'resolved', by: o.resolved_by_name,
-        title: `${o.kind === 'fine' ? 'Fine' : 'Task'} ${verb}`,
+        title: `${o.kind === 'fine' ? 'Fine' : o.kind === 'query' ? 'Query' : 'Task'} ${verb}`,
         detail: [o.description, o.resolution_note].filter(Boolean).join(' — ') || null,
       })
     }
@@ -655,7 +655,9 @@ export async function loadStudentAnalytics(params: {
     for (const o of pending) {
       flags.push({
         id: `obl-${o.id}`, section: 'record',
-        text: o.kind === 'fine' ? `${formatObligationAmount(o.amount ?? 0)} fine unpaid` : `Task not done: ${o.description}`,
+        text: o.kind === 'fine'
+          ? `${formatObligationAmount(o.amount ?? 0)} fine unpaid`
+          : o.kind === 'query' ? `Query awaiting response: ${o.description}` : `Task not done: ${o.description}`,
       })
     }
 

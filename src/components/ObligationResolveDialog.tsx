@@ -46,7 +46,7 @@ export default function ObligationResolveDialog({
     new Date(d.length > 10 ? d : d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 
   return (
-    <Modal open={open} onClose={onClose} title={`Fines & tasks — ${studentName}`}>
+    <Modal open={open} onClose={onClose} title={`Queries, fines & tasks — ${studentName}`}>
       {items.length === 0 ? (
         <p className="obl-dlg-empty">Nothing outstanding.</p>
       ) : (
@@ -55,7 +55,7 @@ export default function ObligationResolveDialog({
             <li key={o.id} className="obl-dlg-item">
               <div className="obl-dlg-top">
                 <span className={`obl-chip obl-chip--${o.kind}`}>
-                  {o.kind === 'fine' ? `${formatObligationAmount(o.amount ?? 0)} fine` : 'Task'}
+                  {o.kind === 'fine' ? `${formatObligationAmount(o.amount ?? 0)} fine` : o.kind === 'query' ? 'Query' : 'Task'}
                 </span>
                 {o.due_date && <span className="obl-dlg-due">Due {fmt(o.due_date)}</span>}
               </div>
@@ -78,7 +78,7 @@ export default function ObligationResolveDialog({
                   disabled={busyId === o.id}
                   onClick={() => void act(o, 'fulfilled')}
                 >
-                  {busyId === o.id ? 'Saving…' : o.kind === 'fine' ? 'Mark paid' : 'Mark done'}
+                  {busyId === o.id ? 'Saving…' : o.kind === 'fine' ? 'Mark paid' : o.kind === 'query' ? 'Mark responded' : 'Mark done'}
                 </button>
                 <button
                   type="button"
