@@ -265,15 +265,36 @@ export async function deleteAnnouncement(
 
 // ─── Load notifications ───────────────────────────────────────────────────────
 
+/**
+ * The signed-in account's app_identities.id — notifications are addressed to
+ * an identity, so every read/update below is pinned to it explicitly (the
+ * database also enforces this; see migration_notifications_own_only.sql).
+ * Cached per auth user so the header's polling doesn't re-query it.
+ */
+let cachedIdentity: { authUserId: string; identityId: string | null } | null = null
+
+export async function getMyIdentityId(): Promise<string | null> {
+  const { data: auth } = await supabase.auth.getUser()
+  const uid = auth.user?.id
+  if (!uid) return null
+  if (cachedIdentity && cachedIdentity.authUserId === uid) return cachedIdentity.identityId
+  const { data } = await supabase.from('app_identities').select('id').eq('auth_user_id', uid).maybeSingle()
+  cachedIdentity = { authUserId: uid, identityId: (data?.id as string | undefined) ?? null }
+  return cachedIdentity.identityId
+}
+
 export async function loadNotifications(
   schoolId: string,
   opts: { unreadOnly?: boolean } = {}
 ): Promise<Result<Notification[]>> {
   try {
+    const me = await getMyIdentityId()
+    if (!me) return { ok: true, data: [] }
     let query = supabase
       .from('notifications')
       .select('id, school_id, recipient_identity_id, channel, subject, body, related_table, related_id, status, sent_at, read_at, created_at')
       .eq('school_id', schoolId)
+      .eq('recipient_identity_id', me)
       .eq('channel', 'in_app')
       .order('created_at', { ascending: false })
       .limit(50)
@@ -312,10 +333,13 @@ export async function loadNotifications(
 
 export async function loadUnreadCount(schoolId: string): Promise<Result<number>> {
   try {
+    const me = await getMyIdentityId()
+    if (!me) return { ok: true, data: 0 }
     const { count, error } = await supabase
       .from('notifications')
       .select('id', { count: 'exact', head: true })
       .eq('school_id', schoolId)
+      .eq('recipient_identity_id', me)
       .eq('channel', 'in_app')
       .neq('status', 'read')
 
@@ -331,10 +355,13 @@ export async function loadUnreadCount(schoolId: string): Promise<Result<number>>
 
 export async function markNotificationRead(id: string): Promise<Result<void>> {
   try {
+    const me = await getMyIdentityId()
+    if (!me) return { ok: false, error: 'Not signed in' }
     const { error } = await supabase
       .from('notifications')
       .update({ status: 'read', read_at: new Date().toISOString() })
       .eq('id', id)
+      .eq('recipient_identity_id', me)
 
     if (error) return { ok: false, error: friendlyError(error, 'Failed to mark notification') }
 
@@ -348,10 +375,13 @@ export async function markNotificationRead(id: string): Promise<Result<void>> {
 
 export async function markAllNotificationsRead(schoolId: string): Promise<Result<void>> {
   try {
+    const me = await getMyIdentityId()
+    if (!me) return { ok: false, error: 'Not signed in' }
     const { error } = await supabase
       .from('notifications')
       .update({ status: 'read', read_at: new Date().toISOString() })
       .eq('school_id', schoolId)
+      .eq('recipient_identity_id', me)
       .eq('channel', 'in_app')
       .neq('status', 'read')
 

@@ -30,6 +30,13 @@ import { OnboardingWizard } from './routes/OnboardingWizard'
 import { BottomNav, type NavTab as BottomNavTab } from './components/BottomNav'
 import { Sidebar } from './components/Sidebar'
 import { Icon } from './components/icons'
+import {
+  loadNotifications,
+  loadUnreadCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  type Notification as AccountNotification,
+} from './services/announcementsService'
 
 // App-level tab type extends the bottom-nav tabs with 'home' (the dashboard tab).
 // BottomNav only shows timetable/attendance/students/finance/more as visible buttons,
@@ -265,6 +272,13 @@ export default function App() {
   // mounted child of this header (teacher/guardian home renders a different
   // component) and the header must work regardless of which one is active.
   const [headerBadgeCount, setHeaderBadgeCount] = useState<number | null>(null)
+  // Notification box (account popover). approvalCounts = what admins still
+  // need to act on (derived live); myUnread/notifList = notifications sent to
+  // THIS account only (scoped by recipient identity, not just by school).
+  const [approvalCounts, setApprovalCounts] = useState<{ scores: number; leave: number } | null>(null)
+  const [myUnread, setMyUnread] = useState(0)
+  const [notifList, setNotifList] = useState<AccountNotification[]>([])
+  const [notifLoading, setNotifLoading] = useState(false)
   // Toast (new scope, not previously named in the PRD — owner-scoped this
   // session to badge-count-increase only, not a general app-wide toast bus).
   // Tracks the last count seen so a toast fires only when the number goes up
@@ -491,18 +505,28 @@ export default function App() {
   // for them, so the badge slot stays at its initial null (no fake zero shown).
   useEffect(() => {
     const isAdmin = isAdminRole || actorType === 'platform_admin'
-    if (!isAdmin || !school?.id) return
+    if (!school?.id) return
     let cancelled = false
 
     async function loadBadgeCount() {
       const schoolId = school?.id
       if (!schoolId) return
-      const [scoresRes, leaveRes] = await Promise.all([
-        supabase.from('scores').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).is('approved_at', null),
-        supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('status', 'pending'),
+      const [scoresRes, leaveRes, unreadRes] = await Promise.all([
+        isAdmin
+          ? supabase.from('scores').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).is('approved_at', null)
+          : Promise.resolve(null),
+        isAdmin
+          ? supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('status', 'pending')
+          : Promise.resolve(null),
+        loadUnreadCount(schoolId),
       ])
       if (cancelled) return
-      const total = (scoresRes.count ?? 0) + (leaveRes.count ?? 0)
+      const scores = scoresRes?.count ?? 0
+      const leave = leaveRes?.count ?? 0
+      const unread = unreadRes.ok ? unreadRes.data : 0
+      setApprovalCounts(isAdmin ? { scores, leave } : null)
+      setMyUnread(unread)
+      const total = scores + leave + unread
       const previous = lastBadgeCountRef.current
       // Toast only on a real increase — not on first load (previous === null)
       // and not when the count drops or stays flat, so dismissing/approving
@@ -516,11 +540,47 @@ export default function App() {
 
     loadBadgeCount()
     // Poll at a modest interval — good enough for a "new item appeared" nudge
-    // without hammering the two count queries; matches this app's existing
+    // without hammering the count queries; matches this app's existing
     // preference for simple polling over a realtime subscription elsewhere.
     const interval = setInterval(loadBadgeCount, 60_000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [isAdminRole, actorType, school?.id])
+
+  // Load this account's notifications each time the menu is opened.
+  useEffect(() => {
+    if (!accountPopoverOpen || !school?.id) return
+    let cancelled = false
+    setNotifLoading(true)
+    void loadNotifications(school.id).then(res => {
+      if (cancelled) return
+      setNotifLoading(false)
+      if (res.ok) setNotifList(res.data.slice(0, 8))
+    })
+    return () => { cancelled = true }
+  }, [accountPopoverOpen, school?.id])
+
+  async function handleReadNotification(id: string) {
+    const target = notifList.find(n => n.id === id)
+    if (!target || target.status === 'read') return
+    const res = await markNotificationRead(id)
+    if (!res.ok) return
+    setNotifList(prev => prev.map(n => n.id === id ? { ...n, status: 'read', read_at: new Date().toISOString() } : n))
+    setMyUnread(c => Math.max(0, c - 1))
+    setHeaderBadgeCount(c => (c === null ? c : Math.max(0, c - 1)))
+    lastBadgeCountRef.current = lastBadgeCountRef.current === null ? null : Math.max(0, lastBadgeCountRef.current - 1)
+  }
+
+  async function handleReadAllNotifications() {
+    if (!school?.id) return
+    const unreadNow = notifList.filter(n => n.status !== 'read').length
+    const res = await markAllNotificationsRead(school.id)
+    if (!res.ok) return
+    setNotifList(prev => prev.map(n => ({ ...n, status: 'read' as const, read_at: n.read_at ?? new Date().toISOString() })))
+    setHeaderBadgeCount(c => (c === null ? c : Math.max(0, c - myUnread)))
+    lastBadgeCountRef.current = lastBadgeCountRef.current === null ? null : Math.max(0, lastBadgeCountRef.current - myUnread)
+    setMyUnread(0)
+    void unreadNow
+  }
 
   // Auto-dismiss the badge toast after a few seconds — matches this file's
   // reduced-motion-aware transition convention (see the More sheet), not a
@@ -886,6 +946,61 @@ export default function App() {
               >
                 <Icon name="x" size={18} />
               </button>
+            </div>
+            <div className="account-popover-divider" />
+            {/* Notification box — what needs this account's attention. Admin
+                items are live counts; stored notifications are those sent to
+                this account only. */}
+            <div className="account-notif" aria-label="Notifications">
+              <div className="account-notif-head">
+                <span className="account-notif-title">Notifications</span>
+                {myUnread > 0 && (
+                  <button type="button" className="account-notif-markall" onClick={() => void handleReadAllNotifications()}>
+                    Mark all read
+                  </button>
+                )}
+              </div>
+              <ul className="account-notif-list">
+                {approvalCounts && approvalCounts.scores > 0 && (
+                  <li>
+                    <button type="button" className="account-notif-item account-notif-item--action"
+                      onClick={() => { setAccountPopoverOpen(false); onNavigate('results') }}>
+                      <span className="account-notif-subject">
+                        {approvalCounts.scores} score{approvalCounts.scores === 1 ? '' : 's'} awaiting approval
+                      </span>
+                      <span className="account-notif-body">Open Results to review</span>
+                    </button>
+                  </li>
+                )}
+                {approvalCounts && approvalCounts.leave > 0 && (
+                  <li>
+                    <button type="button" className="account-notif-item account-notif-item--action"
+                      onClick={() => { setAccountPopoverOpen(false); onNavigate('hr') }}>
+                      <span className="account-notif-subject">
+                        {approvalCounts.leave} leave request{approvalCounts.leave === 1 ? '' : 's'} pending
+                      </span>
+                      <span className="account-notif-body">Open HR to review</span>
+                    </button>
+                  </li>
+                )}
+                {notifList.map(n => (
+                  <li key={n.id}>
+                    <button type="button"
+                      className={`account-notif-item${n.status !== 'read' ? ' account-notif-item--unread' : ''}`}
+                      onClick={() => void handleReadNotification(n.id)}>
+                      <span className="account-notif-subject">{n.subject ?? 'Notification'}</span>
+                      <span className="account-notif-body">{n.body}</span>
+                      <span className="account-notif-time">
+                        {new Date(n.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {notifLoading && notifList.length === 0 && <p className="account-notif-empty">Loading…</p>}
+              {!notifLoading && notifList.length === 0 && !(approvalCounts && (approvalCounts.scores > 0 || approvalCounts.leave > 0)) && (
+                <p className="account-notif-empty">You're all caught up.</p>
+              )}
             </div>
             <div className="account-popover-divider" />
             {/* Language preference — the orphaned Session 3 toggle's home, per PRD
