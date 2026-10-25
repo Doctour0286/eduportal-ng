@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react'
-import type { ClassNode, TimetableData, TimetableEntry } from '../services/timetableService'
-import { orderedWeekDays } from '../lib/weekOrder'
+import type { ClassNode, Period, TimetableData, TimetableEntry } from '../services/timetableService'
 
 /**
  * Whole-school timetable on one screen: every class (rows) against every
- * period (columns) for the chosen day, with subject and teacher in each cell.
- * "All days" stacks every school day one after another. The day order follows
- * the school's chosen first day of the week. Read-only; editing stays in the
- * per-class view.
+ * period (columns) for the chosen day, subject and teacher in each cell.
+ * "All days" stacks every school day. Day order comes from `data.weekDays`,
+ * which the module has already ordered by the school's first day of week.
+ *
+ * Cells are tappable: outside edit mode they open the same lesson-detail
+ * popup as the other views; in edit mode they open the lesson chooser, so a
+ * whole school can be edited with everything in view. The module owns the
+ * data and the writes — this component only renders and reports taps.
  */
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -16,41 +19,38 @@ const hhmm = (t: string) => t.slice(0, 5)
 export default function SchoolTimetableOverview({
   data,
   classes,
-  firstDay,
+  day,
+  onDayChange,
+  editMode,
+  conflictIds,
+  cellState,
+  liveState,
+  onCellTap,
 }: {
   data: TimetableData
   classes: ClassNode[]
-  firstDay: number
+  day: number | 'all'
+  onDayChange: (d: number | 'all') => void
+  editMode: boolean
+  conflictIds: Set<string>
+  cellState: Record<string, 'saving' | 'error'>
+  liveState: { periodId: string | null; dayOfWeek: number }
+  onCellTap: (classNode: ClassNode, dayOfWeek: number, period: Period, entry: TimetableEntry | undefined) => void
 }) {
-  const schoolDays = useMemo(
-    () => orderedWeekDays(firstDay).filter(d => data.weekDays.some(w => w.day_of_week === d)),
-    [data.weekDays, firstDay],
-  )
+  const schoolDays = useMemo(() => data.weekDays.map(w => w.day_of_week), [data.weekDays])
   const periods = useMemo(() => [...data.periods].sort((a, b) => a.sort_order - b.sort_order), [data.periods])
+  const [highlightStaff, setHighlightStaff] = useState('')
 
-  const [day, setDay] = useState<number | 'all'>(() => {
-    const today = new Date().getDay()
-    return schoolDays.includes(today) ? today : (schoolDays[0] ?? 'all')
-  })
+  const byCell = useMemo(() => {
+    const m = new Map<string, TimetableEntry>()
+    for (const e of data.entries) m.set(`${e.day_of_week}|${e.class_node_id}|${e.period_id}`, e)
+    return m
+  }, [data.entries])
 
-  // entry lookup + teacher clash detection (same teacher, same day+period, 2+ classes)
-  const { byCell, clashes } = useMemo(() => {
-    const byCell = new Map<string, TimetableEntry>()
-    const perSlot = new Map<string, Map<string, number>>()
-    for (const e of data.entries) {
-      byCell.set(`${e.day_of_week}|${e.class_node_id}|${e.period_id}`, e)
-      if (e.staff_id) {
-        const slot = `${e.day_of_week}|${e.period_id}`
-        const m = perSlot.get(slot) ?? new Map<string, number>()
-        m.set(e.staff_id, (m.get(e.staff_id) ?? 0) + 1)
-        perSlot.set(slot, m)
-      }
-    }
-    const clashes = new Set<string>()
-    for (const e of data.entries) {
-      if (e.staff_id && (perSlot.get(`${e.day_of_week}|${e.period_id}`)?.get(e.staff_id) ?? 0) > 1) clashes.add(e.id)
-    }
-    return { byCell, clashes }
+  const teachers = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const e of data.entries) if (e.staff_id && e.staff_name) m.set(e.staff_id, e.staff_name)
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]))
   }, [data.entries])
 
   if (schoolDays.length === 0 || periods.length === 0 || classes.length === 0) {
@@ -60,28 +60,39 @@ export default function SchoolTimetableOverview({
   const daysToShow = day === 'all' ? schoolDays : [day]
 
   return (
-    <div className="tto">
-      <div className="tto-days" role="group" aria-label="Day">
-        {schoolDays.map(d => (
+    <div className={`tto${editMode ? ' tto--edit' : ''}`}>
+      <div className="tto-bar">
+        <div className="tto-days" role="group" aria-label="Day">
+          {schoolDays.map(d => (
+            <button
+              key={d}
+              type="button"
+              className={`tto-day${day === d ? ' tto-day--on' : ''}${liveState.dayOfWeek === d ? ' tto-day--today' : ''}`}
+              aria-pressed={day === d}
+              onClick={() => onDayChange(d)}
+            >
+              {DAY_NAMES[d].slice(0, 3)}
+            </button>
+          ))}
           <button
-            key={d}
             type="button"
-            className={`tto-day${day === d ? ' tto-day--on' : ''}`}
-            aria-pressed={day === d}
-            onClick={() => setDay(d)}
+            className={`tto-day${day === 'all' ? ' tto-day--on' : ''}`}
+            aria-pressed={day === 'all'}
+            onClick={() => onDayChange('all')}
           >
-            {DAY_NAMES[d].slice(0, 3)}
+            All days
           </button>
-        ))}
-        <button
-          type="button"
-          className={`tto-day${day === 'all' ? ' tto-day--on' : ''}`}
-          aria-pressed={day === 'all'}
-          onClick={() => setDay('all')}
-        >
-          All days
-        </button>
+        </div>
+        <label className="tto-teacher-pick">
+          Highlight teacher
+          <select value={highlightStaff} onChange={e => setHighlightStaff(e.target.value)}>
+            <option value="">None</option>
+            {teachers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </label>
       </div>
+
+      {editMode && <p className="tto-hint">Tap any cell to choose its lesson, mark it free, or clear it.</p>}
 
       {daysToShow.map(d => (
         <section key={d} className="tto-block">
@@ -92,7 +103,10 @@ export default function SchoolTimetableOverview({
                 <tr>
                   <th className="tto-corner">Class</th>
                   {periods.map(p => (
-                    <th key={p.id} className={p.is_break ? 'tto-th tto-th--break' : 'tto-th'}>
+                    <th
+                      key={p.id}
+                      className={`tto-th${p.is_break ? ' tto-th--break' : ''}${liveState.periodId === p.id && liveState.dayOfWeek === d ? ' tto-th--now' : ''}`}
+                    >
                       <span className="tto-p-label">{p.label}</span>
                       <span className="tto-p-time">{hhmm(p.start_time)}–{hhmm(p.end_time)}</span>
                     </th>
@@ -106,16 +120,44 @@ export default function SchoolTimetableOverview({
                     {periods.map(p => {
                       if (p.is_break) return <td key={p.id} className="tto-cell tto-cell--break" />
                       const e = byCell.get(`${d}|${c.id}|${p.id}`)
-                      if (!e) return <td key={p.id} className="tto-cell tto-cell--empty">–</td>
-                      const clash = clashes.has(e.id)
+                      const state = cellState[`${c.id}|${d}|${p.id}`]
+                      const clash = e ? conflictIds.has(e.id) : false
+                      const dim = highlightStaff !== '' && e?.staff_id !== highlightStaff
+                      const lit = highlightStaff !== '' && e?.staff_id === highlightStaff
+                      const interactive = editMode || !!e
+                      const cls = [
+                        'tto-cell',
+                        !e ? 'tto-cell--empty' : '',
+                        e && !e.subject_id ? 'tto-cell--free' : '',
+                        clash ? 'tto-cell--clash' : '',
+                        lit ? 'tto-cell--lit' : '',
+                        dim ? 'tto-cell--dim' : '',
+                        state === 'saving' ? 'tto-cell--saving' : '',
+                        state === 'error' ? 'tto-cell--error' : '',
+                      ].filter(Boolean).join(' ')
                       return (
-                        <td
-                          key={p.id}
-                          className={`tto-cell${e.subject_id ? '' : ' tto-cell--free'}${clash ? ' tto-cell--clash' : ''}`}
-                          title={clash ? `${e.staff_name} is booked in more than one class this period` : undefined}
-                        >
-                          <span className="tto-subject">{e.subject_name ?? 'Free'}</span>
-                          {e.staff_name && <span className="tto-teacher">{e.staff_name}</span>}
+                        <td key={p.id} className={cls}>
+                          {interactive ? (
+                            <button
+                              type="button"
+                              className="tto-cell-btn"
+                              onClick={() => onCellTap(c, d, p, e)}
+                              aria-label={`${c.name}, ${DAY_NAMES[d]}, ${p.label}${e ? `: ${e.subject_name ?? 'Free'}` : ': empty'}`}
+                              title={clash ? `${e?.staff_name} is booked in more than one class this period` : undefined}
+                            >
+                              {e ? (
+                                <>
+                                  <span className="tto-subject">{e.subject_name ?? 'Free'}</span>
+                                  {e.staff_name && <span className="tto-teacher">{e.staff_name}</span>}
+                                </>
+                              ) : (
+                                <span className="tto-add">+</span>
+                              )}
+                              {state === 'error' && <span className="tto-err">Not saved</span>}
+                            </button>
+                          ) : (
+                            '–'
+                          )}
                         </td>
                       )
                     })}
@@ -126,7 +168,7 @@ export default function SchoolTimetableOverview({
           </div>
         </section>
       ))}
-      {clashes.size > 0 && (
+      {conflictIds.size > 0 && (
         <p className="tto-note">Cells outlined in red show a teacher booked in more than one class in the same period.</p>
       )}
     </div>

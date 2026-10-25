@@ -73,6 +73,7 @@ import {
   loadStaffList,
   loadCurrentSession,
   loadTeachingAssignments,
+  loadAllTeachingAssignments,
   upsertTimetableEntry,
   deleteTimetableEntry,
   findConflictingEntryIds,
@@ -89,6 +90,7 @@ import {
 import { printTimetable } from '../services/printTimetable'
 import { loadStaffPreferences, loadFirstDayOfWeek, type StaffPreferences } from '../services/settingsService'
 import SchoolTimetableOverview from './SchoolTimetableOverview'
+import { printSchoolTimetable } from '../services/printSchoolTimetable'
 import { orderedWeekDays } from '../lib/weekOrder'
 // Tier 8 / Problem 8.4 (Session 48): exam timetable surfaces read-only here.
 import { loadExamEntries, type ExamEntry } from '../services/assessmentService'
@@ -149,6 +151,11 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
     return { ...ttData, weekDays: [...ttData.weekDays].sort((a, b) => order.indexOf(a.day_of_week) - order.indexOf(b.day_of_week)) }
   }, [ttData, firstDay])
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
+  const defaultSchoolDay: number | 'all' = useMemo(() => {
+    const days = (ttDataOrdered?.weekDays ?? []).map(w => w.day_of_week)
+    const today = new Date().getDay()
+    return days.includes(today) ? today : (days[0] ?? 'all')
+  }, [ttDataOrdered])
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null)
 
   // ── Edit mode state ───────────────────────────────────────────────────────────
@@ -156,6 +163,10 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   const [assignments, setAssignments]         = useState<TeachingAssignment[]>([])
   const [assignmentsLoading, setAssignmentsLoading] = useState(false)
   const [armedChip, setArmedChip]             = useState<ArmedChip>(null)
+  // Whole-school view: chosen day, the lesson chooser, and every class's assignments.
+  const [schoolDay, setSchoolDay]             = useState<number | 'all' | null>(null)
+  const [allAssignments, setAllAssignments]   = useState<TeachingAssignment[]>([])
+  const [chooser, setChooser]                 = useState<{ classNode: ClassNode; dayOfWeek: number; period: Period; entry: TimetableEntry | null } | null>(null)
   // Entry pending clear confirmation: stores the entry id, or null
   const [pendingClearId, setPendingClearId]   = useState<string | null>(null)
   // Per-cell write state: cellKey → 'saving' | 'error'
@@ -324,11 +335,16 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
     })
   }, [editMode, sessionId, selectedClassId])
 
+  useEffect(() => {
+    if (!editMode || viewMode !== 'school' || !sessionId) return
+    void loadAllTeachingAssignments(sessionId).then(res => setAllAssignments(res.data ?? []))
+  }, [editMode, viewMode, sessionId])
+
   // ─── Enter / exit edit mode ──────────────────────────────────────────────────
 
   function enterEditMode() {
-    // Switch to class view (edit only works per-class)
-    setViewMode('class')
+    // Teacher view can't be edited directly; class and whole-school can.
+    if (viewMode === 'teacher') setViewMode('class')
     setEditMode(true)
     setArmedChip(null)
     // If we were showing empty-state, switch to ready so grid renders
@@ -348,7 +364,16 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   // ─── Print current view ───────────────────────────────────────────────────────
 
   function handlePrint() {
-    if (!ttData || viewMode === 'school') return
+    if (!ttData) return
+    if (viewMode === 'school') {
+      printSchoolTimetable({
+        schoolName, sessionName,
+        data: ttDataOrdered ?? ttData,
+        classes: classNodes.filter(n => n.is_leaf_enrollable),
+        day: schoolDay ?? defaultSchoolDay,
+      })
+      return
+    }
     const mode: 'class' | 'teacher' = editMode ? 'class' : viewMode
     const classNode = classNodes.find(n => n.id === selectedClassId)
     const staffMember = staffList.find(s => s.id === selectedStaffId)
@@ -371,6 +396,101 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
     // Tapping an already-armed chip de-arms it
     setArmedChip(prev => (prev === chipId ? null : chipId))
     setPendingClearId(null)
+  }
+
+  // ─── Write one cell (shared by the armed-chip flow and the whole-school chooser) ──
+
+  async function writeCell(
+    classId: string,
+    dayOfWeek: number,
+    period: Period,
+    chipId: ArmedChip,
+    pool: TeachingAssignment[],
+  ) {
+    if (!sessionId) return
+    // The whole-school grid keys cell state by class too; the class grid keys by day|period.
+    const cellKey = viewMode === 'school' ? `${classId}|${dayOfWeek}|${period.id}` : `${dayOfWeek}|${period.id}`
+    setCellState(prev => ({ ...prev, [cellKey]: 'saving' }))
+
+    const chip = chipId !== null && chipId !== 'free' ? (pool.find(a => a.id === chipId) ?? null) : null
+    const teachingAssignmentId = chip ? chip.id : null
+    const subjectId = chip ? chip.subject_id : null
+
+    const res = await upsertTimetableEntry({
+      schoolId,
+      sessionId,
+      dayOfWeek,
+      periodId: period.id,
+      classNodeId: classId,
+      teachingAssignmentId,
+      subjectId,
+    })
+
+    if (!res.ok) {
+      setCellState(prev => ({ ...prev, [cellKey]: 'error' }))
+      setTimeout(() => {
+        setCellState(prev => {
+          const next = { ...prev }
+          delete next[cellKey]
+          return next
+        })
+      }, 3000)
+      return
+    }
+
+    // Optimistic update: patch the in-memory entries list
+    setTtData(prev => {
+      if (!prev) return prev
+      const filtered = prev.entries.filter(
+        e => !(e.day_of_week === dayOfWeek && e.period_id === period.id && e.class_node_id === classId),
+      )
+      const newEntry: TimetableEntry = {
+        id: `temp-${Date.now()}`,
+        day_of_week: dayOfWeek,
+        period_id: period.id,
+        class_node_id: classId,
+        class_node_name: classNodes.find(n => n.id === classId)?.name ?? '',
+        subject_id: subjectId,
+        subject_name: chip?.subject_name ?? null,
+        teaching_assignment_id: teachingAssignmentId,
+        staff_id: chip?.staff_id ?? null,
+        staff_name: chip?.staff_name ?? null,
+      }
+      return { ...prev, entries: [...filtered, newEntry] }
+    })
+
+    setCellState(prev => {
+      const next = { ...prev }
+      delete next[cellKey]
+      return next
+    })
+  }
+
+  // ─── Tap a cell in the whole-school view ─────────────────────────────────────
+  // Read-only: same detail popup as the other views. Edit mode: open the
+  // lesson chooser for that class/day/period.
+
+  function handleSchoolCellTap(classNode: ClassNode, dayOfWeek: number, period: Period, entry: TimetableEntry | undefined) {
+    if (!editMode) {
+      void handleCellTap(dayOfWeek, period, entry)
+      return
+    }
+    if (period.is_break) return
+    setChooser({ classNode, dayOfWeek, period, entry: entry ?? null })
+  }
+
+  async function chooseLesson(chipId: ArmedChip) {
+    if (!chooser) return
+    const { classNode, dayOfWeek, period } = chooser
+    setChooser(null)
+    await writeCell(classNode.id, dayOfWeek, period, chipId, allAssignments.filter(a => a.class_node_id === classNode.id))
+  }
+
+  async function clearChosen() {
+    if (!chooser?.entry) return
+    const id = chooser.entry.id
+    setChooser(null)
+    await handleConfirmClear(id)
   }
 
   // ─── Tap a grid cell ─────────────────────────────────────────────────────────
@@ -415,73 +535,8 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
 
     // ── Case A: a chip is armed → write to this cell ─────────────────────────
     if (armedChip !== null) {
-      const cellKey = `${dayOfWeek}|${period.id}`
-      setCellState(prev => ({ ...prev, [cellKey]: 'saving' }))
-
-      let teachingAssignmentId: string | null = null
-      let subjectId: string | null = null
-
-      if (armedChip !== 'free') {
-        const chip = assignments.find(a => a.id === armedChip)
-        if (chip) {
-          teachingAssignmentId = chip.id
-          subjectId = chip.subject_id
-        }
-      }
-
-      const res = await upsertTimetableEntry({
-        schoolId,
-        sessionId,
-        dayOfWeek,
-        periodId: period.id,
-        classNodeId: selectedClassId,
-        teachingAssignmentId,
-        subjectId,
-      })
-
-      if (!res.ok) {
-        setCellState(prev => ({ ...prev, [cellKey]: 'error' }))
-        // Clear error badge after 3 s
-        setTimeout(() => {
-          setCellState(prev => {
-            const next = { ...prev }
-            delete next[cellKey]
-            return next
-          })
-        }, 3000)
-        return
-      }
-
-      // Optimistic update: patch the in-memory entries list
-      const chip = armedChip !== 'free' ? assignments.find(a => a.id === armedChip) : null
-      setTtData(prev => {
-        if (!prev) return prev
-        // Remove any existing entry for this slot
-        const filtered = prev.entries.filter(
-          e => !(e.day_of_week === dayOfWeek && e.period_id === period.id && e.class_node_id === selectedClassId)
-        )
-        // Add the new entry — id is temporary; real id comes from next full reload
-        const newEntry: TimetableEntry = {
-          id: `temp-${Date.now()}`,
-          day_of_week: dayOfWeek,
-          period_id: period.id,
-          class_node_id: selectedClassId,
-          class_node_name: classNodes.find(n => n.id === selectedClassId)?.name ?? '',
-          subject_id: subjectId,
-          subject_name: chip?.subject_name ?? null,
-          teaching_assignment_id: teachingAssignmentId,
-          staff_id: chip?.staff_id ?? null,
-          staff_name: chip?.staff_name ?? null,
-        }
-        return { ...prev, entries: [...filtered, newEntry] }
-      })
-
-      setCellState(prev => {
-        const next = { ...prev }
-        delete next[cellKey]
-        return next
-      })
-      // Keep chip armed so admin can quickly fill the whole row
+      await writeCell(selectedClassId, dayOfWeek, period, armedChip, assignments)
+      // Chip stays armed so admin can quickly fill the whole row
       return
     }
 
@@ -573,7 +628,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
                 Today ↓
               </button>
             )}
-            {!editMode && viewMode !== 'school' && ttData && (ttData.entries.length > 0) && (
+            {!editMode && ttData && (ttData.entries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint} aria-label="Print timetable">
                 <Icon name="printer" size={18} />
               </button>
@@ -616,7 +671,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
         )}
 
         {/* Selector */}
-        {viewMode === 'school' && !editMode ? null : (viewMode === 'class' || editMode) ? (
+        {viewMode === 'school' ? null : (viewMode === 'class' || editMode) ? (
           <div className="tt-selector-row">
             <label className="tt-selector-label">Class</label>
             <select
@@ -655,7 +710,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
         )}
 
         {/* Edit mode: assignment tray */}
-        {editMode && (
+        {editMode && viewMode !== 'school' && (
           <AssignmentTray
             assignments={assignments}
             loading={assignmentsLoading}
@@ -704,8 +759,18 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
 
       {/* ── Grid ────────────────────────────────────────────────────────────── */}
       <div className="tt-grid-wrapper" ref={scrollRef}>
-        {viewMode === 'school' && !editMode && ttData ? (
-          <SchoolTimetableOverview data={ttData} classes={leafNodes} firstDay={firstDay} />
+        {viewMode === 'school' && ttDataOrdered ? (
+          <SchoolTimetableOverview
+            data={ttDataOrdered}
+            classes={leafNodes}
+            day={schoolDay ?? defaultSchoolDay}
+            onDayChange={setSchoolDay}
+            editMode={editMode}
+            conflictIds={conflictIds}
+            cellState={cellState}
+            liveState={liveState}
+            onCellTap={handleSchoolCellTap}
+          />
         ) : (
         <TimetableGrid
           data={ttDataOrdered!}
@@ -725,6 +790,66 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
         />
         )}
       </div>
+
+      {/* ── Whole-school edit: lesson chooser ──────────────────────────────── */}
+      <Modal
+        open={chooser !== null}
+        onClose={() => setChooser(null)}
+        title={chooser ? `${chooser.classNode.name} · ${dayName(chooser.dayOfWeek)} · ${chooser.period.label}` : undefined}
+      >
+        {chooser && (() => {
+          const pool = allAssignments.filter(a => a.class_node_id === chooser.classNode.id)
+          // Teachers already teaching another class in this exact slot.
+          const busyElsewhere = new Map<string, string>()
+          for (const e of ttData?.entries ?? []) {
+            if (e.day_of_week === chooser.dayOfWeek && e.period_id === chooser.period.id &&
+                e.class_node_id !== chooser.classNode.id && e.staff_id) {
+              busyElsewhere.set(e.staff_id, e.class_node_name)
+            }
+          }
+          return (
+            <div className="tto-chooser">
+              {chooser.entry && (
+                <p className="tto-chooser-now">
+                  Now: <strong>{chooser.entry.subject_name ?? 'Free period'}</strong>
+                  {chooser.entry.staff_name ? ` — ${chooser.entry.staff_name}` : ''}
+                </p>
+              )}
+              {pool.length === 0 ? (
+                <p className="tto-note">
+                  No teachers are assigned to subjects in this class yet. Assign them first, then come back to place lessons.
+                </p>
+              ) : (
+                <ul className="tto-chooser-list">
+                  {pool.map(a => {
+                    const clashWith = busyElsewhere.get(a.staff_id)
+                    const isCurrent = chooser.entry?.teaching_assignment_id === a.id
+                    return (
+                      <li key={a.id}>
+                        <button
+                          type="button"
+                          className={`tto-chooser-item${isCurrent ? ' tto-chooser-item--current' : ''}${clashWith ? ' tto-chooser-item--clash' : ''}`}
+                          onClick={() => void chooseLesson(a.id)}
+                        >
+                          <span className="tto-chooser-subject">{a.subject_name}</span>
+                          <span className="tto-chooser-teacher">{a.staff_name}</span>
+                          {clashWith && <span className="tto-chooser-warn">Teacher is already in {clashWith} this period</span>}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+              <div className="tto-chooser-actions">
+                <button type="button" className="tt-edit-btn" onClick={() => void chooseLesson('free')}>Free period</button>
+                {chooser.entry && (
+                  <button type="button" className="tt-done-btn" onClick={() => void clearChosen()}>Clear lesson</button>
+                )}
+              </div>
+            </div>
+          )
+        })()}
+      </Modal>
 
       {/* ── Read-only lesson detail popup (Session 24) ─────────────────────── */}
       <Modal

@@ -265,6 +265,34 @@ export async function loadTeachingAssignments(
   }
 }
 
+/** Every teaching assignment in the session, all classes — for editing the whole-school view. */
+export async function loadAllTeachingAssignments(sessionId: string): Promise<{
+  ok: boolean
+  data?: TeachingAssignment[]
+  error?: string
+}> {
+  try {
+    const { data, error } = await supabase
+      .from('teaching_assignments')
+      .select('id, staff_id, subject_id, class_node_id, staff ( full_name ), subjects ( name )')
+      .eq('session_id', sessionId)
+    if (error) return { ok: false, error: error.message }
+    return {
+      ok: true,
+      data: (data ?? []).map((a: any) => ({
+        id: a.id,
+        staff_id: a.staff_id,
+        staff_name: a.staff?.full_name ?? '',
+        subject_id: a.subject_id,
+        subject_name: a.subjects?.name ?? '',
+        class_node_id: a.class_node_id,
+      })),
+    }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load teaching assignments' }
+  }
+}
+
 // ─── Conflict detection — derived from data already in memory ───────────────
 // Same teacher, same day, same period, different class = double-booked.
 // There is no "room" concept anywhere in the schema, so room conflicts

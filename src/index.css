@@ -22316,3 +22316,33 @@ body {
 .tto-teacher { display: block; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .tto-note, .tto-empty { margin: 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
 .san-day--suspended { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,0.55) 0 2px, transparent 2px 5px); }
+
+/* Whole-school timetable: interaction + editing */
+.tto-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.tto-teacher-pick { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-secondary); }
+.tto-teacher-pick select { padding: 5px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-text-primary); font-size: var(--text-xs); }
+.tto-day--today { box-shadow: inset 0 -3px 0 var(--color-brand-600); }
+.tto-th--now { background: var(--color-brand-50); }
+.tto-hint { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--color-brand-50); color: var(--color-brand-700); font-size: var(--text-xs); }
+.tto-cell { padding: 0 !important; }
+.tto-cell--break { padding: 0 !important; }
+.tto-cell-btn { display: block; width: 100%; min-height: 40px; padding: 6px 8px; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.tto-cell-btn:hover { background: var(--color-brand-50); }
+.tto--edit .tto-cell--empty .tto-cell-btn { text-align: center; color: var(--color-text-secondary); }
+.tto-add { font-size: 1rem; opacity: 0.5; }
+.tto-cell--lit { background: #fef3c7; }
+.tto-cell--dim .tto-cell-btn { opacity: 0.35; }
+.tto-cell--saving { opacity: 0.6; }
+.tto-cell--error { outline: 2px dashed #e24b4a; outline-offset: -2px; }
+.tto-err { display: block; font-size: 0.65rem; color: #b91c1c; font-weight: 600; }
+.tto-chooser { display: flex; flex-direction: column; gap: var(--space-3); }
+.tto-chooser-now { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }
+.tto-chooser-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); max-height: 50vh; overflow-y: auto; }
+.tto-chooser-item { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); text-align: left; cursor: pointer; }
+.tto-chooser-item:hover { border-color: var(--color-brand-600); }
+.tto-chooser-item--current { border-color: var(--color-brand-600); background: var(--color-brand-50); }
+.tto-chooser-item--clash { border-left: 3px solid #e24b4a; }
+.tto-chooser-subject { font-weight: 600; font-size: var(--text-sm); color: var(--color-text-primary); }
+.tto-chooser-teacher { font-size: var(--text-xs); color: var(--color-text-secondary); }
+.tto-chooser-warn { font-size: var(--text-xs); color: #b91c1c; }
+.tto-chooser-actions { display: flex; gap: var(--space-2); }
