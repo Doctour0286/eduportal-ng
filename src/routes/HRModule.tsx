@@ -52,6 +52,7 @@
  *     forward only — UI warns before the mark-paid step since it triggers the ledger)
  */
 
+import { NAME_PREFIXES, splitNamePrefix, composeName } from '../lib/namePrefix'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Icon } from '../components/icons'
 import { useAuthStore } from '../stores/authStore'
@@ -2188,13 +2189,31 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
           <label className="hr-label" htmlFor="hr-edit-name">
             Full name <span className="hr-required">*</span>
           </label>
-          <input
-            id="hr-edit-name"
-            className="hr-input"
-            type="text"
-            value={editForm.full_name}
-            onChange={e => setEditForm(prev => prev && ({ ...prev, full_name: e.target.value }))}
-          />
+          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+            <select
+              className="hr-input"
+              style={{ width: '110px', flexShrink: 0 }}
+              aria-label="Name prefix"
+              value={splitNamePrefix(editForm.full_name).prefix}
+              onChange={e => setEditForm(prev => prev && ({
+                ...prev,
+                full_name: composeName(e.target.value, splitNamePrefix(prev.full_name).name),
+              }))}
+            >
+              <option value="">No prefix</option>
+              {NAME_PREFIXES.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <input
+              id="hr-edit-name"
+              className="hr-input"
+              type="text"
+              value={splitNamePrefix(editForm.full_name).name}
+              onChange={e => setEditForm(prev => prev && ({
+                ...prev,
+                full_name: composeName(splitNamePrefix(prev.full_name).prefix, e.target.value),
+              }))}
+            />
+          </div>
         </div>
         <div className="hr-field">
           <label className="hr-label" htmlFor="hr-edit-email">Email</label>

@@ -43,6 +43,7 @@ import {
   loadSessions,             upsertSession,
   loadTerms,                upsertTerm,
   loadWeekDays,             saveWeekDays,
+  loadFirstDayOfWeek,       saveFirstDayOfWeek,
   loadPeriods,              upsertPeriod,   deletePeriod,
   loadCalendarDays,         upsertCalendarDay, bulkUpsertCalendarDays, deleteCalendarDay,
   loadSubjects,             upsertSubject,
@@ -112,6 +113,7 @@ import {
 // that file's header for why), imported here as tab bodies only.
 import { AssessmentsTab, PromotionTabSecondary } from './AssessmentsSettings'
 import AttendanceClassRules from './AttendanceClassRules'
+import { orderedWeekDays } from '../lib/weekOrder'
 // SESSION 65c — admission pipeline/field-settings/master-switch authoring.
 // Deliberately a separate import from admissionService.ts, not folded into
 // the block above: that file's own header comment (added in 65b) explains
@@ -1694,6 +1696,7 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [weekDays, setWeekDays] = useState<number[]>([])
+  const [firstDay, setFirstDay] = useState(1)
   const [periods, setPeriods] = useState<Period[]>([])
 
   // Collapsed by default per owner request (2026-07-04) — most other modules
@@ -1768,10 +1771,12 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [wRes, pRes] = await Promise.all([
+    const [wRes, pRes, fd] = await Promise.all([
       loadWeekDays(schoolId),
       loadPeriods(schoolId),
+      loadFirstDayOfWeek(schoolId),
     ])
+    setFirstDay(fd)
     if (wRes.error || pRes.error) { setError(wRes.error ?? pRes.error); setLoading(false); return }
     setWeekDays(wRes.data.map(d => d.day_of_week))
     setPeriods(pRes.data)
@@ -1849,7 +1854,11 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
   async function handleSaveDays() {
     setDaysSaving(true)
     setDaysError(null)
-    const res = await saveWeekDays(schoolId, weekDays)
+    const [res, fdRes] = await Promise.all([
+      saveWeekDays(schoolId, weekDays),
+      saveFirstDayOfWeek(schoolId, firstDay),
+    ])
+    if (!res.error && fdRes.error) res.error = fdRes.error
     if (res.error) setDaysError(res.error)
     else { setDaysSaved(true); setTimeout(() => setDaysSaved(false), 3000) }
     setDaysSaving(false)
@@ -1954,7 +1963,7 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
         <span className="set-collapsible-summary">
           {weekDays.length === 0
             ? 'Not set'
-            : weekDays.slice().sort().map(d => DAY_NAMES[d]).join(', ')}
+            : orderedWeekDays(firstDay).filter(d => weekDays.includes(d)).map(d => DAY_NAMES[d]).join(', ')}
         </span>
         <button type="button" className="set-collapsible-toggle" aria-expanded={weekDaysOpen}>
           {weekDaysOpen ? 'Hide' : 'Edit week days'}
@@ -1966,8 +1975,19 @@ function ScheduleTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
             Which weekdays count as school days for this school — used everywhere attendance,
             calendars, and term progress are calculated. Change carefully.
           </p>
+          <label className="set-field-hint" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
+            Week starts on
+            <select
+              className="set-select"
+              style={{ width: 'auto', minHeight: 'auto', padding: '6px 10px' }}
+              value={firstDay}
+              onChange={e => setFirstDay(Number(e.target.value))}
+            >
+              {[1, 6, 0, 2, 3, 4, 5].map(d => <option key={d} value={d}>{DAY_NAMES[d]}</option>)}
+            </select>
+          </label>
           <div className="set-day-chips">
-            {[0, 1, 2, 3, 4, 5, 6].map(d => (
+            {orderedWeekDays(firstDay).map(d => (
               <button
                 key={d}
                 className={`set-day-chip${weekDays.includes(d) ? ' set-day-chip--on' : ''}`}

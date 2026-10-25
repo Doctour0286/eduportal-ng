@@ -25,6 +25,7 @@
  *   8. Staff accounts
  */
 
+import { NAME_PREFIXES, composeName } from '../lib/namePrefix'
 import React, { useState, useEffect } from 'react'
 import { Icon } from '../components/icons'
 import {
@@ -1778,26 +1779,29 @@ function Step8Staff({
     setSelectedRoles((prev) => prev.includes(id) ? prev.filter((r) => r !== id) : [...prev, id])
   }
 
+  const [namePrefix, setNamePrefix] = useState('')
+
   async function handleAddStaff() {
     if (!fullName.trim()) { setError('Enter the staff member\'s full name'); return }
     if (!email.trim()) { setError('Enter their email address'); return }
     setSaving(true)
     setError(null)
     const result = await createStaffMember(schoolId, {
-      full_name: fullName.trim(),
+      full_name: composeName(namePrefix, fullName),
       email: email.trim(),
       role_ids: selectedRoles,
     })
     setSaving(false)
     if (!result.ok) { setError(result.error ?? 'Could not create account'); return }
     setStaffList([...staffList, {
-      full_name: fullName.trim(),
+      full_name: composeName(namePrefix, fullName),
       email: email.trim(),
       role_ids: selectedRoles,
       tempPassword: result.tempPassword,
       saved: true,
     }])
     setFullName('')
+    setNamePrefix('')
     setEmail('')
     setSelectedRoles([])
   }
@@ -1850,6 +1854,14 @@ function Step8Staff({
 
         {/* Add staff form */}
         <div className="staff-add-form">
+          <label className="form-label">
+            Prefix (optional)
+            <select className="form-input" value={namePrefix} onChange={(e) => setNamePrefix(e.target.value)}>
+              <option value="">None</option>
+              {NAME_PREFIXES.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+
           <label className="form-label">
             Full name
             <input

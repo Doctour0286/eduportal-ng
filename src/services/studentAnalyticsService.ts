@@ -29,7 +29,8 @@ import {
   type PortalSession,
   type PortalTerm,
 } from './portalService'
-import { loadAttendanceDeactivationSettings } from './settingsService'
+import { loadAttendanceDeactivationSettings, loadFirstDayOfWeek } from './settingsService'
+import { orderedWeekDays } from '../lib/weekOrder'
 import { loadRulesContext, resolveEffectiveRule } from './attendanceRules'
 import { formatObligationAmount, loadStudentObligations } from './obligationsService'
 
@@ -252,11 +253,10 @@ async function settle<T>(fn: () => Promise<T>): Promise<SectionResult<T>> {
 // ─── Attendance ──────────────────────────────────────────────────────────────
 
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0]
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 async function buildAttendance(schoolId: string, studentId: string, range: DateRange): Promise<AttendanceDetail> {
-  const [summary, recRes, dayMapRes] = await Promise.all([
+  const [summary, recRes, dayMapRes, firstDay] = await Promise.all([
     loadAttendanceSummary(schoolId, studentId, range.from, range.to),
     supabase
       .from('attendance_records')
@@ -266,6 +266,7 @@ async function buildAttendance(schoolId: string, studentId: string, range: DateR
       .gte('date', range.from)
       .lte('date', range.to),
     getSchoolDayMap(range.from, range.to, schoolId),
+    loadFirstDayOfWeek(schoolId),
   ])
   if (recRes.error) throw new Error(recRes.error.message)
 
@@ -294,7 +295,7 @@ async function buildAttendance(schoolId: string, studentId: string, range: DateR
     if (d.status === 'late') late += 1
     perDow.set(dow, bucket)
   }
-  const byWeekday = DOW_ORDER.filter(dow => perDow.has(dow)).map(dow => {
+  const byWeekday = orderedWeekDays(firstDay).filter(dow => perDow.has(dow)).map(dow => {
     const b = perDow.get(dow)!
     const marked = b.present + b.absent
     return {

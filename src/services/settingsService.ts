@@ -1126,6 +1126,25 @@ export async function saveWeekDays(schoolId: string, days: number[]): Promise<{ 
   return { error: error?.message ?? null }
 }
 
+/** 0 = Sunday ... 6 = Saturday. Defaults to Monday if the column isn't there yet. */
+export async function loadFirstDayOfWeek(schoolId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('schools')
+    .select('first_day_of_week')
+    .eq('id', schoolId)
+    .maybeSingle()
+  if (error || !data || typeof data.first_day_of_week !== 'number') return 1
+  return data.first_day_of_week
+}
+
+export async function saveFirstDayOfWeek(schoolId: string, day: number): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('schools')
+    .update({ first_day_of_week: day, updated_at: new Date().toISOString() })
+    .eq('id', schoolId)
+  return { error: error?.message ?? null }
+}
+
 export async function loadPeriods(schoolId: string): Promise<{ data: Period[]; error: string | null }> {
   const { data, error } = await supabase
     .from('periods')
