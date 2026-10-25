@@ -87,7 +87,8 @@ import {
   type LivePeriodState,
 } from '../services/timetableService'
 import { printTimetable } from '../services/printTimetable'
-import { loadStaffPreferences, type StaffPreferences } from '../services/settingsService'
+import { loadStaffPreferences, loadFirstDayOfWeek, type StaffPreferences } from '../services/settingsService'
+import SchoolTimetableOverview from './SchoolTimetableOverview'
 // Tier 8 / Problem 8.4 (Session 48): exam timetable surfaces read-only here.
 import { loadExamEntries, type ExamEntry } from '../services/assessmentService'
 import { Modal } from '../components/Modal'
@@ -115,7 +116,7 @@ interface TimetableModuleProps {
 
 // ─── View mode ────────────────────────────────────────────────────────────────
 
-type ViewMode = 'class' | 'teacher'
+type ViewMode = 'class' | 'teacher' | 'school'
 
 // ─── Armed chip: what's currently selected in the tray ───────────────────────
 // null   = nothing armed
@@ -138,6 +139,8 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
 
   // ── View state ────────────────────────────────────────────────────────────────
   const [viewMode, setViewMode]               = useState<ViewMode>('class')
+  const [firstDay, setFirstDay]               = useState(1)
+  useEffect(() => { void loadFirstDayOfWeek(schoolId).then(setFirstDay) }, [schoolId])
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null)
 
@@ -338,8 +341,8 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   // ─── Print current view ───────────────────────────────────────────────────────
 
   function handlePrint() {
-    if (!ttData) return
-    const mode = editMode ? 'class' : viewMode
+    if (!ttData || viewMode === 'school') return
+    const mode: 'class' | 'teacher' = editMode ? 'class' : viewMode
     const classNode = classNodes.find(n => n.id === selectedClassId)
     const staffMember = staffList.find(s => s.id === selectedStaffId)
     printTimetable({ mode, classNode, staffMember, schoolName, sessionName, data: ttData })
@@ -563,7 +566,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
                 Today ↓
               </button>
             )}
-            {!editMode && ttData && (ttData.entries.length > 0) && (
+            {!editMode && viewMode !== 'school' && ttData && (ttData.entries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint} aria-label="Print timetable">
                 <Icon name="printer" size={18} />
               </button>
@@ -596,11 +599,17 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
             >
               Teacher view
             </button>
+            <button
+              className={`tt-toggle-btn${viewMode === 'school' ? ' tt-toggle-btn--active' : ''}`}
+              onClick={() => setViewMode('school')}
+            >
+              Whole school
+            </button>
           </div>
         )}
 
         {/* Selector */}
-        {(viewMode === 'class' || editMode) ? (
+        {viewMode === 'school' && !editMode ? null : (viewMode === 'class' || editMode) ? (
           <div className="tt-selector-row">
             <label className="tt-selector-label">Class</label>
             <select
@@ -688,6 +697,9 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
 
       {/* ── Grid ────────────────────────────────────────────────────────────── */}
       <div className="tt-grid-wrapper" ref={scrollRef}>
+        {viewMode === 'school' && !editMode && ttData ? (
+          <SchoolTimetableOverview data={ttData} classes={leafNodes} firstDay={firstDay} />
+        ) : (
         <TimetableGrid
           data={ttData!}
           viewMode={editMode ? 'class' : viewMode}
@@ -704,6 +716,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
           onConfirmClear={handleConfirmClear}
           onCancelClear={() => setPendingClearId(null)}
         />
+        )}
       </div>
 
       {/* ── Read-only lesson detail popup (Session 24) ─────────────────────── */}

@@ -22291,3 +22291,27 @@ body {
 .account-notif-body { font-size: var(--text-xs); color: var(--color-text-secondary); }
 .account-notif-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
 .account-notif-empty { margin: 0; padding: var(--space-2) 0; font-size: var(--text-sm); color: var(--color-text-secondary); text-align: center; }
+
+/* Whole-school timetable overview */
+.tto { display: flex; flex-direction: column; gap: var(--space-3); }
+.tto-days { display: flex; flex-wrap: wrap; gap: 6px; }
+.tto-day { padding: 6px 12px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface); color: var(--color-text-secondary); font-size: var(--text-sm); cursor: pointer; }
+.tto-day--on { background: var(--color-brand-600); border-color: var(--color-brand-600); color: #fff; font-weight: 600; }
+.tto-day-title { margin: 0 0 var(--space-2); font-size: var(--text-base); font-weight: 600; color: var(--color-text-primary); }
+.tto-scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
+.tto-table { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: var(--text-xs); }
+.tto-table th, .tto-table td { border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); padding: 6px 8px; text-align: left; vertical-align: top; }
+.tto-corner, .tto-class { position: sticky; left: 0; z-index: 2; background: var(--color-bg-subtle); min-width: 84px; font-weight: 600; color: var(--color-text-primary); }
+.tto-corner { top: 0; z-index: 3; }
+.tto-th { position: sticky; top: 0; z-index: 1; background: var(--color-bg-subtle); min-width: 110px; }
+.tto-th--break { min-width: 44px; background: var(--color-border); }
+.tto-p-label { display: block; font-weight: 600; color: var(--color-text-primary); }
+.tto-p-time { display: block; color: var(--color-text-secondary); font-weight: 400; }
+.tto-cell { min-width: 110px; }
+.tto-cell--break { background: var(--color-bg-subtle); min-width: 44px; }
+.tto-cell--empty { color: var(--color-text-secondary); text-align: center; }
+.tto-cell--free { background: var(--color-bg-subtle); }
+.tto-cell--clash { outline: 2px solid #e24b4a; outline-offset: -2px; }
+.tto-subject { display: block; font-weight: 600; color: var(--color-text-primary); }
+.tto-teacher { display: block; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.tto-note, .tto-empty { margin: 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
