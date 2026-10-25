@@ -3,15 +3,18 @@ import {
   availablePresets,
   loadDurationContext,
   loadStudentAnalytics,
+  loadStudentIdentity,
   resolveRange,
   type AnalyticsFlag,
   type DurationContext,
   type DurationPreset,
   type FlagSection,
   type StudentAnalytics,
+  type StudentIdentity,
   type SubjectAnalytics,
 } from '../services/studentAnalyticsService'
 import { formatNaira } from '../services/portalService'
+import { getStudentPhotoSignedUrl } from '../services/studentsService'
 
 /**
  * Analytics tab on the student detail: one page that answers "is anything
@@ -85,7 +88,27 @@ export default function StudentAnalyticsTab({
   const [data, setData] = useState<StudentAnalytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [identity, setIdentity] = useState<StudentIdentity | null>(null)
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null)
+  const [showAllPayments, setShowAllPayments] = useState(false)
   const sectionRefs = useRef<Record<FlagSection, HTMLElement | null>>({ attendance: null, academics: null, fees: null, record: null })
+
+  // Passport + identity header. photo_url is a private-bucket path, so it
+  // has to be turned into a short-lived signed URL before it can render.
+  useEffect(() => {
+    let cancelled = false
+    setIdentity(null)
+    setPhotoUrl(null)
+    void loadStudentIdentity(studentId).then(async id => {
+      if (cancelled || !id) return
+      setIdentity(id)
+      if (id.photo_path) {
+        const url = await getStudentPhotoSignedUrl(id.photo_path)
+        if (!cancelled) setPhotoUrl(url)
+      }
+    })
+    return () => { cancelled = true }
+  }, [studentId])
 
   useEffect(() => {
     let cancelled = false
@@ -128,6 +151,24 @@ export default function StudentAnalyticsTab({
 
   return (
     <div className="stu-detail-tab-content san">
+      {/* Identity + passport */}
+      <div className="san-id">
+        <div className="san-photo" aria-hidden={!photoUrl}>
+          {photoUrl
+            ? <img src={photoUrl} alt={`${studentName} passport photograph`} />
+            : <span>{(identity?.full_name ?? studentName).charAt(0).toUpperCase()}</span>}
+        </div>
+        <div className="san-id-text">
+          <p className="san-id-name">{identity?.full_name ?? studentName}</p>
+          <p className="san-id-meta">
+            {[identity?.class_name, identity?.student_code, identity?.gender].filter(Boolean).join(' · ')}
+          </p>
+        </div>
+        {identity && identity.status !== 'active' && (
+          <span className="san-id-status">{identity.status === 'inactive' ? 'Inactive' : identity.status}</span>
+        )}
+      </div>
+
       {/* Duration filter */}
       <div className="san-filter">
         <div className="san-chips" role="group" aria-label="Duration">
@@ -161,6 +202,20 @@ export default function StudentAnalyticsTab({
 
       {data && (
         <div className={loading ? 'san-body san-body--loading' : 'san-body'}>
+          {/* Outstanding fees — impossible to miss */}
+          {canSeeFinanceAndConduct && fees && fees.summary.balance > 0 && fees.summary.totalBilled > 0 && (
+            <div className="san-owing" role="alert">
+              <div>
+                <p className="san-owing-label">Outstanding fees</p>
+                <p className="san-owing-amount">{formatNaira(fees.summary.balance)}</p>
+                <p className="san-owing-sub">
+                  of {formatNaira(fees.summary.totalBilled - fees.summary.totalDiscount)} billed this session · {formatNaira(fees.summary.totalPaid)} paid
+                </p>
+              </div>
+              <button type="button" className="san-owing-btn" onClick={() => jump('fees')}>View payments</button>
+            </div>
+          )}
+
           {/* Attention strip */}
           {data.flags.length > 0 && (
             <div className="san-attn" role="status">
@@ -189,7 +244,7 @@ export default function StudentAnalyticsTab({
             </div>
             {canSeeFinanceAndConduct && (
               <>
-                <div className="san-tile">
+                <div className={`san-tile${fees && fees.summary.balance > 0 && fees.summary.totalBilled > 0 ? ' san-tile--alert' : ''}`}>
                   <span className="san-tile-label">Fees</span>
                   <span className="san-tile-value">
                     {fees && fees.summary.totalBilled > 0
@@ -324,19 +379,40 @@ export default function StudentAnalyticsTab({
                     {' · paid '}{formatNaira(fees.summary.totalPaid)} · balance {formatNaira(fees.summary.balance)}
                   </p>
                   <p className="san-note">Billed, paid and balance are for the whole session. Payments below follow the range you picked.</p>
-                  <p className="san-sub">Received in range: {formatNaira(fees.paidInRange)}</p>
-                  {fees.paymentsInRange.length === 0 ? (
-                    <p className="san-empty">No payments in this range.</p>
-                  ) : (
-                    <ul className="san-plain">
-                      {fees.paymentsInRange.map(p => (
-                        <li key={p.id}>
-                          <span>{p.paid_at ? fmtFull(p.paid_at) : ''} · {p.fee_head_name ?? 'Payment'} · {p.method}</span>
-                          <strong>{formatNaira(p.amount)}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  {(() => {
+                    const list = showAllPayments ? fees.allPayments : fees.paymentsInRange
+                    return (
+                      <>
+                        <p className="san-sub">
+                          {showAllPayments ? `Full payment history (${fees.allPayments.length})` : `Received in range: ${formatNaira(fees.paidInRange)}`}
+                        </p>
+                        {list.length === 0 ? (
+                          <p className="san-empty">{showAllPayments ? 'No payments recorded yet.' : 'No payments in this range.'}</p>
+                        ) : (
+                          <ul className="san-pay-list">
+                            {list.map(p => (
+                              <li key={p.id} className="san-pay">
+                                <div className="san-pay-top">
+                                  <span>{p.paid_at ? fmtFull(p.paid_at) : 'Undated'} · {p.fee_head_name ?? 'Payment'}</span>
+                                  <strong>{formatNaira(p.amount)}</strong>
+                                </div>
+                                <span className="san-pay-meta">
+                                  {p.method}
+                                  {p.received_by_name ? ` · recorded by ${p.received_by_name}` : ' · online payment'}
+                                  {p.notes ? ` · ${p.notes}` : ''}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {fees.allPayments.length > fees.paymentsInRange.length || showAllPayments ? (
+                          <button type="button" className="san-link" onClick={() => setShowAllPayments(v => !v)}>
+                            {showAllPayments ? 'Show only the selected range' : `Show full history (${fees.allPayments.length})`}
+                          </button>
+                        ) : null}
+                      </>
+                    )
+                  })()}
                 </>
               )}
             </section>

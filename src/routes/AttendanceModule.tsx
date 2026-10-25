@@ -1031,9 +1031,10 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       new Date(d.length > 10 ? d : d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
     const fmtShort = (d: string) =>
       new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-    const daysSince = (iso: string) =>
-      Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000))
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+    // "12 school days (2 wks)" — school days first, whole weeks in brackets.
+    const duration = (st: SuspendedStudent) =>
+      `${plural(st.school_days_inactive, 'school day')} (${st.weeks_inactive < 1 ? '<1 wk' : `${st.weeks_inactive} wk${st.weeks_inactive === 1 ? '' : 's'}`})`
 
     return (
       <div className="att-susp-panel">
@@ -1059,14 +1060,13 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
               const count = mode === 'consecutive' ? st.consecutive_count : st.cumulative_count
               const pct = Math.min(100, Math.round((count / Math.max(1, threshold)) * 100))
               const open = reactivateId === st.student_id
-              const days = daysSince(st.inactivated_at)
               return (
                 <li key={st.student_id} className="att-susp-item">
                   <div className="att-susp-row">
                     <div className="att-susp-who">
                       <span className="att-susp-name">{st.full_name}</span>
                       <span className="att-susp-class">
-                        Suspended {fmtDate(st.inactivated_at)}{st.inactivated_approx ? ' (approx.)' : ''}
+                        Suspended {fmtDate(st.inactivated_at)}{st.inactivated_approx ? ' (approx.)' : ''} · {duration(st)}
                       </span>
                     </div>
                     <button
@@ -1081,7 +1081,15 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
                   {open && (
                     <div className="att-susp-preview">
                       <p className="att-susp-days">
-                        Inactive for <strong>{plural(days, 'day')}</strong>
+                        Inactive for <strong>{duration(st)}</strong>
+                        {' · '}
+                        <button
+                          type="button"
+                          className="att-susp-link"
+                          onClick={() => setAnalyticsFor({ id: st.student_id, name: st.full_name })}
+                        >
+                          View analytics
+                        </button>
                       </p>
 
                       <div className="att-susp-bar" role="img"

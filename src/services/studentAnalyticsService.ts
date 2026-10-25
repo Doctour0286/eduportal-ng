@@ -21,13 +21,11 @@ import { getSchoolDayMap } from './attendanceService'
 import {
   loadAttendanceSummary,
   loadFeeSummary,
-  loadPaymentHistory,
   loadCurrentSession,
   loadTermsForSession,
   loadSchoolUsesTerms,
   type AttendanceSummary,
   type FeeSummary,
-  type PaymentHistoryRow,
   type PortalSession,
   type PortalTerm,
 } from './portalService'
@@ -188,10 +186,30 @@ export interface AcademicsDetail {
   termAverages: { termId: string; termName: string; average: number | null }[]
 }
 
+export interface FeePayment {
+  id: string
+  amount: number
+  method: string
+  paid_at: string | null
+  notes: string | null
+  fee_head_name: string | null
+  received_by_name: string | null
+}
+
 export interface FeesDetail {
   summary: FeeSummary
-  paymentsInRange: PaymentHistoryRow[]
+  allPayments: FeePayment[]          // full history, newest first
+  paymentsInRange: FeePayment[]
   paidInRange: number
+}
+
+export interface StudentIdentity {
+  full_name: string
+  photo_path: string | null
+  student_code: string | null
+  class_name: string | null
+  status: string
+  gender: string | null
 }
 
 export type RecordKind = 'suspended' | 'reactivated' | 'fine' | 'task' | 'resolved'
@@ -429,16 +447,64 @@ async function buildAcademics(
 
 async function buildFees(schoolId: string, studentId: string, range: DateRange, ctx: DurationContext): Promise<FeesDetail> {
   if (!ctx.session) throw new Error('No current session is set up yet.')
-  const [summary, payments] = await Promise.all([
+  const [summary, payRes] = await Promise.all([
     loadFeeSummary(schoolId, studentId, ctx.session.id),
-    loadPaymentHistory(schoolId, studentId),
+    supabase
+      .from('payments')
+      .select('id, amount, method, paid_at, notes, received_by, fee_assignments ( fee_heads ( name ) )')
+      .eq('school_id', schoolId)
+      .eq('student_id', studentId)
+      .eq('status', 'completed')
+      .order('paid_at', { ascending: false }),
   ])
-  const inRange = payments.filter(p => {
+  if (payRes.error) throw new Error(payRes.error.message)
+
+  const staffIds = [...new Set((payRes.data ?? []).map(p => p.received_by).filter(Boolean))] as string[]
+  const names = new Map<string, string>()
+  if (staffIds.length > 0) {
+    const { data } = await supabase.from('staff').select('id, full_name').in('id', staffIds)
+    for (const st of data ?? []) names.set(st.id as string, st.full_name as string)
+  }
+
+  const one = (x: any) => (Array.isArray(x) ? x[0] : x)
+  const allPayments: FeePayment[] = (payRes.data ?? []).map((p: any) => ({
+    id: p.id,
+    amount: Number(p.amount),
+    method: p.method,
+    paid_at: p.paid_at ?? null,
+    notes: p.notes ?? null,
+    fee_head_name: one(one(p.fee_assignments)?.fee_heads)?.name ?? null,
+    // Gateway payments (e.g. Remita) have no staff recorder.
+    received_by_name: p.received_by ? (names.get(p.received_by) ?? null) : null,
+  }))
+  const paymentsInRange = allPayments.filter(p => {
     if (!p.paid_at) return false
     const d = p.paid_at.slice(0, 10)
     return d >= range.from && d <= range.to
   })
-  return { summary, paymentsInRange: inRange, paidInRange: inRange.reduce((n, p) => n + p.amount, 0) }
+  return { summary, allPayments, paymentsInRange, paidInRange: paymentsInRange.reduce((n, p) => n + p.amount, 0) }
+}
+
+export async function loadStudentIdentity(studentId: string): Promise<StudentIdentity | null> {
+  const { data } = await supabase
+    .from('students')
+    .select('full_name, photo_url, student_code, status, gender, class_node_id')
+    .eq('id', studentId)
+    .maybeSingle()
+  if (!data) return null
+  let className: string | null = null
+  if (data.class_node_id) {
+    const { data: node } = await supabase.from('class_nodes').select('name').eq('id', data.class_node_id).maybeSingle()
+    className = (node?.name as string | undefined) ?? null
+  }
+  return {
+    full_name: data.full_name as string,
+    photo_path: (data.photo_url as string | null) ?? null,
+    student_code: (data.student_code as string | null) ?? null,
+    class_name: className,
+    status: data.status as string,
+    gender: (data.gender as string | null) ?? null,
+  }
 }
 
 // ─── Record (suspensions, fines, tasks) ──────────────────────────────────────

@@ -567,6 +567,8 @@ export interface SuspendedStudent {
   last_absent_date: string | null
   inactivated_at: string          // ISO; falls back to last absence if no history row
   inactivated_approx: boolean
+  school_days_inactive: number    // school days since the suspension (calendar-aware)
+  weeks_inactive: number          // whole calendar weeks, shown in brackets
 }
 
 export interface StatusHistoryEvent {
@@ -634,9 +636,26 @@ export async function loadSuspendedStudents(
         last_absent_date: r.last_absent_date ?? null,
         inactivated_at: l?.at ?? (r.last_absent_date ? r.last_absent_date + 'T12:00:00' : new Date().toISOString()),
         inactivated_approx: l ? l.approx : true,
+        school_days_inactive: 0,
+        weeks_inactive: 0,
       }
     })
     out.sort((a, b) => b.inactivated_at.localeCompare(a.inactivated_at))
+
+    // School days (not calendar days) each student has been out, using the
+    // school calendar so weekends, holidays and non-school days don't count.
+    const today = todayDateString()
+    const earliest = out.reduce((m, x) => (x.inactivated_at.slice(0, 10) < m ? x.inactivated_at.slice(0, 10) : m), today)
+    const dayMapRes = await getSchoolDayMap(earliest, today, schoolId)
+    const schoolDays = dayMapRes.ok
+      ? [...dayMapRes.data.entries()].filter(([, isDay]) => isDay).map(([d]) => d).sort()
+      : []
+    for (const st of out) {
+      const since = st.inactivated_at.slice(0, 10)
+      st.school_days_inactive = schoolDays.filter(d => d > since && d <= today).length
+      const calDays = Math.max(0, Math.floor((new Date(today).getTime() - new Date(since).getTime()) / 86_400_000))
+      st.weeks_inactive = Math.floor(calDays / 7)
+    }
     return { ok: true, data: out }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to load suspended students' }
