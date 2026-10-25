@@ -35,6 +35,8 @@
  *     — once applied they are permanent; UI warns clearly before applying)
  */
 
+import { FeeMassActionDialog, FeeActionHistory } from './FeeMassActionsPanel'
+import type { MassAction } from '../services/feeMassActionsService'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
@@ -258,6 +260,12 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   const [feeHeads,       setFeeHeads]       = useState<FeeHead[]>([])
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [terms,          setTerms]          = useState<Term[]>([])
+  // Mass actions on fee assignments (edit amount / waive / exempt / unassign).
+  const actorStaffId = useAuthStore(s => s.actorRecordId)
+  const [selectedIds,    setSelectedIds]    = useState<Set<string>>(new Set())
+  const [massAction,     setMassAction]     = useState<MassAction | null>(null)
+  const [historyKey,     setHistoryKey]     = useState(0)
+  const [massNotice,     setMassNotice]     = useState('')
   // Balances period filter. Default 'current' = the current session; the
   // other values are 'term:<id>', 'session:<id>' (a past session), 'all'
   // (all time) and 'range' (fees falling due between two dates).
@@ -1156,6 +1164,10 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
                     <span className="fin-balance-chip fin-balance-chip--owing">
                       Owes {formatNaira(b.balance)}
                     </span>
+                  ) : b.credit > 0 ? (
+                    <span className="fin-balance-chip fin-balance-chip--clear">
+                      Credit {formatNaira(b.credit)}
+                    </span>
                   ) : b.assigned_total === 0 ? (
                     <span className="fin-balance-chip fin-balance-chip--nil">
                       No fees
@@ -1187,6 +1199,33 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           </div>
         )}
 
+        {(canManageFees || canApplyDiscounts) && assignments.length > 0 && (
+          <div className="fma-toolbar">
+            <label className="fma-selectall">
+              <input
+                type="checkbox"
+                checked={selectedIds.size > 0 && selectedIds.size === assignments.length}
+                onChange={e => setSelectedIds(e.target.checked ? new Set(assignments.map(a => a.id)) : new Set())}
+              />
+              {selectedIds.size > 0 ? `${selectedIds.size} selected` : 'Select all'}
+            </label>
+            {selectedIds.size > 0 && (
+              <div className="fma-toolbar-actions">
+                {canManageFees && <button type="button" className="fma-tbtn" onClick={() => setMassAction('edit_amount')}>Edit amount</button>}
+                {canApplyDiscounts && <button type="button" className="fma-tbtn" onClick={() => setMassAction('waive')}>Waive</button>}
+                {canManageFees && <button type="button" className="fma-tbtn" onClick={() => setMassAction('exempt')}>Exempt</button>}
+                {canManageFees && <button type="button" className="fma-tbtn fma-tbtn--danger" onClick={() => setMassAction('unassign')}>Unassign</button>}
+                <button type="button" className="fma-tbtn" onClick={() => setSelectedIds(new Set())}>Clear</button>
+              </div>
+            )}
+          </div>
+        )}
+        {massNotice && (
+          <p className="fma-notice" role="status">
+            {massNotice} <button type="button" className="fma-link" onClick={() => setMassNotice('')}>Dismiss</button>
+          </p>
+        )}
+
         {assignmentsState === 'loading' || assignmentsState === 'booting' ? (
           <div className="fin-list-skel">
             {[1,2,3,4].map(i => <div key={i} className="fin-row-skel skeleton" />)}
@@ -1208,7 +1247,20 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
         ) : (
           <ul className="fin-assignment-list">
             {assignments.map(a => (
-              <li key={a.id} className="fin-assignment-row">
+              <li key={a.id} className={`fin-assignment-row${selectedIds.has(a.id) ? ' fin-assignment-row--selected' : ''}`}>
+                {(canManageFees || canApplyDiscounts) && (
+                  <input
+                    type="checkbox"
+                    className="fma-check"
+                    aria-label={`Select ${a.fee_head_name}`}
+                    checked={selectedIds.has(a.id)}
+                    onChange={e => setSelectedIds(prev => {
+                      const next = new Set(prev)
+                      if (e.target.checked) next.add(a.id); else next.delete(a.id)
+                      return next
+                    })}
+                  />
+                )}
                 <div className="fin-assignment-row-main">
                   <span className="fin-assignment-name">{a.fee_head_name}</span>
                   <span className="fin-assignment-amount">{formatNaira(a.amount)}</span>
@@ -1234,6 +1286,39 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
               </li>
             ))}
           </ul>
+        )}
+
+        {canManageFees && selectedIds.size === 0 && assignments.length > 0 && (
+          <p className="fma-tip">Tick one or more fees to edit their amount, waive, exempt or unassign them — for one student, one class, or everyone.</p>
+        )}
+
+        {(canManageFees || canApplyDiscounts) && currentSession && (
+          <FeeActionHistory
+            schoolId={schoolId}
+            staffId={actorStaffId ?? null}
+            refreshKey={historyKey}
+            onUndone={() => { void loadAssignmentList(); void loadBalances(); setHistoryKey(k => k + 1) }}
+          />
+        )}
+
+        {massAction && (
+          <FeeMassActionDialog
+            open
+            action={massAction}
+            assignments={assignments.filter(a => selectedIds.has(a.id))}
+            schoolId={schoolId}
+            staffId={actorStaffId ?? null}
+            classes={classes}
+            onClose={() => setMassAction(null)}
+            onDone={summary => {
+              setMassAction(null)
+              setSelectedIds(new Set())
+              setMassNotice(summary)
+              setHistoryKey(k => k + 1)
+              void loadAssignmentList()
+              void loadBalances()
+            }}
+          />
         )}
       </div>
     )

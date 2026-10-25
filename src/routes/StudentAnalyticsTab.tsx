@@ -270,7 +270,7 @@ export default function StudentAnalyticsTab({
                       ? `${Math.round((fees.summary.totalPaid / Math.max(1, fees.summary.totalBilled - fees.summary.totalDiscount)) * 100)}% paid`
                       : '—'}
                   </span>
-                  <span className="san-tile-sub">{fees ? (fees.summary.balance > 0 ? `${formatNaira(fees.summary.balance)} left` : 'Nothing owed') : ''}</span>
+                  <span className="san-tile-sub">{fees ? (fees.summary.balance > 0 ? `${formatNaira(fees.summary.balance)} left` : fees.summary.credit > 0 ? `Credit ${formatNaira(fees.summary.credit)}` : 'Nothing owed') : ''}</span>
                 </div>
                 <div className="san-tile">
                   <span className="san-tile-label">Conduct</span>

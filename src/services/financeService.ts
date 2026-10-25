@@ -91,7 +91,8 @@ export interface StudentBalance {
   assigned_total: number    // sum of fee_assignments that apply to this student
   discount_total: number    // sum of approved fee_discounts
   paid_total: number        // sum of completed payments
-  balance: number           // assigned - discount - paid
+  balance: number           // assigned - discount - paid (never below zero)
+  credit: number            // paid + waived beyond what is now owed — an overpayment held as credit
 }
 
 export interface Payment {
@@ -275,6 +276,7 @@ export async function loadFeeAssignments(params: {
         programme_levels ( level_label )
       `)
       .eq('session_id', params.sessionId)
+      .is('voided_at', null)
       .order('created_at', { ascending: false })
 
     if (params.termId) {
@@ -441,6 +443,7 @@ export async function loadStudentBalances(params: {
     let assignmentQuery = supabase
       .from('fee_assignments')
       .select('id, target_type, class_node_id, student_id, programme_id, programme_level_id, amount')
+      .is('voided_at', null)
     if (period.kind === 'session') assignmentQuery = assignmentQuery.eq('session_id', period.sessionId)
     else if (period.kind === 'term') assignmentQuery = assignmentQuery.eq('session_id', period.sessionId).eq('term_id', period.termId)
     else if (period.kind === 'range') assignmentQuery = assignmentQuery.gte('due_date', period.from).lte('due_date', period.to)
@@ -462,6 +465,7 @@ export async function loadStudentBalances(params: {
       .from('fee_discounts')
       .select('student_id, fee_assignment_id, discount_type, value')
       .in('student_id', studentIds)
+      .is('voided_at', null)
 
     if (discountError) return { ok: false, error: discountError.message }
     const discounts = (discountData ?? []) as Array<{
@@ -470,6 +474,20 @@ export async function loadStudentBalances(params: {
       discount_type: string
       value: string | null
     }>
+
+    // Step 3b: fee exemptions — fees a student must not be billed for at all.
+    const { data: exemptionData, error: exemptionError } = await supabase
+      .from('fee_exemptions')
+      .select('student_id, fee_assignment_id')
+      .in('student_id', studentIds)
+      .is('voided_at', null)
+    if (exemptionError) return { ok: false, error: exemptionError.message }
+    const exemptByStudent = new Map<string, Set<string>>()
+    for (const e of (exemptionData ?? []) as Array<{ student_id: string; fee_assignment_id: string }>) {
+      const set = exemptByStudent.get(e.student_id) ?? new Set<string>()
+      set.add(e.fee_assignment_id)
+      exemptByStudent.set(e.student_id, set)
+    }
 
     // Step 4: load completed payments for these students in this session date range
     // We join through session dates to scope payments — but payments don't have session_id,
@@ -499,7 +517,9 @@ export async function loadStudentBalances(params: {
         : null
 
       // Assignments that apply to this student
+      const exempt = exemptByStudent.get(student.id)
       const applicable = assignments.filter(a => {
+        if (exempt?.has(a.id)) return false
         if (a.target_type === 'school_wide') return true
         if (a.target_type === 'class_node' && a.class_node_id === student.class_node_id) return true
         if (a.target_type === 'student' && a.student_id === student.id) return true
@@ -543,7 +563,9 @@ export async function loadStudentBalances(params: {
                      (!p.fee_assignment_id || sessionAssignmentIds.has(p.fee_assignment_id)))
         .reduce((sum, p) => sum + Number(p.amount), 0)
 
-      const balance = Math.max(0, assigned_total - discount_total - paid_total)
+      const net = assigned_total - discount_total - paid_total
+      const balance = Math.max(0, net)
+      const credit = Math.max(0, -net)
 
       return {
         student_id:            student.id,
@@ -560,6 +582,7 @@ export async function loadStudentBalances(params: {
         discount_total,
         paid_total,
         balance,
+        credit,
       }
     })
 
@@ -641,6 +664,7 @@ export async function loadStudentDiscounts(
         staff ( full_name )
       `)
       .eq('student_id', studentId)
+      .is('voided_at', null)
 
     if (error) return { ok: false, error: error.message }
 

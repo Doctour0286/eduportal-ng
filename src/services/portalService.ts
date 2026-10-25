@@ -137,6 +137,8 @@ export interface FeeSummary {
   totalDiscount: number
   totalPaid: number
   balance: number
+  /** Paid more than is now owed (e.g. after a waiver or exemption) — shown as a credit. */
+  credit: number
   breakdown: FeeHeadBreakdown[]
   // Any Remita payment still awaiting server-side verification (bank
   // teller/USSD paid but not yet confirmed, or an online payment whose
@@ -861,8 +863,18 @@ export async function loadFeeSummary(
     .select('id, fee_head_id, amount, target_type, class_node_id, student_id, programme_level_id, fee_heads ( name )')
     .eq('school_id', schoolId)
     .eq('session_id', sessionId)
+    .is('voided_at', null)
+
+  // Fees this student has been exempted from are not billed at all.
+  const { data: exemptionRows } = await supabase
+    .from('fee_exemptions')
+    .select('fee_assignment_id')
+    .eq('student_id', studentId)
+    .is('voided_at', null)
+  const exemptIds = new Set((exemptionRows ?? []).map((r) => r.fee_assignment_id as string))
 
   const applicable = (assignments ?? []).filter((a) => {
+    if (exemptIds.has(a.id)) return false
     if (a.target_type === 'school_wide') return true
     if (a.target_type === 'class_node') return a.class_node_id === classNodeId
     if (a.target_type === 'student') return a.student_id === studentId
@@ -877,6 +889,7 @@ export async function loadFeeSummary(
     .select('fee_assignment_id, discount_type, value')
     .eq('school_id', schoolId)
     .eq('student_id', studentId)
+    .is('voided_at', null)
 
   // Completed payments only, for the real settled balance — a pending
   // Remita RRR must not silently reduce the balance shown here before
@@ -974,6 +987,7 @@ export async function loadFeeSummary(
     totalDiscount,
     totalPaid,
     balance: totalBilled - totalDiscount - totalPaid,
+    credit: Math.max(0, totalPaid + totalDiscount - totalBilled),
     breakdown,
     pendingPayments,
   }
