@@ -31,6 +31,7 @@ import {
 } from './portalService'
 import { loadAttendanceDeactivationSettings, loadFirstDayOfWeek } from './settingsService'
 import { orderedWeekDays } from '../lib/weekOrder'
+import { buildSuspendedChecker, type StatusEventLite } from '../lib/suspensionDays'
 import { loadRulesContext, resolveEffectiveRule } from './attendanceRules'
 import { formatObligationAmount, loadStudentObligations } from './obligationsService'
 
@@ -153,7 +154,7 @@ export type DayStatus = 'present' | 'absent' | 'late' | 'excused' | 'unmarked'
 
 export interface AttendanceDetail {
   summary: AttendanceSummary
-  days: { date: string; status: DayStatus }[]      // school days only
+  days: { date: string; status: DayStatus; suspended?: boolean }[]      // school days only; suspended = auto-absent while suspended
   // One entry per weekday the school actually holds classes (from the school
   // calendar, so a Saturday school or a short week is respected), in
   // Monday-first order. percent = present+late over marked days.
@@ -274,9 +275,37 @@ async function buildAttendance(schoolId: string, studentId: string, range: DateR
   for (const r of recRes.data ?? []) recs.set(r.date, r.status as DayStatus)
   const dayMap = dayMapRes.ok ? dayMapRes.data : new Map<string, boolean>()
 
+  // Suspended students are not on the register, so their days would show as
+  // "not marked". While suspended they are absent by definition: any school
+  // day with no record inside a suspension is counted as absent.
+  let events: StatusEventLite[] = []
+  try {
+    const { data: ev } = await supabase
+      .from('student_status_history')
+      .select('event, created_at')
+      .eq('student_id', studentId)
+    events = (ev ?? []) as StatusEventLite[]
+  } catch { /* history table not available — no auto-absence */ }
+  const isSuspendedDay = buildSuspendedChecker(events, ymd(new Date()))
+
   const days: AttendanceDetail['days'] = []
+  let autoAbsent = 0
   for (let d = range.from; d <= range.to; d = addDays(d, 1)) {
-    if (dayMap.get(d) ?? false) days.push({ date: d, status: recs.get(d) ?? 'unmarked' })
+    if (!(dayMap.get(d) ?? false)) continue
+    const recorded = recs.get(d)
+    if (!recorded && isSuspendedDay(d)) {
+      days.push({ date: d, status: 'absent', suspended: true })
+      autoAbsent += 1
+    } else {
+      days.push({ date: d, status: recorded ?? 'unmarked' })
+    }
+  }
+  if (autoAbsent > 0) {
+    summary.absent += autoAbsent
+    summary.totalMarkable += autoAbsent
+    summary.percent = summary.totalMarkable > 0
+      ? Math.round(((summary.present + summary.late) / summary.totalMarkable) * 100)
+      : null
   }
 
   const perDow = new Map<number, { present: number; absent: number }>()

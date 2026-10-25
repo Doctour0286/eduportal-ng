@@ -613,7 +613,7 @@ export async function loadSuspendedStudents(
     if (!rows || rows.length === 0) return { ok: true, data: [] }
 
     const ids = rows.map(r => r.id)
-    const { data: hist } = await supabase
+    const { data: hist, error: histError } = await supabase
       .from('student_status_history')
       .select('student_id, created_at, approximate')
       .in('student_id', ids)
@@ -635,7 +635,10 @@ export async function loadSuspendedStudents(
         cumulative_count: r.cumulative_absent_count ?? 0,
         last_absent_date: r.last_absent_date ?? null,
         inactivated_at: l?.at ?? (r.last_absent_date ? r.last_absent_date + 'T12:00:00' : new Date().toISOString()),
-        inactivated_approx: l ? l.approx : true,
+        // approximate only when we really have no exact record: a backfilled
+        // row (suspended before status history existed), or none at all.
+        // If the history itself couldn't be read, say so rather than guess.
+        inactivated_approx: histError ? true : l ? l.approx : true,
         school_days_inactive: 0,
         weeks_inactive: 0,
       }

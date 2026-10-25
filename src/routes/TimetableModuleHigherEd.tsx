@@ -57,6 +57,8 @@
  *     hard block, same as the read-only badge above.
  */
 
+import { orderedWeekDays } from '../lib/weekOrder'
+import { loadFirstDayOfWeek } from '../services/settingsService'
 import { useState, useEffect, useCallback } from 'react'
 import {
   loadOfferingTimetable,
@@ -107,9 +109,11 @@ interface TimetableModuleHigherEdProps {
 // sorted 0(Sun)..6(Sat), rather than assuming a fixed Mon-Fri grid that
 // might not match a real school's actual offering days.
 
-function distinctDaysUsed(entries: OfferingTimetableEntry[]): number[] {
+function distinctDaysUsed(entries: OfferingTimetableEntry[], firstDay = 1): number[] {
   const days = new Set(entries.map(e => e.day_of_week))
-  return Array.from(days).sort((a, b) => a - b)
+  // Ordered from the school's chosen first day of the week (Settings → School week).
+  const order = orderedWeekDays(firstDay)
+  return Array.from(days).sort((a, b) => order.indexOf(a) - order.indexOf(b))
 }
 
 // ─── Root component ─────────────────────────────────────────────────────
@@ -121,6 +125,8 @@ export default function TimetableModuleHigherEd({
   currentStudentId = null,
 }: TimetableModuleHigherEdProps) {
   const [sessionName, setSessionName] = useState<string>('')
+  const [firstDay, setFirstDay] = useState(1)
+  useEffect(() => { void loadFirstDayOfWeek(schoolId).then(setFirstDay) }, [schoolId])
   const [offerings, setOfferings] = useState<CourseOffering[]>([])
   const [entries, setEntries] = useState<OfferingTimetableEntry[]>([])
   const [loadState, setLoadState] = useState<'loading' | 'error' | 'empty' | 'ready'>('loading')
@@ -523,7 +529,7 @@ export default function TimetableModuleHigherEd({
 
   const daysToRender = editMode
     ? [0, 1, 2, 3, 4, 5, 6]
-    : distinctDaysUsed(entries)
+    : distinctDaysUsed(entries, firstDay)
 
   return (
     <div className="tt-root">

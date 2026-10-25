@@ -66,7 +66,7 @@
  * app-wide component — see Problem 6.5).
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   loadTimetableData,
   loadClassNodes,
@@ -89,6 +89,7 @@ import {
 import { printTimetable } from '../services/printTimetable'
 import { loadStaffPreferences, loadFirstDayOfWeek, type StaffPreferences } from '../services/settingsService'
 import SchoolTimetableOverview from './SchoolTimetableOverview'
+import { orderedWeekDays } from '../lib/weekOrder'
 // Tier 8 / Problem 8.4 (Session 48): exam timetable surfaces read-only here.
 import { loadExamEntries, type ExamEntry } from '../services/assessmentService'
 import { Modal } from '../components/Modal'
@@ -141,6 +142,12 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   const [viewMode, setViewMode]               = useState<ViewMode>('class')
   const [firstDay, setFirstDay]               = useState(1)
   useEffect(() => { void loadFirstDayOfWeek(schoolId).then(setFirstDay) }, [schoolId])
+  // Grid columns follow the school's chosen first day of the week.
+  const ttDataOrdered = useMemo(() => {
+    if (!ttData) return ttData
+    const order = orderedWeekDays(firstDay)
+    return { ...ttData, weekDays: [...ttData.weekDays].sort((a, b) => order.indexOf(a.day_of_week) - order.indexOf(b.day_of_week)) }
+  }, [ttData, firstDay])
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null)
 
@@ -345,7 +352,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
     const mode: 'class' | 'teacher' = editMode ? 'class' : viewMode
     const classNode = classNodes.find(n => n.id === selectedClassId)
     const staffMember = staffList.find(s => s.id === selectedStaffId)
-    printTimetable({ mode, classNode, staffMember, schoolName, sessionName, data: ttData })
+    printTimetable({ mode, classNode, staffMember, schoolName, sessionName, data: ttDataOrdered ?? ttData })
   }
 
   // ─── Jump to today ──────────────────────────────────────────────────────────
@@ -701,7 +708,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
           <SchoolTimetableOverview data={ttData} classes={leafNodes} firstDay={firstDay} />
         ) : (
         <TimetableGrid
-          data={ttData!}
+          data={ttDataOrdered!}
           viewMode={editMode ? 'class' : viewMode}
           selectedClassId={selectedClassId}
           selectedStaffId={selectedStaffId}

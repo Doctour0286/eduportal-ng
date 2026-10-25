@@ -318,7 +318,7 @@ export default function StudentAnalyticsTab({
                 <>
                   <div className="san-days" aria-label="School days in range">
                     {att.days.map(d => (
-                      <span key={d.date} className={`san-day san-day--${d.status}`} title={`${fmtDay(d.date)}: ${d.status === 'unmarked' ? 'not marked' : d.status}`} />
+                      <span key={d.date} className={`san-day san-day--${d.status}${d.suspended ? ' san-day--suspended' : ''}`} title={`${fmtDay(d.date)}: ${d.suspended ? 'absent (suspended)' : d.status === 'unmarked' ? 'not marked' : d.status}`} />
                     ))}
                   </div>
                   <div className="san-legend">
@@ -327,6 +327,7 @@ export default function StudentAnalyticsTab({
                     <span><i className="san-day san-day--absent" /> Absent</span>
                     <span><i className="san-day san-day--excused" /> Excused</span>
                     <span><i className="san-day san-day--unmarked" /> Not marked</span>
+                    {att.days.some(d => d.suspended) && <span><i className="san-day san-day--absent san-day--suspended" /> Absent (suspended)</span>}
                   </div>
                   <p className="san-facts">
                     {att.summary.absent} absent · {att.lateCount} late · {att.summary.excused} excused · longest absence run {att.longestAbsentRun} day{att.longestAbsentRun === 1 ? '' : 's'}

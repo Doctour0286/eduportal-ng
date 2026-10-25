@@ -22315,3 +22315,4 @@ body {
 .tto-subject { display: block; font-weight: 600; color: var(--color-text-primary); }
 .tto-teacher { display: block; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .tto-note, .tto-empty { margin: 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
+.san-day--suspended { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,0.55) 0 2px, transparent 2px 5px); }
