@@ -43,8 +43,10 @@ import {
   loadFeeHeads,
   loadCurrentSession,
   loadTermsForSession,
+  loadSessions,
   loadFeeAssignments,
   loadStudentBalances,
+  type BalancePeriod,
   loadStudentPayments,
   loadStudentDiscounts,
   loadLeafClasses,
@@ -256,6 +258,13 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   const [feeHeads,       setFeeHeads]       = useState<FeeHead[]>([])
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [terms,          setTerms]          = useState<Term[]>([])
+  // Balances period filter. Default 'current' = the current session; the
+  // other values are 'term:<id>', 'session:<id>' (a past session), 'all'
+  // (all time) and 'range' (fees falling due between two dates).
+  const [allSessions,    setAllSessions]    = useState<Array<{ id: string; name: string; is_current: boolean }>>([])
+  const [periodKey,      setPeriodKey]      = useState('current')
+  const [rangeFrom,      setRangeFrom]      = useState('')
+  const [rangeTo,        setRangeTo]        = useState('')
   const [bootState,      setBootState]      = useState<LoadState>('booting')
   const [bootError,      setBootError]      = useState('')
 
@@ -340,7 +349,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     let cancelled = false
     async function boot() {
       setBootState('loading')
-      const [classesRes, feeHeadsRes, sessionRes, programmeLevelsRes] = await Promise.all([
+      const [classesRes, feeHeadsRes, sessionRes, programmeLevelsRes, sessionsRes] = await Promise.all([
         loadLeafClasses(schoolId),
         loadFeeHeads(),
         loadCurrentSession(),
@@ -348,8 +357,10 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
         // fixed regardless of schoolType, but the secondary-school branch
         // below simply never reads programmeLevelsRes's data.
         loadProgrammeLevels(),
+        loadSessions(),
       ])
       if (cancelled) return
+      if (sessionsRes.ok) setAllSessions(sessionsRes.data.map(x => ({ id: x.id, name: x.name, is_current: x.is_current })))
 
       if (!classesRes.ok) { setBootError(classesRes.error); setBootState('error'); return }
       if (!feeHeadsRes.ok) { setBootError(feeHeadsRes.error); setBootState('error'); return }
@@ -395,10 +406,19 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
       setBalancesState('empty')
       return
     }
+    // A custom range needs both dates; until then keep showing what's loaded.
+    if (periodKey === 'range' && (!rangeFrom || !rangeTo || rangeFrom > rangeTo)) return
+    const period: BalancePeriod =
+      periodKey === 'all'            ? { kind: 'all' }
+      : periodKey === 'range'        ? { kind: 'range', from: rangeFrom, to: rangeTo }
+      : periodKey.startsWith('term:')    ? { kind: 'term', sessionId: currentSession.id, termId: periodKey.slice(5) }
+      : periodKey.startsWith('session:') ? { kind: 'session', sessionId: periodKey.slice(8) }
+      : { kind: 'session', sessionId: currentSession.id }
     setBalancesState('loading')
     const res = await loadStudentBalances({
       schoolId,
       sessionId:    currentSession.id,
+      period,
       classNodeId:  isHigherEd ? null : (filterClass || null),
       classPathMap,
       isHigherEd,
@@ -412,7 +432,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     }
     setBalances(res.data)
     setBalancesState(res.data.length === 0 ? 'empty' : 'ready')
-  }, [currentSession, filterClass, filterProgrammeLevel, classPathMap, isHigherEd, programmeLevelMap])
+  }, [currentSession, filterClass, filterProgrammeLevel, classPathMap, isHigherEd, programmeLevelMap, periodKey, rangeFrom, rangeTo])
 
   useEffect(() => {
     if (bootState === 'ready') loadBalances()
@@ -958,13 +978,60 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
       )
     }
 
-    if (moduleTab === 'balances')   return renderBalances()
+    if (moduleTab === 'balances') {
+      return (
+        <>
+          {renderPeriodFilter()}
+          {renderBalances()}
+        </>
+      )
+    }
     if (moduleTab === 'assignments') return renderAssignments()
     if (moduleTab === 'feeheads')   return renderFeeHeads()
     return null
   }
 
   // ── Balances tab ───────────────────────────────────────────────────────────
+
+  function renderPeriodFilter() {
+    if (!currentSession) return null
+    const pastSessions = allSessions.filter(x => !x.is_current)
+    return (
+      <div className="fin-period">
+        <label className="fin-period-label" htmlFor="fin-period-select">Showing</label>
+        <select
+          id="fin-period-select"
+          className="fin-period-select"
+          value={periodKey}
+          onChange={e => setPeriodKey(e.target.value)}
+        >
+          <option value="current">Current session ({currentSession.name})</option>
+          {terms.map(t => (
+            <option key={t.id} value={`term:${t.id}`}>{t.name} ({currentSession.name})</option>
+          ))}
+          {pastSessions.map(x => (
+            <option key={x.id} value={`session:${x.id}`}>{x.name}</option>
+          ))}
+          <option value="all">All time</option>
+          <option value="range">Custom range…</option>
+        </select>
+        {periodKey === 'range' && (
+          <span className="fin-period-range">
+            <input type="date" className="fin-period-date" value={rangeFrom} onChange={e => setRangeFrom(e.target.value)} aria-label="From" />
+            <span>to</span>
+            <input type="date" className="fin-period-date" value={rangeTo} onChange={e => setRangeTo(e.target.value)} aria-label="To" />
+          </span>
+        )}
+        {periodKey === 'range' && (
+          <p className="fin-period-note">
+            {rangeFrom && rangeTo && rangeFrom <= rangeTo
+              ? 'Fees falling due in this range, with payments made against them. Fees with no due date are not included.'
+              : 'Pick a start and end date.'}
+          </p>
+        )}
+      </div>
+    )
+  }
 
   function renderBalances() {
     if (!currentSession) {

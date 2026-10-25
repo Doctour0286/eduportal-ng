@@ -336,9 +336,25 @@ export async function loadFeeAssignments(params: {
  * Limitation: this function returns all students; the caller should paginate or
  * filter the rendered list for large schools (>200 students).
  */
+/**
+ * What slice of fees the balance view covers.
+ *  session — everything billed for that session (the default: current)
+ *  term    — only fees tied to that term
+ *  all     — every fee ever billed, across all sessions
+ *  range   — fees that fall DUE between the two dates (fees with no due date
+ *            can't be placed in a range, so they're left out)
+ * Payments counted are those made against the fees in scope.
+ */
+export type BalancePeriod =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'term'; sessionId: string; termId: string }
+  | { kind: 'all' }
+  | { kind: 'range'; from: string; to: string }
+
 export async function loadStudentBalances(params: {
   schoolId: string
   sessionId: string
+  period?: BalancePeriod
   classNodeId?: string | null
   classPathMap: Map<string, string>
   // Higher-ed params — mirrors studentsService.ts's loadStudents() SESSION 64
@@ -421,10 +437,14 @@ export async function loadStudentBalances(params: {
 
     // Step 2: load applicable fee assignments
     // We load all four target_type sets in one query and filter client-side
-    const { data: assignmentData, error: assignmentError } = await supabase
+    const period: BalancePeriod = params.period ?? { kind: 'session', sessionId: params.sessionId }
+    let assignmentQuery = supabase
       .from('fee_assignments')
       .select('id, target_type, class_node_id, student_id, programme_id, programme_level_id, amount')
-      .eq('session_id', params.sessionId)
+    if (period.kind === 'session') assignmentQuery = assignmentQuery.eq('session_id', period.sessionId)
+    else if (period.kind === 'term') assignmentQuery = assignmentQuery.eq('session_id', period.sessionId).eq('term_id', period.termId)
+    else if (period.kind === 'range') assignmentQuery = assignmentQuery.gte('due_date', period.from).lte('due_date', period.to)
+    const { data: assignmentData, error: assignmentError } = await assignmentQuery
 
     if (assignmentError) return { ok: false, error: assignmentError.message }
     const assignments = (assignmentData ?? []) as Array<{

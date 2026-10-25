@@ -22262,3 +22262,17 @@ body {
 .obl-chip--query { background: #ede9fe; color: #5b21b6; }
 .san-tl--query { border-left-color: #8b5cf6; }
 .obl-issue { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-subtle); }
+
+/* Finance → Balances period filter */
+.fin-period { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.fin-period-label { font-size: var(--text-sm); color: var(--color-text-secondary); }
+.fin-period-select, .fin-period-date {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+}
+.fin-period-range { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--color-text-secondary); }
+.fin-period-note { flex-basis: 100%; margin: 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
