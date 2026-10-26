@@ -35,10 +35,11 @@
  *     — once applied they are permanent; UI warns clearly before applying)
  */
 
+import FinanceLedger from './FinanceLedger'
 import FeeAssignmentDetail from './FeeAssignmentDetail'
 import { FeeMassActionDialog, FeeActionHistory } from './FeeMassActionsPanel'
 import type { MassAction } from '../services/feeMassActionsService'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { Icon } from '../components/icons'
@@ -107,7 +108,7 @@ type LoadState = 'booting' | 'loading' | 'ready' | 'empty' | 'error'
 
 // ─── Module-level tabs ────────────────────────────────────────────────────────
 
-type ModuleTab = 'balances' | 'assignments' | 'feeheads'
+type ModuleTab = 'balances' | 'assignments' | 'feeheads' | 'ledger'
 
 // ─── Student detail tabs ──────────────────────────────────────────────────────
 
@@ -242,6 +243,9 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   const canViewAllPayments     = useAuthStore(s => s.can('finance.payments.view_all'))
   const canApproveDiscounts    = useAuthStore(s => s.can('finance.discounts.approve'))
   const canManageInstallments  = useAuthStore(s => s.can('finance.installments.manage'))
+  const canViewLedger = useAuthStore(s => s.can('finance.ledger.view') || s.can('finance.ledger.post'))
+  const canPostLedger = useAuthStore(s => s.can('finance.ledger.post'))
+  const isAdminUser   = useAuthStore(s => s.isAdminRole || s.actorType === 'platform_admin')
   const canViewFinanceData =
     canManageFees ||
     canRecordPayments ||
@@ -851,19 +855,44 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
             nav-hiding convention BottomNav.tsx already uses for the whole
             Finance entry (Problem 9.1) rather than showing clickable tabs
             that only ever lead to renderBody()'s denial message. */}
-        {canViewFinanceData && (
+        {(canViewFinanceData || canViewLedger) && (
           <div className="fin-module-tabs">
-            {(['balances', 'assignments', 'feeheads'] as ModuleTab[]).map(tab => (
+            {canViewFinanceData && (
               <button
-                key={tab}
-                className={`fin-module-tab${moduleTab === tab ? ' fin-module-tab--active' : ''}`}
-                onClick={() => setModuleTab(tab)}
+                className={`fin-module-tab${moduleTab === 'balances' ? ' fin-module-tab--active' : ''}`}
+                onClick={() => setModuleTab('balances')}
               >
-                {tab === 'balances'    ? 'Balances'
-                 : tab === 'assignments' ? 'Assignments'
-                 : 'Fee heads'}
+                Balances
               </button>
-            ))}
+            )}
+            {canViewFinanceData && (
+              <button
+                className={`fin-module-tab${moduleTab === 'assignments' || moduleTab === 'feeheads' ? ' fin-module-tab--active' : ''}`}
+                onClick={() => setModuleTab(moduleTab === 'feeheads' ? 'feeheads' : 'assignments')}
+              >
+                Fees
+              </button>
+            )}
+            {canViewLedger && (
+              <button
+                className={`fin-module-tab${moduleTab === 'ledger' ? ' fin-module-tab--active' : ''}`}
+                onClick={() => setModuleTab('ledger')}
+              >
+                Ledger
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Fees has two views: what is charged to whom, and the fee types themselves. */}
+        {canViewFinanceData && (moduleTab === 'assignments' || moduleTab === 'feeheads') && !detailAssignment && (
+          <div className="fl-seg fin-fees-seg" role="tablist">
+            <button type="button" role="tab" aria-selected={moduleTab === 'assignments'}
+              className={`fl-seg-btn${moduleTab === 'assignments' ? ' fl-seg-btn--on' : ''}`}
+              onClick={() => setModuleTab('assignments')}>What is charged</button>
+            <button type="button" role="tab" aria-selected={moduleTab === 'feeheads'}
+              className={`fl-seg-btn${moduleTab === 'feeheads' ? ' fl-seg-btn--on' : ''}`}
+              onClick={() => setModuleTab('feeheads')}>Fee types</button>
           </div>
         )}
 
@@ -952,7 +981,11 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     //     JUST the summary card (no tabs, no list, no search — those are
     //     canViewFinanceData's surface, not theirs), and a genuinely
     //     unpermitted holder (neither key) sees the lock message.
-    if (!canViewFinanceData && !canViewAnalytics) {
+    if (moduleTab === 'ledger' && canViewLedger) {
+      return <FinanceLedger schoolId={schoolId} isAdmin={isAdminUser} canPost={canPostLedger} />
+    }
+
+    if (!canViewFinanceData && !canViewAnalytics && !canViewLedger) {
       return (
         <div className="fin-empty-state">
           <span className="fin-empty-icon"><Icon name="lock" size={40} /></span>
@@ -969,6 +1002,11 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     // scoped filteredBalances already fetched during boot; duplicating a
     // four-line reduce() here is simpler and clearer than threading a
     // "render mode" flag through renderBalances() itself.
+    // A ledger-only holder has no balances/fees surface: open the ledger.
+    if (!canViewFinanceData && !canViewAnalytics && canViewLedger) {
+      return <FinanceLedger schoolId={schoolId} isAdmin={isAdminUser} canPost={canPostLedger} />
+    }
+
     if (!canViewFinanceData && canViewAnalytics) {
       if (!currentSession) {
         return (
@@ -1346,7 +1384,14 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           </div>
         ) : (
           <ul className="fin-assignment-list">
-            {assignments.map(a => (
+            {assignments.slice().sort((x, y) => x.fee_head_name.localeCompare(y.fee_head_name)).map((a, idx, arr) => (
+              <Fragment key={a.id}>
+                {(idx === 0 || arr[idx - 1].fee_head_id !== a.fee_head_id) && (
+                  <li className="fin-group-head">
+                    {a.fee_head_name}
+                    <span>{arr.filter(x => x.fee_head_id === a.fee_head_id).length} assigned</span>
+                  </li>
+                )}
               <li key={a.id} className={`fin-assignment-row${selectedIds.has(a.id) ? ' fin-assignment-row--selected' : ''}`}>
                 {selectMode && (canManageFees || canApplyDiscounts) && (
                   <input
@@ -1393,6 +1438,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
                 {!selectMode && <span className="fad-chev" aria-hidden="true">›</span>}
                 </button>
               </li>
+              </Fragment>
             ))}
           </ul>
         )}

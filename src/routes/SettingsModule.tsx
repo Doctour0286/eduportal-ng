@@ -49,7 +49,7 @@ import {
   loadSubjects,             upsertSubject,
   loadPermissionsCatalog,   loadRoles,      saveRole,   deleteRole,
   loadStaffWithRoles,
-  loadAuditLog,             loadAuditTableNames,
+  loadAuditLog,             loadAuditTableNames,  AUDIT_TABLE_LABELS,
   buildClassTree,           loadClassNodes, upsertClassNode,
   loadStudentRoles,         saveStudentRole, deleteStudentRole,
   loadFaculties,            upsertFaculty,
@@ -6839,6 +6839,29 @@ function StaffTab({ schoolId }: { schoolId: string }) {
 
 // ─── Tab: Audit log ───────────────────────────────────────────────────────────
 
+const AUDIT_SKIP = new Set(['id', 'school_id', 'created_at', 'updated_at', 'occurred_at'])
+const prettyKey = (k: string) => k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
+const prettyVal = (v: unknown) =>
+  v === null || v === undefined || v === '' ? '—'
+  : typeof v === 'object' ? JSON.stringify(v)
+  : String(v)
+
+/** What actually changed: fields that differ on an update, or the main fields of an insert/delete. */
+function auditChanges(e: AuditEntry): Array<{ key: string; from: string | null; to: string | null }> {
+  const o = e.old_data ?? {}
+  const n = e.new_data ?? {}
+  if (e.action === 'UPDATE') {
+    return Object.keys(n)
+      .filter(k => !AUDIT_SKIP.has(k) && JSON.stringify(o[k]) !== JSON.stringify(n[k]))
+      .map(k => ({ key: prettyKey(k), from: prettyVal(o[k]), to: prettyVal(n[k]) }))
+  }
+  const src = e.action === 'INSERT' ? n : o
+  return Object.keys(src)
+    .filter(k => !AUDIT_SKIP.has(k) && !k.endsWith('_id') && src[k] !== null && src[k] !== '')
+    .slice(0, 8)
+    .map(k => ({ key: prettyKey(k), from: e.action === 'DELETE' ? prettyVal(src[k]) : null, to: e.action === 'INSERT' ? prettyVal(src[k]) : null }))
+}
+
 function AuditTab({ schoolId }: { schoolId: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -6847,93 +6870,118 @@ function AuditTab({ schoolId }: { schoolId: string }) {
   const [tableNames, setTableNames] = useState<string[]>([])
   const [filterTable, setFilterTable] = useState('')
   const [filterAction, setFilterAction] = useState<'' | 'INSERT' | 'UPDATE' | 'DELETE'>('')
+  const [filterFrom, setFilterFrom] = useState('')
+  const [filterTo, setFilterTo] = useState('')
   const [page, setPage] = useState(0)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const PAGE_SIZE = 25
 
+  // Table list is loaded once. (It used to be a dependency of load(), so an
+  // empty log re-created load() on every run and re-fetched forever.)
+  useEffect(() => { void loadAuditTableNames(schoolId).then(setTableNames) }, [schoolId])
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [res, tables] = await Promise.all([
-      loadAuditLog(schoolId, {
-        table_name: filterTable || undefined,
-        action: filterAction || undefined,
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-      }),
-      tableNames.length === 0 ? loadAuditTableNames(schoolId) : Promise.resolve(tableNames),
-    ])
+    const res = await loadAuditLog(schoolId, {
+      table_name: filterTable || undefined,
+      action: filterAction || undefined,
+      from: filterFrom || undefined,
+      to: filterTo || undefined,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+    })
     if (res.error) { setError(res.error); setLoading(false); return }
     setEntries(res.data)
     setCount(res.count)
-    if (Array.isArray(tables)) setTableNames(tables)
     setLoading(false)
-  }, [schoolId, filterTable, filterAction, page, tableNames])
+  }, [schoolId, filterTable, filterAction, filterFrom, filterTo, page])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
-  function formatTs(ts: string) {
-    return new Date(ts).toLocaleString('en-NG', { dateStyle: 'short', timeStyle: 'short' })
-  }
-
+  const formatTs = (ts: string) => new Date(ts).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' })
   const actionColor: Record<string, string> = { INSERT: 'set-action--insert', UPDATE: 'set-action--update', DELETE: 'set-action--delete' }
+  const actionWord: Record<string, string> = { INSERT: 'Added', UPDATE: 'Changed', DELETE: 'Deleted' }
+  const label = (t: string) => AUDIT_TABLE_LABELS[t] ?? t.replace(/_/g, ' ')
+  const refilter = () => setPage(0)
 
-  if (loading) return <Skeleton lines={6} />
   if (error) return <ErrorState message={error} onRetry={load} />
 
   return (
     <div className="set-tab-content">
       <SectionLabel>Audit log</SectionLabel>
-      <p className="set-hint-text">Every change to sensitive data is logged here. Records can never be edited or deleted.</p>
+      <p className="set-hint-text">Every change to sensitive data is logged here, with who made it. Records can never be edited or deleted.</p>
 
-      {/* Filters */}
       <div className="set-audit-filters">
-        <select className="set-select set-select--sm" value={filterTable} onChange={e => { setFilterTable(e.target.value); setPage(0) }}>
-          <option value="">All tables</option>
-          {tableNames.map(t => <option key={t} value={t}>{t}</option>)}
+        <select className="set-select set-select--sm" value={filterTable} onChange={e => { setFilterTable(e.target.value); refilter() }} aria-label="Area">
+          <option value="">All areas</option>
+          {tableNames.map(t => <option key={t} value={t}>{label(t)}</option>)}
         </select>
-        <select className="set-select set-select--sm" value={filterAction} onChange={e => { setFilterAction(e.target.value as '' | 'INSERT' | 'UPDATE' | 'DELETE'); setPage(0) }}>
-          <option value="">All actions</option>
-          <option value="INSERT">INSERT</option>
-          <option value="UPDATE">UPDATE</option>
-          <option value="DELETE">DELETE</option>
+        <select className="set-select set-select--sm" value={filterAction} onChange={e => { setFilterAction(e.target.value as '' | 'INSERT' | 'UPDATE' | 'DELETE'); refilter() }} aria-label="Type of change">
+          <option value="">All changes</option>
+          <option value="INSERT">Added</option>
+          <option value="UPDATE">Changed</option>
+          <option value="DELETE">Deleted</option>
         </select>
-        <p className="set-audit-count">{count} record{count !== 1 ? 's' : ''}</p>
+        <input type="date" className="set-select set-select--sm" value={filterFrom} onChange={e => { setFilterFrom(e.target.value); refilter() }} aria-label="From date" />
+        <input type="date" className="set-select set-select--sm" value={filterTo} onChange={e => { setFilterTo(e.target.value); refilter() }} aria-label="To date" />
+        {(filterTable || filterAction || filterFrom || filterTo) && (
+          <button type="button" className="set-page-btn" onClick={() => { setFilterTable(''); setFilterAction(''); setFilterFrom(''); setFilterTo(''); refilter() }}>Clear</button>
+        )}
+        <p className="set-audit-count">{loading ? 'Loading…' : `${count} record${count !== 1 ? 's' : ''}`}</p>
       </div>
 
-      {entries.length === 0
-        ? <p className="set-empty-hint">No audit records match the current filters.</p>
-        : entries.map(e => (
-          <div key={e.id} className="set-audit-row">
-            <button className="set-audit-row-btn" onClick={() => setExpandedId(expandedId === e.id ? null : e.id)}>
-              <span className={`set-action-badge ${actionColor[e.action] ?? ''}`}>{e.action}</span>
-              <span className="set-audit-table">{e.table_name}</span>
-              <span className="set-audit-actor">{e.actor_type ?? '—'}</span>
-              <span className="set-audit-time">{formatTs(e.created_at)}</span>
-              <span className="set-audit-chevron">{expandedId === e.id ? '▲' : '▼'}</span>
-            </button>
-            {expandedId === e.id && (
-              <div className="set-audit-detail">
-                <p className="set-audit-record-id">Record: {e.record_id}</p>
-                {e.old_data && (
-                  <div className="set-audit-data-block">
-                    <p className="set-audit-data-label">Before</p>
-                    <pre className="set-audit-pre">{JSON.stringify(e.old_data, null, 2)}</pre>
-                  </div>
-                )}
-                {e.new_data && (
-                  <div className="set-audit-data-block">
-                    <p className="set-audit-data-label">After</p>
-                    <pre className="set-audit-pre">{JSON.stringify(e.new_data, null, 2)}</pre>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))
+      {loading && entries.length === 0 ? <Skeleton lines={6} />
+        : entries.length === 0 ? (
+          <p className="set-empty-hint">
+            {filterTable || filterAction || filterFrom || filterTo
+              ? 'No audit records match these filters.'
+              : 'Nothing has been logged yet. If changes are being made and this stays empty, the audit triggers are not attached — run migration_audit_log_repair.sql.'}
+          </p>
+        ) : entries.map(e => {
+          const changes = expandedId === e.id ? auditChanges(e) : []
+          return (
+            <div key={e.id} className="set-audit-row">
+              <button className="set-audit-row-btn" onClick={() => setExpandedId(expandedId === e.id ? null : e.id)}>
+                <span className={`set-action-badge ${actionColor[e.action] ?? ''}`}>{actionWord[e.action] ?? e.action}</span>
+                <span className="set-audit-table">{label(e.table_name)}</span>
+                <span className="set-audit-actor">{e.actor_name ?? (e.actor_type ? `A ${e.actor_type} account` : 'System')}</span>
+                <span className="set-audit-time">{formatTs(e.created_at)}</span>
+                <span className="set-audit-chevron">{expandedId === e.id ? '▲' : '▼'}</span>
+              </button>
+              {expandedId === e.id && (
+                <div className="set-audit-detail">
+                  {changes.length === 0 ? (
+                    <p className="set-audit-record-id">No field values were recorded for this change.</p>
+                  ) : (
+                    <table className="set-audit-diff">
+                      <tbody>
+                        {changes.map(c => (
+                          <tr key={c.key}>
+                            <th>{c.key}</th>
+                            <td>
+                              {c.from !== null && <span className="set-audit-from">{c.from}</span>}
+                              {c.from !== null && c.to !== null && <span aria-hidden="true"> → </span>}
+                              {c.to !== null && <span className="set-audit-to">{c.to}</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  <p className="set-audit-record-id">Record {e.record_id}</p>
+                  <details className="set-audit-raw">
+                    <summary>Show raw data</summary>
+                    {e.old_data && <pre className="set-audit-pre">{JSON.stringify(e.old_data, null, 2)}</pre>}
+                    {e.new_data && <pre className="set-audit-pre">{JSON.stringify(e.new_data, null, 2)}</pre>}
+                  </details>
+                </div>
+              )}
+            </div>
+          )
+        })
       }
 
-      {/* Pagination */}
       {count > PAGE_SIZE && (
         <div className="set-pagination">
           <button className="set-page-btn" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}>← Prev</button>

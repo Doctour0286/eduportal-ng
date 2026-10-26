@@ -306,6 +306,8 @@ export interface AuditEntry {
   created_at: string
   actor_id: string | null
   actor_type: string | null
+  /** Resolved from the account that made the change; null when it can't be looked up. */
+  actor_name?: string | null
   table_name: string
   record_id: string
   action: 'INSERT' | 'UPDATE' | 'DELETE'
@@ -2002,36 +2004,101 @@ export interface AuditFilters {
   action?: 'INSERT' | 'UPDATE' | 'DELETE'
   limit?: number
   offset?: number
+  from?: string   // yyyy-mm-dd, inclusive
+  to?: string     // yyyy-mm-dd, inclusive
 }
+
+/** Friendly names for the audited tables (anything not listed shows its raw name). */
+export const AUDIT_TABLE_LABELS: Record<string, string> = {
+  scores: 'Scores', attendance_records: 'Attendance', payments: 'Payments', fee_discounts: 'Fee waivers & discounts',
+  fee_assignments: 'Fee assignments', fee_exemptions: 'Fee exemptions', student_obligations: 'Queries, fines & tasks',
+  journal_entries: 'Ledger entries', chart_of_accounts: 'Chart of accounts', leave_requests: 'Leave requests',
+  payroll_runs: 'Payroll', role_permissions: 'Role permissions', staff_roles: 'Staff roles',
+  student_subject_overrides: 'Subject overrides', promotion_history: 'Promotions', students: 'Students', staff: 'Staff',
+}
+
+// The documented spec names this column occurred_at; some databases were
+// created with created_at. Try the documented one first and remember which
+// worked, so either shape of table is read correctly.
+let auditTimeColumn: 'occurred_at' | 'created_at' | null = null
 
 export async function loadAuditLog(schoolId: string, filters: AuditFilters = {}): Promise<{ data: AuditEntry[]; count: number; error: string | null }> {
-  let q = supabase
-    .from('audit_log')
-    .select('id, created_at, actor_id, actor_type, table_name, record_id, action, old_data, new_data', { count: 'exact' })
-    .eq('school_id', schoolId)
-    .order('created_at', { ascending: false })
-    .limit(filters.limit ?? 50)
+  const limit = filters.limit ?? 50
+  const offset = filters.offset ?? 0
 
-  if (filters.offset) q = q.range(filters.offset, (filters.offset ?? 0) + (filters.limit ?? 50) - 1)
-  if (filters.table_name) q = q.eq('table_name', filters.table_name)
-  if (filters.action) q = q.eq('action', filters.action)
+  const run = (col: 'occurred_at' | 'created_at') => {
+    let q = supabase
+      .from('audit_log')
+      .select('*', { count: 'exact' })
+      .eq('school_id', schoolId)
+      .order(col, { ascending: false })
+      .range(offset, offset + limit - 1)
+    if (filters.table_name) q = q.eq('table_name', filters.table_name)
+    if (filters.action) q = q.eq('action', filters.action)
+    if (filters.from) q = q.gte(col, `${filters.from}T00:00:00`)
+    if (filters.to) q = q.lte(col, `${filters.to}T23:59:59.999`)
+    return q
+  }
 
-  const { data, error, count } = await q
+  let col: 'occurred_at' | 'created_at' = auditTimeColumn ?? 'occurred_at'
+  let res = await run(col)
+  if (res.error && !auditTimeColumn) {
+    col = 'created_at'
+    const retry = await run(col)
+    if (!retry.error) res = retry
+  }
+  if (res.error) return { data: [], count: 0, error: res.error.message }
+  auditTimeColumn = col
 
-  if (error) return { data: [], count: 0, error: error.message }
-  return { data: (data ?? []) as AuditEntry[], count: count ?? 0, error: null }
+  const rows = (res.data ?? []) as Array<Record<string, any>>
+
+  // Who made each change: the log stores the signed-in user's id, so look up
+  // the matching staff member rather than showing an anonymous "staff".
+  const actorIds = [...new Set(rows.map(r => r.actor_id).filter(Boolean))] as string[]
+  const names = new Map<string, string>()
+  if (actorIds.length > 0) {
+    const { data: ids } = await supabase
+      .from('app_identities')
+      .select('auth_user_id, actor_type, actor_record_id')
+      .in('auth_user_id', actorIds)
+    const staffRecordIds = (ids ?? []).filter(i => i.actor_type === 'staff').map(i => i.actor_record_id as string)
+    const staffNames = new Map<string, string>()
+    if (staffRecordIds.length > 0) {
+      const { data: st } = await supabase.from('staff').select('id, full_name').in('id', staffRecordIds)
+      for (const x of st ?? []) staffNames.set(x.id as string, x.full_name as string)
+    }
+    for (const i of ids ?? []) {
+      const n = i.actor_type === 'staff' ? staffNames.get(i.actor_record_id as string) : undefined
+      if (n) names.set(i.auth_user_id as string, n)
+    }
+  }
+
+  const data: AuditEntry[] = rows.map(r => ({
+    id: r.id,
+    created_at: (r.occurred_at ?? r.created_at) as string,
+    actor_id: r.actor_id ?? null,
+    actor_type: r.actor_type ?? null,
+    actor_name: r.actor_id ? (names.get(r.actor_id) ?? null) : null,
+    table_name: r.table_name,
+    record_id: r.record_id,
+    action: r.action,
+    old_data: r.old_data ?? null,
+    new_data: r.new_data ?? null,
+  }))
+  return { data, count: res.count ?? 0, error: null }
 }
 
-/** Returns the distinct table names that appear in the audit log for this school. */
+/** Tables to offer in the filter: everything documented plus anything actually logged. */
 export async function loadAuditTableNames(schoolId: string): Promise<string[]> {
+  const names = new Set<string>(Object.keys(AUDIT_TABLE_LABELS))
   const { data } = await supabase
     .from('audit_log')
     .select('table_name')
     .eq('school_id', schoolId)
-
-  if (!data) return []
-  const names = new Set(data.map((r: { table_name: string }) => r.table_name))
-  return Array.from(names).sort()
+    .limit(2000)
+  for (const r of (data ?? []) as Array<{ table_name: string }>) names.add(r.table_name)
+  return Array.from(names).sort((a, b) =>
+    (AUDIT_TABLE_LABELS[a] ?? a).localeCompare(AUDIT_TABLE_LABELS[b] ?? b))
 }
 
 // ─── Grade scale & CGPA policy (PRD Tier 8 / Problem 8.7, SESSION 59, §7.27.4) ─
