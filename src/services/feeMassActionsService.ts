@@ -322,7 +322,7 @@ export async function applyMassAction(
       students_count: pv.studentsCount,
       total_amount: pv.totalAmount,
       reason: r.reason.trim(),
-      details: { status: 'in_progress' },
+      details: { status: 'in_progress', assignmentIds: working.map(a => a.id) },
       performed_by: staffId,
     })
     .select('id')
@@ -330,8 +330,9 @@ export async function applyMassAction(
   if (logErr || !logRow) return { ok: false, error: logErr?.message ?? 'Could not record the action.' }
   const logId = logRow.id as string
   const now = new Date().toISOString()
+  const touchedIds = working.map(a => a.id)
   const finish = (details: Record<string, unknown>) =>
-    supabase.from('fee_action_log').update({ details }).eq('id', logId)
+    supabase.from('fee_action_log').update({ details: { assignmentIds: touchedIds, ...details } }).eq('id', logId)
 
   try {
     const money = await loadMoney(working)
@@ -420,41 +421,169 @@ export async function applyMassAction(
 
 // ─── History + undo ──────────────────────────────────────────────────────────
 
+const LOG_COLS = 'id, action, scope, assignments_count, students_count, total_amount, reason, details, performed_by, performed_at, undone_at, undone_by'
+
+async function mapLogRows(data: any[]): Promise<FeeActionLogRow[]> {
+  const ids = [...new Set(data.flatMap(r => [r.performed_by, r.undone_by]).filter(Boolean))] as string[]
+  const names = new Map<string, string>()
+  if (ids.length) {
+    const { data: staff } = await supabase.from('staff').select('id, full_name').in('id', ids)
+    for (const st of staff ?? []) names.set(st.id as string, st.full_name as string)
+  }
+  return data.map((r: any) => ({
+    id: r.id,
+    action: r.action,
+    scopeLabel: r.scope?.type === 'class' ? `Class: ${r.scope.label}` : r.scope?.type === 'student' ? `Student: ${r.scope.label}` : 'All students',
+    assignments_count: r.assignments_count,
+    students_count: r.students_count,
+    total_amount: r.total_amount === null ? null : Number(r.total_amount),
+    reason: r.reason,
+    performed_by_name: r.performed_by ? (names.get(r.performed_by) ?? null) : null,
+    performed_at: r.performed_at,
+    undone_at: r.undone_at,
+    undone_by_name: r.undone_by ? (names.get(r.undone_by) ?? null) : null,
+    failed: r.details?.status === 'failed',
+  }))
+}
+
 export async function loadFeeActionLog(schoolId: string): Promise<Result<FeeActionLogRow[]>> {
   try {
     const { data, error } = await supabase
       .from('fee_action_log')
-      .select('id, action, scope, assignments_count, students_count, total_amount, reason, details, performed_by, performed_at, undone_at, undone_by')
+      .select(LOG_COLS)
       .eq('school_id', schoolId)
       .order('performed_at', { ascending: false })
       .limit(30)
     if (error) return { ok: false, error: error.message }
-    const ids = [...new Set((data ?? []).flatMap(r => [r.performed_by, r.undone_by]).filter(Boolean))] as string[]
-    const names = new Map<string, string>()
-    if (ids.length) {
-      const { data: staff } = await supabase.from('staff').select('id, full_name').in('id', ids)
-      for (const st of staff ?? []) names.set(st.id as string, st.full_name as string)
-    }
-    return {
-      ok: true,
-      data: (data ?? []).map((r: any) => ({
-        id: r.id,
-        action: r.action,
-        scopeLabel: r.scope?.type === 'class' ? `Class: ${r.scope.label}` : r.scope?.type === 'student' ? `Student: ${r.scope.label}` : 'All students',
-        assignments_count: r.assignments_count,
-        students_count: r.students_count,
-        total_amount: r.total_amount === null ? null : Number(r.total_amount),
-        reason: r.reason,
-        performed_by_name: r.performed_by ? (names.get(r.performed_by) ?? null) : null,
-        performed_at: r.performed_at,
-        undone_at: r.undone_at,
-        undone_by_name: r.undone_by ? (names.get(r.undone_by) ?? null) : null,
-        failed: r.details?.status === 'failed',
-      })),
-    }
+    return { ok: true, data: await mapLogRows(data ?? []) }
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Could not load the history' }
   }
+}
+
+/** Mass actions that touched one assignment (actions logged before this existed won't appear). */
+export async function loadAssignmentActivity(schoolId: string, assignmentId: string): Promise<Result<FeeActionLogRow[]>> {
+  try {
+    const { data, error } = await supabase
+      .from('fee_action_log')
+      .select(LOG_COLS)
+      .eq('school_id', schoolId)
+      .contains('details', { assignmentIds: [assignmentId] })
+      .order('performed_at', { ascending: false })
+      .limit(30)
+    if (error) return { ok: false, error: error.message }
+    return { ok: true, data: await mapLogRows(data ?? []) }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Could not load activity' }
+  }
+}
+
+// ─── Who an assignment covers, and where each student stands ────────────────
+
+export interface CoverageRow {
+  studentId: string
+  name: string
+  className: string | null
+  discount: number
+  paid: number
+  exempt: boolean
+  owed: number        // what they still owe on this fee
+  credit: number      // overpaid on this fee
+  status: 'exempt' | 'paid' | 'part' | 'unpaid' | 'waived' | 'credit'
+}
+
+export async function loadAssignmentCoverage(schoolId: string, a: FeeAssignment): Promise<Result<CoverageRow[]>> {
+  try {
+    const pairs = await resolvePairs(schoolId, [a], { type: 'school' })
+    if (pairs.length === 0) return { ok: true, data: [] }
+    const money = await loadMoney([a])
+    const ids = pairs.map(p => p.studentId)
+    const { data: students, error } = await supabase
+      .from('students')
+      .select('id, full_name, class_node_id')
+      .in('id', ids)
+    if (error) return { ok: false, error: error.message }
+    const classIds = [...new Set((students ?? []).map(x => x.class_node_id).filter(Boolean))] as string[]
+    const classNames = new Map<string, string>()
+    if (classIds.length) {
+      const { data: nodes } = await supabase.from('class_nodes').select('id, name').in('id', classIds)
+      for (const n of nodes ?? []) classNames.set(n.id as string, n.name as string)
+    }
+    const rows: CoverageRow[] = (students ?? []).map(st => {
+      const k = `${a.id}|${st.id}`
+      const exempt = money.exempt.has(k)
+      const paid = money.paid.get(k) ?? 0
+      const discount = money.discount.get(k) ?? 0
+      const owed = exempt ? 0 : Math.max(0, a.amount - discount - paid)
+      const credit = exempt ? paid : creditOf(a.amount, discount, paid)
+      const status: CoverageRow['status'] =
+        exempt ? 'exempt'
+        : credit > 0 ? 'credit'
+        : owed === 0 && discount >= a.amount ? 'waived'
+        : owed === 0 ? 'paid'
+        : paid > 0 ? 'part' : 'unpaid'
+      return {
+        studentId: st.id as string,
+        name: st.full_name as string,
+        className: st.class_node_id ? (classNames.get(st.class_node_id as string) ?? null) : null,
+        discount, paid, exempt, owed, credit, status,
+      }
+    }).sort((x, y) => x.name.localeCompare(y.name))
+    return { ok: true, data: rows }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Could not load who this fee covers' }
+  }
+}
+
+/** Reverse one student's exemption on one assignment. */
+export async function removeExemption(
+  a: FeeAssignment, studentId: string,
+): Promise<Result<void>> {
+  const now = new Date().toISOString()
+  const { error } = await supabase
+    .from('fee_exemptions')
+    .update({ voided_at: now })
+    .eq('fee_assignment_id', a.id)
+    .eq('student_id', studentId)
+    .is('voided_at', null)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true, data: undefined }
+}
+
+/**
+ * Edit an assignment's amount, due date and term. An amount change goes
+ * through the logged path (so it shows in history and can be undone); date
+ * and term are plain updates.
+ */
+export async function updateAssignmentDetails(params: {
+  schoolId: string
+  assignment: FeeAssignment
+  amount: number
+  dueDate: string | null
+  termId: string | null
+  reason: string
+  staffId: string | null
+}): Promise<Result<string>> {
+  const { assignment: a } = params
+  if (!(params.amount >= 0)) return { ok: false, error: 'Enter a valid amount.' }
+  const changedAmount = params.amount !== a.amount
+  if (changedAmount && params.reason.trim().length < 3) return { ok: false, error: 'Give a reason for changing the amount.' }
+
+  if (changedAmount) {
+    const res = await applyMassAction(
+      { schoolId: params.schoolId, action: 'edit_amount', assignments: [a], scope: { type: 'school' }, amount: { mode: 'set', value: params.amount }, reason: params.reason },
+      params.staffId,
+    )
+    if (!res.ok) return res
+  }
+  if ((params.dueDate ?? null) !== (a.due_date ?? null) || (params.termId ?? null) !== (a.term_id ?? null)) {
+    const { error } = await supabase
+      .from('fee_assignments')
+      .update({ due_date: params.dueDate, term_id: params.termId, updated_at: new Date().toISOString() })
+      .eq('id', a.id)
+    if (error) return { ok: false, error: error.message }
+  }
+  return { ok: true, data: 'Saved.' }
 }
 
 export async function undoMassAction(logId: string, staffId: string | null): Promise<Result<string>> {

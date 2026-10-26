@@ -35,6 +35,7 @@
  *     — once applied they are permanent; UI warns clearly before applying)
  */
 
+import FeeAssignmentDetail from './FeeAssignmentDetail'
 import { FeeMassActionDialog, FeeActionHistory } from './FeeMassActionsPanel'
 import type { MassAction } from '../services/feeMassActionsService'
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -266,6 +267,16 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   const [massAction,     setMassAction]     = useState<MassAction | null>(null)
   const [historyKey,     setHistoryKey]     = useState(0)
   const [massNotice,     setMassNotice]     = useState('')
+  const [selectMode,     setSelectMode]     = useState(false)
+  // The fee currently open as a page (click a fee in the list).
+  const [detailAssignment, setDetailAssignment] = useState<FeeAssignment | null>(null)
+  // Every assignment in the current session, regardless of the term filter on
+  // the Assignments tab. The payment and waiver forms must offer a student's
+  // fees from ALL terms — they used to read the term-filtered list, so
+  // picking a term there silently removed other terms' fees from the forms.
+  const [sessionAssignments, setSessionAssignments] = useState<FeeAssignment[]>([])
+  // Fees the open student is exempt from — never offered for payment/waiver.
+  const [detailExemptIds,    setDetailExemptIds]    = useState<Set<string>>(new Set())
   // Balances period filter. Default 'current' = the current session; the
   // other values are 'term:<id>', 'session:<id>' (a past session), 'all'
   // (all time) and 'range' (fees falling due between two dates).
@@ -291,6 +302,8 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   // these students (SESSION 64), so balance filtering uses programme_level_id.
   const [filterProgrammeLevel, setFilterProgrammeLevel] = useState<string>('')
   const [searchQuery,    setSearchQuery]    = useState('')
+  // Quick status filter on the balances list.
+  const [statusFilter,   setStatusFilter]   = useState<'all' | 'owing' | 'credit' | 'cleared' | 'nofees'>('all')
 
   // ── Assignments tab ────────────────────────────────────────────────────────
   const [assignments,       setAssignments]       = useState<FeeAssignment[]>([])
@@ -299,7 +312,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
 
   // ── Fee heads tab ──────────────────────────────────────────────────────────
   const [feeHeadsState,   setFeeHeadsState]   = useState<LoadState>('booting')
-  const [feeHeadsError,   _setFeeHeadsError]  = useState('')
+  const [feeHeadsError,   setFeeHeadsError]  = useState('')
 
   // ── Add fee head form ──────────────────────────────────────────────────────
   const [feeHeadFormOpen,  setFeeHeadFormOpen]  = useState(false)
@@ -396,6 +409,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
         if (cancelled) return
         if (termsRes.ok) setTerms(termsRes.data)
         if (assignmentsRes.ok) {
+          setSessionAssignments(assignmentsRes.data)
           setAssignments(assignmentsRes.data)
           setAssignmentsState(assignmentsRes.data.length === 0 ? 'empty' : 'ready')
         }
@@ -462,6 +476,14 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     }
     setAssignments(res.data)
     setAssignmentsState(res.data.length === 0 ? 'empty' : 'ready')
+    // Keep the unfiltered session list fresh for the payment/waiver forms.
+    if (!selectedTermId) setSessionAssignments(res.data)
+    else {
+      const all = await loadFeeAssignments({ sessionId: currentSession.id })
+      if (all.ok) setSessionAssignments(all.data)
+    }
+    // Keep an open fee page in sync with what was just saved.
+    setDetailAssignment(prev => (prev ? (res.data.find(x => x.id === prev.id) ?? prev) : prev))
   }, [currentSession, selectedTermId])
 
   useEffect(() => {
@@ -470,12 +492,22 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
 
   // ─── Client-side search filter ────────────────────────────────────────────
 
+  const statusOf = (b: StudentBalance) =>
+    b.balance > 0 ? 'owing' : b.credit > 0 ? 'credit' : b.assigned_total === 0 ? 'nofees' : 'cleared'
+  const statusCounts = balances.reduce<Record<string, number>>((acc, b) => {
+    const k = statusOf(b)
+    acc[k] = (acc[k] ?? 0) + 1
+    return acc
+  }, {})
   const filteredBalances = (searchQuery.trim()
     ? balances.filter(b =>
         b.student_name.toLowerCase().includes(searchQuery.toLowerCase())
       )
     : balances
-  ).slice().sort((a, b) => {
+  ).filter(b => statusFilter === 'all' || statusOf(b) === statusFilter)
+  .slice().sort((a, b) => {
+    // Owing students: biggest debt first, so the people to chase are on top.
+    if (statusFilter === 'owing') return b.balance - a.balance
     if (intent !== 'record_payment') return 0
     // Outstanding-first per PRD Problem 2.2c / Session 7b — no new query,
     // just a stable client-side reorder of the already-loaded balances.
@@ -497,11 +529,13 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     setDiscountFormOpen(false)
     setDiscountConfirm(false)
 
-    // Load payments and discounts in parallel
-    const [paymentsRes, discountsRes] = await Promise.all([
+    // Load payments, discounts and exemptions in parallel
+    const [paymentsRes, discountsRes, exemptRes] = await Promise.all([
       loadStudentPayments(balance.student_id),
       loadStudentDiscounts(balance.student_id, currentSession?.id ?? ''),
+      supabase.from('fee_exemptions').select('fee_assignment_id').eq('student_id', balance.student_id).is('voided_at', null),
     ])
+    setDetailExemptIds(new Set((exemptRes.data ?? []).map(r => r.fee_assignment_id as string)))
 
     if (!paymentsRes.ok || !discountsRes.ok) {
       setDetailDataError(!paymentsRes.ok ? paymentsRes.error : !discountsRes.ok ? discountsRes.error : 'Unknown error')
@@ -599,6 +633,9 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     if (refreshed.ok) {
       setFeeHeads(refreshed.data)
       setFeeHeadsState(refreshed.data.length === 0 ? 'empty' : 'ready')
+    } else {
+      setFeeHeadsError(refreshed.error)
+      setFeeHeadsState('error')
     }
   }
 
@@ -713,6 +750,11 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
       setPaymentError('Enter a valid payment amount.')
       return
     }
+    const paidAtDate = new Date(paymentForm.paid_at)
+    if (!paymentForm.paid_at || isNaN(paidAtDate.getTime())) {
+      setPaymentError('Pick the date the payment was made.')
+      return
+    }
     setPaymentSaving(true)
     setPaymentError('')
     const res = await recordPayment({
@@ -722,7 +764,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
       amount:          parseFloat(paymentForm.amount),
       method:          paymentForm.method,
       authUserId,
-      paidAt:          new Date(paymentForm.paid_at).toISOString(),
+      paidAt:          paidAtDate.toISOString(),
       providerReference: paymentForm.provider_reference || undefined,
       notes:           paymentForm.notes || null,
     })
@@ -755,6 +797,17 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
     )) {
       setDiscountError('Enter a valid discount value.')
       return
+    }
+    if (discountForm.discount_type === 'percentage' && parseFloat(discountForm.value) > 100) {
+      setDiscountError('A percentage discount cannot be more than 100.')
+      return
+    }
+    if (discountForm.discount_type === 'fixed_amount' && discountForm.fee_assignment_id) {
+      const target = sessionAssignments.find(a => a.id === discountForm.fee_assignment_id)
+      if (target && parseFloat(discountForm.value) > target.amount) {
+        setDiscountError(`A fixed discount cannot be more than the fee itself (${formatNaira(target.amount)}).`)
+        return
+      }
     }
     if (!discountConfirm) {
       setDiscountConfirm(true)
@@ -1074,7 +1127,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
         </div>
       )
     }
-    if (filteredBalances.length === 0) {
+    if (filteredBalances.length === 0 && statusFilter === 'all') {
       return (
         <div className="fin-empty-state fin-empty-state--search">
           <span className="fin-empty-icon"><Icon name="search" size={40} /></span>
@@ -1134,6 +1187,26 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           </div>
         )}
 
+        <div className="fin-status-chips" role="group" aria-label="Filter by balance status">
+          {([
+            ['all', `All (${balances.length})`],
+            ['owing', `Owing (${statusCounts.owing ?? 0})`],
+            ['credit', `Credit (${statusCounts.credit ?? 0})`],
+            ['cleared', `Cleared (${statusCounts.cleared ?? 0})`],
+            ['nofees', `No fees (${statusCounts.nofees ?? 0})`],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`fin-status-chip${statusFilter === key ? ' fin-status-chip--on' : ''}`}
+              aria-pressed={statusFilter === key}
+              onClick={() => setStatusFilter(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <p className="fin-count">
           {filteredBalances.length} student{filteredBalances.length !== 1 ? 's' : ''}
           {isHigherEd
@@ -1189,17 +1262,44 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
   // ── Assignments tab ────────────────────────────────────────────────────────
 
   function renderAssignments() {
+    if (detailAssignment) {
+      return (
+        <div className="fin-assignments-body">
+          <FeeAssignmentDetail
+            key={detailAssignment.id}
+            assignment={detailAssignment}
+            terms={terms}
+            classes={classes}
+            schoolId={schoolId}
+            staffId={actorStaffId ?? null}
+            canManage={canManageFees}
+            canWaive={canApplyDiscounts}
+            onBack={() => setDetailAssignment(null)}
+            onChanged={async () => { await loadAssignmentList(); await loadBalances(); setHistoryKey(k => k + 1) }}
+          />
+        </div>
+      )
+    }
     return (
       <div className="fin-assignments-body">
-        {canManageFees && (
-          <div className="fin-assignments-actions">
+        <div className="fin-assignments-actions">
+          {canManageFees && (
             <button className="fin-add-btn" onClick={openAssignmentForm}>
               + Add assignment
             </button>
-          </div>
-        )}
+          )}
+          {(canManageFees || canApplyDiscounts) && assignments.length > 1 && (
+            <button
+              type="button"
+              className="fma-tbtn"
+              onClick={() => { setSelectMode(m => !m); setSelectedIds(new Set()) }}
+            >
+              {selectMode ? 'Done selecting' : 'Select several'}
+            </button>
+          )}
+        </div>
 
-        {(canManageFees || canApplyDiscounts) && assignments.length > 0 && (
+        {selectMode && (canManageFees || canApplyDiscounts) && assignments.length > 0 && (
           <div className="fma-toolbar">
             <label className="fma-selectall">
               <input
@@ -1248,7 +1348,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           <ul className="fin-assignment-list">
             {assignments.map(a => (
               <li key={a.id} className={`fin-assignment-row${selectedIds.has(a.id) ? ' fin-assignment-row--selected' : ''}`}>
-                {(canManageFees || canApplyDiscounts) && (
+                {selectMode && (canManageFees || canApplyDiscounts) && (
                   <input
                     type="checkbox"
                     className="fma-check"
@@ -1261,6 +1361,13 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
                     })}
                   />
                 )}
+                <button
+                  type="button"
+                  className="fad-rowbtn"
+                  onClick={() => selectMode
+                    ? setSelectedIds(prev => { const n = new Set(prev); if (n.has(a.id)) n.delete(a.id); else n.add(a.id); return n })
+                    : setDetailAssignment(a)}
+                >
                 <div className="fin-assignment-row-main">
                   <span className="fin-assignment-name">{a.fee_head_name}</span>
                   <span className="fin-assignment-amount">{formatNaira(a.amount)}</span>
@@ -1283,13 +1390,15 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
                     </span>
                   )}
                 </div>
+                {!selectMode && <span className="fad-chev" aria-hidden="true">›</span>}
+                </button>
               </li>
             ))}
           </ul>
         )}
 
-        {canManageFees && selectedIds.size === 0 && assignments.length > 0 && (
-          <p className="fma-tip">Tick one or more fees to edit their amount, waive, exempt or unassign them — for one student, one class, or everyone.</p>
+        {!selectMode && assignments.length > 0 && (
+          <p className="fma-tip">Click a fee to see who it covers, edit it, waive or exempt students, or review its history.</p>
         )}
 
         {(canManageFees || canApplyDiscounts) && currentSession && (
@@ -1313,6 +1422,7 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
             onDone={summary => {
               setMassAction(null)
               setSelectedIds(new Set())
+              setSelectMode(false)
               setMassNotice(summary)
               setHistoryKey(k => k + 1)
               void loadAssignmentList()
@@ -1732,6 +1842,51 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
           </div>
         </div>
 
+        {b.credit > 0 && (
+          <p className="fma-notice">This student has a credit of <strong>{formatNaira(b.credit)}</strong> — they have paid more than they now owe.</p>
+        )}
+
+        {(() => {
+          const mine = sessionAssignments.filter(a =>
+            a.target_type === 'school_wide' ||
+            (a.target_type === 'class_node' && a.class_node_id === b.class_node_id) ||
+            (a.target_type === 'student' && a.student_id === b.student_id) ||
+            (a.target_type === 'programme_level' && b.programme_level_id !== null && a.programme_level_id === b.programme_level_id))
+          if (mine.length === 0) return null
+          const done = detailPayments.filter(p => p.status === 'completed')
+          const unallocated = done.filter(p => !p.fee_assignment_id).reduce((n, p) => n + p.amount, 0)
+          return (
+            <div className="fin-fee-breakdown">
+              <p className="fin-fee-breakdown-title">Fee by fee</p>
+              <ul className="fin-fee-breakdown-list">
+                {mine.map(a => {
+                  const exempt = detailExemptIds.has(a.id)
+                  const paid = done.filter(p => p.fee_assignment_id === a.id).reduce((n, p) => n + p.amount, 0)
+                  const disc = detailDiscounts.filter(d => d.fee_assignment_id === a.id).reduce((n, d) => n + (d.resolved_amount ?? 0), 0)
+                  const owed = exempt ? 0 : Math.max(0, a.amount - disc - paid)
+                  const label = exempt ? 'Exempt' : owed === 0 ? (paid + disc > a.amount ? 'Credit' : 'Cleared') : paid > 0 ? 'Part-paid' : 'Unpaid'
+                  return (
+                    <li key={a.id} className="fin-fee-breakdown-row">
+                      <div>
+                        <span className="fin-fee-breakdown-name">{a.fee_head_name}</span>
+                        <span className="fin-fee-breakdown-meta">
+                          {exempt ? 'Not billed' : formatNaira(a.amount)}
+                          {disc > 0 && !exempt ? ` · waived ${formatNaira(disc)}` : ''}
+                          {paid > 0 ? ` · paid ${formatNaira(paid)}` : ''}
+                        </span>
+                      </div>
+                      <span className={`fad-chip fad-chip--${exempt ? 'exempt' : owed === 0 ? 'paid' : paid > 0 ? 'part' : 'unpaid'}`}>
+                        {label}{owed > 0 ? ` · ${formatNaira(owed)}` : ''}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+              {unallocated > 0 && <p className="fma-hint">Plus {formatNaira(unallocated)} paid without choosing a fee (counts toward the balance only).</p>}
+            </div>
+          )
+        })()}
+
         {b.assigned_total === 0 && (
           <p className="fin-summary-hint">
             No fee assignments apply to this student yet.
@@ -1808,7 +1963,8 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
             onChange={e => setPaymentForm(prev => ({ ...prev, fee_assignment_id: e.target.value }))}
           >
             <option value="">— general payment —</option>
-            {detailBalance && assignments
+            {detailBalance && sessionAssignments
+              .filter(a => !detailExemptIds.has(a.id))
               .filter(a =>
                 a.target_type === 'school_wide' ||
                 (a.target_type === 'class_node' && a.class_node_id === detailBalance.class_node_id) ||
@@ -1966,7 +2122,8 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
             onChange={e => setDiscountForm(prev => ({ ...prev, fee_assignment_id: e.target.value }))}
           >
             <option value="">— general / unlinked —</option>
-            {detailBalance && assignments
+            {detailBalance && sessionAssignments
+              .filter(a => !detailExemptIds.has(a.id))
               .filter(a =>
                 a.target_type === 'school_wide' ||
                 (a.target_type === 'class_node' && a.class_node_id === detailBalance.class_node_id) ||

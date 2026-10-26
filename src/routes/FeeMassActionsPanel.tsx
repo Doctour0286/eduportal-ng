@@ -36,6 +36,7 @@ export function FeeMassActionDialog({
   schoolId,
   staffId,
   classes,
+  presetStudent,
   onClose,
   onDone,
 }: {
@@ -45,6 +46,8 @@ export function FeeMassActionDialog({
   schoolId: string
   staffId: string | null
   classes: ClassNode[]
+  /** Open with one student already chosen (used from a fee's Students tab). */
+  presetStudent?: { id: string; full_name: string }
   onClose: () => void
   onDone: (summary: string) => void
 }) {
@@ -65,7 +68,7 @@ export function FeeMassActionDialog({
   // Fresh form each time the dialog opens.
   useEffect(() => {
     if (!open) return
-    setScopeType('school'); setClassId(''); setStudentQuery(''); setStudentHits([]); setStudent(null)
+    setScopeType(presetStudent ? 'student' : 'school'); setClassId(''); setStudentQuery(''); setStudentHits([]); setStudent(presetStudent ?? null)
     setWaiveKind('full'); setWaiveValue(''); setAmountMode('set'); setAmountValue('')
     setReason(''); setPreview(null); setError('')
   }, [open, action])
