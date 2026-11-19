@@ -837,3 +837,36 @@ export function formatTime(t: string): string {
   if (h === 0) h = 12
   return `${h}:${m} ${suffix}`
 }
+
+// ─── Programme level labels (for grouping/filtering the timetable by cohort) ──
+//
+// programme_level_id alone is an opaque uuid; the timetable needs "BSc
+// Computer Science · 200 Level" to show a person. Two reads (programmes for
+// the school, then their levels), returned as id -> label.
+
+export async function loadLevelLabels(schoolId: string): Promise<Result<Map<string, string>>> {
+  try {
+    const { data: programmes, error } = await supabase
+      .from('programmes')
+      .select('id, name, code')
+      .eq('school_id', schoolId)
+    if (error) return { ok: false, error: error.message }
+    const progById = new Map((programmes ?? []).map(p => [p.id as string, (p.code as string | null) || (p.name as string)]))
+    if (progById.size === 0) return { ok: true, data: new Map() }
+
+    const { data: levels, error: levelErr } = await supabase
+      .from('programme_levels')
+      .select('id, programme_id, level_label, sequence_order')
+      .in('programme_id', [...progById.keys()])
+      .order('sequence_order')
+    if (levelErr) return { ok: false, error: levelErr.message }
+
+    const out = new Map<string, string>()
+    for (const l of levels ?? []) {
+      out.set(l.id as string, `${progById.get(l.programme_id as string) ?? 'Programme'} · ${l.level_label}`)
+    }
+    return { ok: true, data: out }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to load programme levels' }
+  }
+}

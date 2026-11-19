@@ -58,8 +58,10 @@
  */
 
 import { orderedWeekDays } from '../lib/weekOrder'
-import { loadFirstDayOfWeek } from '../services/settingsService'
-import { useState, useEffect, useCallback } from 'react'
+import { loadFirstDayOfWeek, loadWeekDays } from '../services/settingsService'
+import { HigherEdWeekGrid, HigherEdDayOverview, courseHue, fromMin, type OverviewRow } from './HigherEdWeekGrid'
+import { printHigherEdTimetable } from '../services/printHigherEdTimetable'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   loadOfferingTimetable,
   loadOfferingsForTimetableAdmin,
@@ -73,6 +75,7 @@ import {
   dayName,
   formatTime,
   loadPeriodsForTimetable,
+  loadLevelLabels,
   loadLecturersForAssignment,
   assignOfferingLecturer,
   type OfferingTimetableEntry,
@@ -102,21 +105,31 @@ interface TimetableModuleHigherEdProps {
   currentStudentId?: string | null
 }
 
-// ─── Days of the week present in this school's data (derived, not fixed) ──
-// Unlike the secondary grid, there is no school_week_days table backing
-// this domain — a course offering's schedule is whatever days its own
-// entries actually use. Columns are built from the loaded data itself,
-// sorted 0(Sun)..6(Sat), rather than assuming a fixed Mon-Fri grid that
-// might not match a real school's actual offering days.
-
-function distinctDaysUsed(entries: OfferingTimetableEntry[], firstDay = 1): number[] {
-  const days = new Set(entries.map(e => e.day_of_week))
-  // Ordered from the school's chosen first day of the week (Settings → School week).
-  const order = orderedWeekDays(firstDay)
-  return Array.from(days).sort((a, b) => order.indexOf(a) - order.indexOf(b))
-}
-
 // ─── Root component ─────────────────────────────────────────────────────
+
+type View = 'level' | 'lecturer' | 'venue' | 'all'
+const NONE = '__none__'
+const DURATIONS: { label: string; minutes: number }[] = [
+  { label: '1 hr', minutes: 60 }, { label: '1½ hrs', minutes: 90 }, { label: '2 hrs', minutes: 120 }, { label: '3 hrs', minutes: 180 },
+]
+const mins = (t: string) => { const [h, m] = t.split(':'); return Number(h) * 60 + Number(m) }
+
+/** Entries that use the same venue at overlapping times on the same day. */
+function findVenueConflicts(entries: OfferingTimetableEntry[]): Set<string> {
+  const ids = new Set<string>()
+  for (let i = 0; i < entries.length; i++) {
+    const a = entries[i]
+    if (!a.venue?.trim()) continue
+    for (let j = i + 1; j < entries.length; j++) {
+      const b = entries[j]
+      if (a.day_of_week !== b.day_of_week || !b.venue?.trim()) continue
+      if (a.venue.trim().toLowerCase() !== b.venue.trim().toLowerCase()) continue
+      if (a.course_offering_id === b.course_offering_id) continue
+      if (rangesOverlap(a.start_time, a.end_time, b.start_time, b.end_time)) { ids.add(a.id); ids.add(b.id) }
+    }
+  }
+  return ids
+}
 
 export default function TimetableModuleHigherEd({
   schoolId,
@@ -135,40 +148,41 @@ export default function TimetableModuleHigherEd({
   const isStudentView = !isAdmin && !!currentStudentId
   const isLecturerView = !isAdmin && !isStudentView
 
-  // ── Edit mode (admin only) ────────────────────────────────────────────
+  // View + selection
+  const [view, setView] = useState<View>(isLecturerView ? 'lecturer' : 'level')
+  const [levelSel, setLevelSel] = useState('')
+  const [lecturerSel, setLecturerSel] = useState('')
+  const [venueSel, setVenueSel] = useState('')
+  const [overviewDay, setOverviewDay] = useState<number | null>(null)
+  const [levelLabels, setLevelLabels] = useState<Map<string, string>>(new Map())
+  const [schoolDays, setSchoolDays] = useState<number[]>([])
+
+  // Editing
   const [editMode, setEditMode] = useState(false)
-  const [editOfferingId, setEditOfferingId] = useState<string | null>(null)
+  const [armedId, setArmedId] = useState<string | null>(null)
+  const [duration, setDuration] = useState(60)
+  const [notice, setNotice] = useState('')
+  const [scopeLevel, setScopeLevel] = useState<string | null>(null)   // limits the course picker in the add form
   const [formOpen, setFormOpen] = useState(false)
   const [formEntry, setFormEntry] = useState<Partial<OfferingTimetableEntry> | null>(null)
   const [formSaving, setFormSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
-  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState(false)
 
-  // ── Schedule-tab periods + lecturer assignment (TIER 9 / PROBLEM,
-  // 2026-07-30) — admin-only, loaded once alongside offerings/entries,
-  // not per form-open, since neither changes while the screen is open. ──
   const [periods, setPeriods] = useState<Period[]>([])
-  const [selectedPeriodId, setSelectedPeriodId] = useState<string>('') // '' = custom time
+  const [selectedPeriodId, setSelectedPeriodId] = useState<string>('')
   const [lecturers, setLecturers] = useState<LecturerOption[]>([])
   const [lecturerPickerId, setLecturerPickerId] = useState<string>('')
   const [lecturerSaving, setLecturerSaving] = useState(false)
   const [lecturerError, setLecturerError] = useState<string | null>(null)
-
-  // ── Read-only detail popup (mirrors TimetableModuleSecondary's Session 24 pattern) ──
   const [detailEntry, setDetailEntry] = useState<OfferingTimetableEntry | null>(null)
-
-  // ─── Initial load ─────────────────────────────────────────────────────
 
   const load = useCallback(async () => {
     setLoadState('loading')
     setErrorMsg('')
 
     const sessionRes = await loadCurrentSession(schoolId)
-    if (sessionRes.error) {
-      setLoadState('error')
-      setErrorMsg(sessionRes.error)
-      return
-    }
+    if (sessionRes.error) { setLoadState('error'); setErrorMsg(sessionRes.error); return }
     if (!sessionRes.data) {
       setLoadState('error')
       setErrorMsg('No current session found. Set up a session in the calendar settings.')
@@ -177,316 +191,276 @@ export default function TimetableModuleHigherEd({
     setSessionName(sessionRes.data.name)
 
     let offeringsResult: CourseOffering[] = []
-
     if (isStudentView && currentStudentId) {
-      const res = await loadOfferingsForStudent({
-        studentId: currentStudentId,
-        sessionId: sessionRes.data.id,
-      })
-      if (!res.ok) {
-        setLoadState('error')
-        setErrorMsg(res.error)
-        return
-      }
+      const res = await loadOfferingsForStudent({ studentId: currentStudentId, sessionId: sessionRes.data.id })
+      if (!res.ok) { setLoadState('error'); setErrorMsg(res.error); return }
       offeringsResult = res.data
     } else {
-      // PRD Tier 9 / Problem 9.5 (owner walkthrough, 2026-07-23): admin AND
-      // non-admin lecturer both converge on the same full, school-wide
-      // offerings load — loadOfferingsForTimetableAdmin(), the exact call
-      // the admin branch already used. The general TimetableGrid must show
-      // the complete picture for every staff role, at both school types
-      // (owner's own confirmed correction); a lecturer's PERSONAL schedule
-      // now lives on their dashboard instead (Problem 9.4's "My Schedule
-      // Today"/"My Timetable View" cards), not as a restriction on this
-      // shared module. Only guardians/students stay excluded from this
-      // component entirely (routed to GuardianPortal, isStudentView branch
-      // above, unaffected by this fix).
-      //
-      // Editing stays admin-only exactly as it already was — every
-      // `isAdmin &&`-gated control below (Edit/Done buttons, the edit
-      // panel, the add/edit-slot form, lecturer assignment, delete) is
-      // untouched by this change; only which offerings/entries get loaded
-      // in the first place is affected. A non-admin lecturer now simply
-      // sees the same read-only grid an admin sees outside edit mode.
-      //
-      // currentStaffId is no longer read here at all (isLecturerView's own
-      // identity-resolution tolerance, previously "no offerings yet while
-      // resolving," no longer applies — the full-school load doesn't
-      // depend on which staff member is asking).
       const res = await loadOfferingsForTimetableAdmin(sessionRes.data.id)
-      if (!res.ok) {
-        setLoadState('error')
-        setErrorMsg(res.error)
-        return
-      }
+      if (!res.ok) { setLoadState('error'); setErrorMsg(res.error); return }
       offeringsResult = res.data
     }
-
     setOfferings(offeringsResult)
 
-    const offeringIds = offeringsResult.map(o => o.id)
-    const entriesRes = await loadOfferingTimetable(offeringIds)
-    if (!entriesRes.ok) {
-      setLoadState('error')
-      setErrorMsg(entriesRes.error)
-      return
-    }
+    const entriesRes = await loadOfferingTimetable(offeringsResult.map(o => o.id))
+    if (!entriesRes.ok) { setLoadState('error'); setErrorMsg(entriesRes.error); return }
     setEntries(entriesRes.data)
 
-    // Admin-only, TIER 9 / PROBLEM (2026-07-30): the Schedule-tab periods
-    // and staff list power the add/edit-slot form's period picker and
-    // lecturer-assignment control respectively — neither is needed for a
-    // lecturer/student read-only view, so both are skipped outside the
-    // admin branch. Failures here are non-fatal to the screen (the form
-    // simply falls back to manual time entry / no lecturer picker) rather
-    // than blocking the whole timetable load over a convenience feature.
+    const [levelsRes, weekRes] = await Promise.all([loadLevelLabels(schoolId), loadWeekDays(schoolId)])
+    if (levelsRes.ok) setLevelLabels(levelsRes.data)
+    setSchoolDays(weekRes.error ? [] : weekRes.data.map(w => w.day_of_week))
+
     if (isAdmin) {
-      const [periodsRes, lecturersRes] = await Promise.all([
-        loadPeriodsForTimetable(schoolId),
-        loadLecturersForAssignment(schoolId),
-      ])
+      const [periodsRes, lecturersRes] = await Promise.all([loadPeriodsForTimetable(schoolId), loadLecturersForAssignment(schoolId)])
       setPeriods(periodsRes.ok ? periodsRes.data : [])
       setLecturers(lecturersRes.ok ? lecturersRes.data : [])
     }
-
     setLoadState(entriesRes.data.length > 0 || offeringsResult.length > 0 ? 'ready' : 'empty')
   }, [schoolId, isAdmin, isStudentView, currentStudentId, currentStaffId])
 
+  useEffect(() => { void load() }, [load])
+
+  // After an edit, refresh just the lessons — no full-page skeleton flash.
+  const refreshEntries = useCallback(async () => {
+    const res = await loadOfferingTimetable(offerings.map(o => o.id))
+    if (res.ok) setEntries(res.data)
+  }, [offerings])
+
+  // ── Clash detection (live, in memory) ───────────────────────────────────
+  const lecturerClashIds = useMemo(() => findLecturerConflicts(entries), [entries])
+  const venueClashIds = useMemo(() => findVenueConflicts(entries), [entries])
+
+  // ── What each view can pick from ────────────────────────────────────────
+  const levelOptions = useMemo(() => {
+    const ids = new Set<string>()
+    let hasNone = false
+    for (const o of offerings) { if (o.programme_level_id) ids.add(o.programme_level_id); else hasNone = true }
+    const list = [...ids].map(id => ({ id, label: levelLabels.get(id) ?? 'Programme level' })).sort((a, b) => a.label.localeCompare(b.label))
+    if (hasNone) list.push({ id: NONE, label: 'Shared / no level' })
+    return list
+  }, [offerings, levelLabels])
+
+  const lecturerOptions = useMemo(() => {
+    const m = new Map<string, string>()
+    let hasNone = false
+    for (const o of offerings) { if (o.staff_id) m.set(o.staff_id, o.staff_name ?? 'Lecturer'); else hasNone = true }
+    const list = [...m.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label))
+    if (hasNone) list.push({ id: NONE, label: 'No lecturer assigned yet' })
+    return list
+  }, [offerings])
+
+  const venueOptions = useMemo(() => {
+    const set = new Set<string>()
+    let hasNone = false
+    for (const e of entries) { if (e.venue?.trim()) set.add(e.venue.trim()); else hasNone = true }
+    const list = [...set].sort().map(v => ({ id: v, label: v }))
+    if (hasNone || list.length === 0) list.push({ id: NONE, label: 'No venue set' })
+    return list
+  }, [entries])
+
+  // Keep the selection valid; lecturers land on their own timetable.
   useEffect(() => {
-    load()
-  }, [load])
+    if (levelOptions.length && !levelOptions.some(o => o.id === levelSel)) setLevelSel(levelOptions[0].id)
+  }, [levelOptions, levelSel])
+  useEffect(() => {
+    if (lecturerOptions.length && !lecturerOptions.some(o => o.id === lecturerSel)) {
+      const mine = currentStaffId && lecturerOptions.find(o => o.id === currentStaffId)
+      setLecturerSel(mine ? mine.id : lecturerOptions[0].id)
+    }
+  }, [lecturerOptions, lecturerSel, currentStaffId])
+  useEffect(() => {
+    if (venueOptions.length && !venueOptions.some(o => o.id === venueSel)) setVenueSel(venueOptions[0].id)
+  }, [venueOptions, venueSel])
 
-  // ─── Conflict ids (admin edit view only — informational) ─────────────
+  const keyOf = {
+    level: (x: { programme_level_id: string | null }) => x.programme_level_id ?? NONE,
+    lecturer: (x: { staff_id: string | null }) => x.staff_id ?? NONE,
+  }
 
-  const conflictIds = findLecturerConflicts(entries)
+  const viewEntries = useMemo(() => {
+    if (isStudentView || view === 'all') return entries
+    if (view === 'level') return entries.filter(e => keyOf.level(e) === levelSel)
+    if (view === 'lecturer') return entries.filter(e => keyOf.lecturer(e) === lecturerSel)
+    return entries.filter(e => (e.venue?.trim() || NONE) === venueSel)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, view, levelSel, lecturerSel, venueSel, isStudentView])
 
-  // ─── Pre-save conflict check (SESSION 69 follow-up) ───────────────────
-  //
-  // findLecturerConflicts()/findCohortConflicts() both operate on already-
-  // loaded entries, badging saved rows after the fact — that check still
-  // runs (above) for the read-only grid. Saving needs the same two checks
-  // run BEFORE the write, against the not-yet-saved slot, so the admin can
-  // back out rather than only discover a clash after reloading. Neither
-  // service function accepts a synthetic entry directly, so this builds
-  // one full OfferingTimetableEntry-shaped object from formEntry's time
-  // fields + editOffering's course/programme/term fields (formEntry itself
-  // only ever carries the four fields openAddSlot() seeds, per the
-  // component's own form state), then reuses the exact same rangesOverlap()
-  // export and findCohortConflicts() the read-only badges already use —
-  // one overlap definition, not a second one re-derived here.
-  //
-  // Both checks are soft, confirm-to-proceed warnings — never a hard block
-  // — matching the real `confirm()` "Save anyway?" precedent already used
-  // for the session/term date-bounds warning in SettingsModule.tsx, not a
-  // new interaction pattern. If both fire, they're combined into one
-  // dialog, not two stacked confirms, so the admin has a single decision
-  // to make per save.
-  function buildPendingEntry(): OfferingTimetableEntry | null {
-    if (!formEntry?.course_offering_id || !formEntry.start_time || !formEntry.end_time) return null
-    const offering = offerings.find(o => o.id === formEntry.course_offering_id)
-    if (!offering) return null
-    return {
-      id: formEntry.id ?? '__pending__',
-      course_offering_id: offering.id,
-      course_id: offering.course_id,
-      course_code: offering.course_code,
-      course_title: offering.course_title,
-      staff_id: offering.staff_id,
-      staff_name: offering.staff_name,
-      programme_id: offering.programme_id,
-      programme_level_id: offering.programme_level_id,
-      term_id: offering.term_id,
-      day_of_week: formEntry.day_of_week ?? 1,
-      start_time: formEntry.start_time,
-      end_time: formEntry.end_time,
-      venue: formEntry.venue ?? null,
+  const days = useMemo(() => {
+    const used = new Set(entries.map(e => e.day_of_week))
+    const base = new Set<number>(schoolDays.length ? schoolDays : [1, 2, 3, 4, 5])
+    for (const d of used) base.add(d)
+    return orderedWeekDays(firstDay).filter(d => base.has(d))
+  }, [entries, schoolDays, firstDay])
+
+  const overviewRows: OverviewRow[] = useMemo(() => {
+    const rows = levelOptions.filter(o => o.id !== NONE).map(o => ({ key: o.id, label: o.label, levelId: o.id as string | null }))
+    if (levelOptions.some(o => o.id === NONE)) rows.push({ key: NONE, label: 'Shared / no level', levelId: null })
+    return rows
+  }, [levelOptions])
+
+  const activeOverviewDay = overviewDay ?? (days.includes(new Date().getDay()) ? new Date().getDay() : (days[0] ?? 1))
+
+  // ── Course tray: what can be placed in the current view ─────────────────
+  const trayOfferings = useMemo(() => {
+    if (view === 'level') return offerings.filter(o => keyOf.level(o) === levelSel)
+    if (view === 'lecturer') return offerings.filter(o => keyOf.lecturer(o) === lecturerSel)
+    return offerings
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offerings, view, levelSel, lecturerSel])
+
+  const venueDefault = view === 'venue' && venueSel !== NONE ? venueSel : null
+  const placedCount = (id: string) => entries.filter(e => e.course_offering_id === id).length
+
+  // ── Saving (shared by tap-to-place and the add/edit form) ───────────────
+  async function commitEntry(p: {
+    id?: string; offeringId: string; day: number; start: string; end: string; venue: string | null
+  }): Promise<'saved' | 'cancelled' | { error: string }> {
+    if (p.start >= p.end) return { error: 'End time must be after start time.' }
+    const offering = offerings.find(o => o.id === p.offeringId)
+    if (!offering) return { error: 'Choose a course.' }
+
+    const pending: OfferingTimetableEntry = {
+      id: p.id ?? '__pending__',
+      course_offering_id: offering.id, course_id: offering.course_id,
+      course_code: offering.course_code, course_title: offering.course_title,
+      staff_id: offering.staff_id, staff_name: offering.staff_name,
+      programme_id: offering.programme_id, programme_level_id: offering.programme_level_id, term_id: offering.term_id,
+      day_of_week: p.day, start_time: p.start, end_time: p.end, venue: p.venue,
+    }
+    const others = entries.filter(e => e.id !== pending.id)
+    const warnings: string[] = []
+
+    if (pending.staff_id) {
+      const clash = others.find(e => e.course_offering_id !== pending.course_offering_id && e.staff_id === pending.staff_id
+        && e.day_of_week === pending.day_of_week && rangesOverlap(e.start_time, e.end_time, pending.start_time, pending.end_time))
+      if (clash) warnings.push(`${pending.staff_name ?? 'This lecturer'} is already booked for ${clash.course_code} — ${clash.course_title} at an overlapping time.`)
+    }
+    if (pending.venue?.trim()) {
+      const clash = others.find(e => e.course_offering_id !== pending.course_offering_id && e.venue?.trim().toLowerCase() === pending.venue!.trim().toLowerCase()
+        && e.day_of_week === pending.day_of_week && rangesOverlap(e.start_time, e.end_time, pending.start_time, pending.end_time))
+      if (clash) warnings.push(`${pending.venue} is already used by ${clash.course_code} at an overlapping time.`)
+    }
+    const cohortRes = await findCohortConflicts([...others, pending])
+    if (!cohortRes.ok) return { error: cohortRes.error }
+    for (const c of cohortRes.data.filter(c => c.entryId === pending.id)) warnings.push(cohortConflictMessage(c))
+
+    if (warnings.length > 0 && !confirm(`${warnings.join('\n\n')}\n\nSave anyway?`)) return 'cancelled'
+
+    const res = await upsertOfferingTimetableEntry({
+      id: p.id, schoolId, courseOfferingId: p.offeringId, dayOfWeek: p.day,
+      startTime: p.start, endTime: p.end, venue: p.venue,
+    })
+    if (!res.ok) return { error: res.error }
+    await refreshEntries()
+    return 'saved'
+  }
+
+  // ── Interactions ────────────────────────────────────────────────────────
+  function openAdd(day: number, startMin: number, levelId: string | null | undefined) {
+    const start = fromMin(startMin)
+    const end = fromMin(Math.min(23 * 60 + 59, startMin + duration))
+    const scope = levelId === undefined ? null : (levelId ?? NONE)
+    const pool = scope ? offerings.filter(o => keyOf.level(o) === scope) : trayOfferings
+    setScopeLevel(scope)
+    setFormEntry({ course_offering_id: armedId ?? pool[0]?.id ?? '', day_of_week: day, start_time: start, end_time: end, venue: venueDefault })
+    setSelectedPeriodId(matchingPeriodId(start, end))
+    setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
+    setFormOpen(true)
+  }
+
+  async function handleSlotTap(day: number, startMin: number, levelId?: string | null) {
+    if (!editMode) return
+    setNotice('')
+    if (armedId && levelId === undefined) {
+      const res = await commitEntry({
+        offeringId: armedId, day, start: fromMin(startMin),
+        end: fromMin(Math.min(23 * 60 + 59, startMin + duration)), venue: venueDefault,
+      })
+      if (typeof res === 'object') setNotice(res.error)
+      return
+    }
+    openAdd(day, startMin, levelId)
+  }
+
+  function handleEntryTap(entry: OfferingTimetableEntry) {
+    if (editMode && isAdmin) {
+      setScopeLevel(null)
+      setFormEntry({ ...entry })
+      setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
+      setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
+      setFormOpen(true)
+    } else {
+      setDetailEntry(entry)
     }
   }
 
-  function findPendingLecturerClash(pending: OfferingTimetableEntry): OfferingTimetableEntry | null {
-    if (!pending.staff_id) return null
-    for (const e of entries) {
-      if (e.id === pending.id) continue // editing an existing row: skip itself
-      if (e.course_offering_id === pending.course_offering_id) continue
-      if (e.staff_id !== pending.staff_id) continue
-      if (e.day_of_week !== pending.day_of_week) continue
-      if (rangesOverlap(e.start_time, e.end_time, pending.start_time, pending.end_time)) return e
-    }
-    return null
-  }
-
-  // ─── Edit mode: enter/exit ─────────────────────────────────────────────
-
-  function enterEditMode() {
-    setEditMode(true)
-    setEditOfferingId(offerings[0]?.id ?? null)
-  }
-
-  function exitEditMode() {
-    setEditMode(false)
-    setEditOfferingId(null)
-    setFormOpen(false)
-    setFormEntry(null)
-  }
-
-  // ─── Add/edit slot form ────────────────────────────────────────────────
-
-  // Finds a saved period whose start/end exactly match the given times, so
-  // opening an existing slot for edit correctly shows the picker already
-  // set to that period rather than always defaulting to "Custom" — the
-  // same "don't make the admin re-derive state the app already has" bar
-  // this form's other fields are held to. Compares on time-of-day only
-  // (both sides already 'HH:MM' or 'HH:MM:SS'; slice to 5 for a stable
-  // compare regardless of which shape either source uses).
   function matchingPeriodId(startTime: string, endTime: string): string {
-    const match = periods.find(
-      p => p.start_time.slice(0, 5) === startTime.slice(0, 5) && p.end_time.slice(0, 5) === endTime.slice(0, 5)
-    )
+    const match = periods.find(p => p.start_time.slice(0, 5) === startTime.slice(0, 5) && p.end_time.slice(0, 5) === endTime.slice(0, 5))
     return match?.id ?? ''
   }
 
-  function openAddSlot() {
-    if (!editOfferingId) return
-    const defaultStart = '09:00'
-    const defaultEnd = '10:00'
-    setFormEntry({
-      course_offering_id: editOfferingId,
-      day_of_week: 1,
-      start_time: defaultStart,
-      end_time: defaultEnd,
-      venue: null,
-    })
-    setSelectedPeriodId(matchingPeriodId(defaultStart, defaultEnd))
-    setLecturerPickerId('')
-    setLecturerError(null)
-    setFormError(null)
-    setFormOpen(true)
-  }
-
-  function openEditSlot(entry: OfferingTimetableEntry) {
-    setFormEntry({ ...entry })
-    setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
-    setLecturerPickerId('')
-    setLecturerError(null)
-    setFormError(null)
-    setFormOpen(true)
-  }
-
-  // Picking a period pre-fills the same start/end time inputs the form
-  // already has — a convenience default, not a constraint. The admin can
-  // still edit either time field afterward (which silently reverts the
-  // picker to "Custom" on next open, via matchingPeriodId() above, rather
-  // than lying about which period is selected).
   function handlePeriodPick(periodId: string) {
     setSelectedPeriodId(periodId)
-    if (!periodId) return
     const period = periods.find(p => p.id === periodId)
     if (!period) return
-    setFormEntry(prev => prev ? {
-      ...prev,
-      start_time: period.start_time.slice(0, 5),
-      end_time: period.end_time.slice(0, 5),
-    } : prev)
+    setFormEntry(prev => prev ? { ...prev, start_time: period.start_time.slice(0, 5), end_time: period.end_time.slice(0, 5) } : prev)
   }
 
-  // Lecturer assignment (TIER 9 / PROBLEM) — writes to course_offerings,
-  // not to the timetable entry itself (a lecturer belongs to the offering,
-  // every one of its time slots inherits it). Reloads afterward so the
-  // offering picker's "(name)" suffix and the read-only grid's Lecturer
-  // line both immediately reflect the change.
+  function setDurationOnForm(minutes: number) {
+    setFormEntry(prev => {
+      if (!prev?.start_time) return prev
+      return { ...prev, end_time: fromMin(Math.min(23 * 60 + 59, mins(prev.start_time) + minutes)) }
+    })
+    setSelectedPeriodId('')
+  }
+
+  const formOffering = offerings.find(o => o.id === formEntry?.course_offering_id) ?? null
+
   async function handleAssignLecturer() {
-    if (!editOffering || !lecturerPickerId) return
-    setLecturerSaving(true)
-    setLecturerError(null)
-    const res = await assignOfferingLecturer(editOffering, lecturerPickerId)
+    if (!formOffering || !lecturerPickerId) return
+    setLecturerSaving(true); setLecturerError(null)
+    const res = await assignOfferingLecturer(formOffering, lecturerPickerId)
     setLecturerSaving(false)
-    if (!res.ok) {
-      setLecturerError(res.error)
-      return
-    }
+    if (!res.ok) { setLecturerError(res.error); return }
     setLecturerPickerId('')
     await load()
   }
 
   async function handleSaveSlot() {
-    if (!formEntry || !formEntry.course_offering_id || !formEntry.start_time || !formEntry.end_time) return
-    if (formEntry.start_time >= formEntry.end_time) {
-      setFormError('End time must be after start time.')
-      return
-    }
-
-    // Pre-save conflict check — both soft, both combined into one dialog.
-    // buildPendingEntry() can legitimately return null (e.g. the chosen
-    // offering isn't in the currently-loaded `offerings` list, which
-    // shouldn't happen via the form's own dropdown but isn't assumed
-    // impossible) — in that case neither check has enough to run on, so
-    // saving proceeds without a warning rather than blocking on a check
-    // that has nothing to check.
-    const pending = buildPendingEntry()
-    if (pending) {
-      const lecturerClash = findPendingLecturerClash(pending)
-      const cohortRes = await findCohortConflicts([...entries.filter(e => e.id !== pending.id), pending])
-      if (!cohortRes.ok) {
-        // A failed curriculum-severity lookup shouldn't silently block a
-        // save the admin has no way to fix from here — surface it as a
-        // form error instead, same as any other failed read in this file.
-        setFormError(cohortRes.error)
-        return
-      }
-      const cohortClashesForPending = cohortRes.data.filter(c => c.entryId === pending.id)
-
-      const warnings: string[] = []
-      if (lecturerClash) {
-        warnings.push(
-          `This lecturer is already booked for ${lecturerClash.course_code} — ${lecturerClash.course_title} at an overlapping time.`
-        )
-      }
-      for (const c of cohortClashesForPending) {
-        warnings.push(cohortConflictMessage(c))
-      }
-
-      if (warnings.length > 0) {
-        const proceed = confirm(`${warnings.join('\n\n')}\n\nSave anyway?`)
-        if (!proceed) return
-      }
-    }
-
-    setFormSaving(true)
-    setFormError(null)
-
-    const res = await upsertOfferingTimetableEntry({
-      id: formEntry.id,
-      schoolId,
-      courseOfferingId: formEntry.course_offering_id,
-      dayOfWeek: formEntry.day_of_week ?? 1,
-      startTime: formEntry.start_time,
-      endTime: formEntry.end_time,
-      venue: formEntry.venue ?? null,
+    if (!formEntry?.course_offering_id || !formEntry.start_time || !formEntry.end_time) { setFormError('Choose a course and a time.'); return }
+    setFormSaving(true); setFormError(null)
+    const res = await commitEntry({
+      id: formEntry.id, offeringId: formEntry.course_offering_id, day: formEntry.day_of_week ?? 1,
+      start: formEntry.start_time.slice(0, 5), end: formEntry.end_time.slice(0, 5), venue: formEntry.venue?.trim() || null,
     })
-
     setFormSaving(false)
-
-    if (!res.ok) {
-      setFormError(res.error)
-      return
-    }
-
-    setFormOpen(false)
-    setFormEntry(null)
-    await load()
+    if (res === 'cancelled') return
+    if (typeof res === 'object') { setFormError(res.error); return }
+    setFormOpen(false); setFormEntry(null)
   }
 
-  async function handleConfirmDelete(entryId: string) {
-    const res = await deleteOfferingTimetableEntry(entryId)
-    setPendingDeleteId(null)
-    if (!res.ok) {
-      setErrorMsg(res.error)
-      return
-    }
-    await load()
+  async function handleRemove() {
+    if (!formEntry?.id) return
+    const res = await deleteOfferingTimetableEntry(formEntry.id)
+    if (!res.ok) { setFormError(res.error); return }
+    setFormOpen(false); setFormEntry(null); setConfirmRemove(false)
+    await refreshEntries()
   }
 
-  // ─── Render ─────────────────────────────────────────────────────────────
+  function handlePrint() {
+    if (view === 'all') { setNotice('Choose a programme level, lecturer or venue to print its week.'); return }
+    const label = isStudentView ? 'My timetable'
+      : view === 'level' ? (levelOptions.find(o => o.id === levelSel)?.label ?? 'Timetable')
+      : view === 'lecturer' ? (lecturerOptions.find(o => o.id === lecturerSel)?.label ?? 'Timetable')
+      : `Venue: ${venueOptions.find(o => o.id === venueSel)?.label ?? ''}`
+    const ok = printHigherEdTimetable({ title: label, subtitle: sessionName, schoolName: '', entries: viewEntries, days })
+    if (!ok) setNotice('There are no lessons to print in this view.')
+  }
+
+  function enterEditMode() { setEditMode(true); setNotice('') }
+  function exitEditMode() { setEditMode(false); setArmedId(null); setFormOpen(false); setFormEntry(null); setNotice('') }
+
+  // ── Render ──────────────────────────────────────────────────────────────
 
   if (loadState === 'loading') return <HigherEdTimetableSkeleton />
 
@@ -510,158 +484,155 @@ export default function TimetableModuleHigherEd({
             ? "You don't have any registered courses with a scheduled time yet."
             : isLecturerView
             ? "You don't have any assigned course offerings with a scheduled time yet."
-            : `No course-offering timetable has been set up for ${sessionName} yet.`}
-          {isAdmin ? ' Tap "Set up timetable" to start adding lessons.' : ''}
+            : `No course offerings have been set up for ${sessionName} yet. Add them in Curriculum / Offerings, then schedule them here.`}
         </p>
-        {isAdmin && (
-          <button className="tt-edit-start-btn" onClick={enterEditMode}>
-            Set up timetable
-          </button>
-        )}
       </div>
     )
   }
 
-  const editOffering = offerings.find(o => o.id === editOfferingId) ?? null
-  const editOfferingEntries = entries
-    .filter(e => e.course_offering_id === editOfferingId)
-    .sort((a, b) => a.day_of_week - b.day_of_week || a.start_time.localeCompare(b.start_time))
+  const showSelector = !isStudentView && view !== 'all'
+  const selection =
+    view === 'level' ? { value: levelSel, set: setLevelSel, options: levelOptions, label: 'Programme level' }
+    : view === 'lecturer' ? { value: lecturerSel, set: setLecturerSel, options: lecturerOptions, label: 'Lecturer' }
+    : { value: venueSel, set: setVenueSel, options: venueOptions, label: 'Venue' }
 
-  const daysToRender = editMode
-    ? [0, 1, 2, 3, 4, 5, 6]
-    : distinctDaysUsed(entries, firstDay)
+  const modalPool = scopeLevel ? offerings.filter(o => keyOf.level(o) === scopeLevel) : (formEntry?.id ? offerings : trayOfferings.length ? trayOfferings : offerings)
 
   return (
     <div className="tt-root">
-      {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className="tt-header">
         <div className="tt-header-top">
           <span className="tt-session-badge">{sessionName}</span>
           <div className="tt-header-actions">
-            {isAdmin && !editMode && (
-              <button className="tt-edit-btn" onClick={enterEditMode}>
-                Edit
-              </button>
+            {!editMode && viewEntries.length > 0 && view !== 'all' && (
+              <button className="tt-print-btn" onClick={handlePrint}>Print</button>
             )}
-            {isAdmin && editMode && (
-              <button className="tt-done-btn" onClick={exitEditMode}>
-                Done
-              </button>
-            )}
+            {isAdmin && !editMode && <button className="tt-edit-btn" onClick={enterEditMode}>Edit</button>}
+            {isAdmin && editMode && <button className="tt-done-btn" onClick={exitEditMode}>Done</button>}
           </div>
         </div>
 
-        {isAdmin && editMode && (
+        {!isStudentView && (
+          <div className="tt-toggle-row">
+            {([['level', 'Programme level'], ['lecturer', 'Lecturer'], ['venue', 'Venue'], ['all', 'All levels']] as [View, string][]).map(([k, label]) => (
+              <button key={k} className={`tt-toggle-btn${view === k ? ' tt-toggle-btn--active' : ''}`} onClick={() => { setView(k); setArmedId(null) }}>{label}</button>
+            ))}
+          </div>
+        )}
+
+        {showSelector && (
           <div className="tt-selector-row">
-            <label className="tt-selector-label">Course offering</label>
-            <select
-              className="tt-selector"
-              value={editOfferingId ?? ''}
-              onChange={e => setEditOfferingId(e.target.value || null)}
-            >
-              {offerings.length === 0 && <option value="">No course offerings found</option>}
-              {offerings.map(o => (
-                <option key={o.id} value={o.id}>
-                  {o.course_code} — {o.course_title}{o.staff_name ? ` (${o.staff_name})` : ''}
-                </option>
-              ))}
+            <label className="tt-selector-label">{selection.label}</label>
+            <select className="tt-selector" value={selection.value} onChange={e => { selection.set(e.target.value); setArmedId(null) }}>
+              {selection.options.length === 0 && <option value="">Nothing to show yet</option>}
+              {selection.options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </div>
         )}
       </div>
 
-      {/* ── Edit mode: per-offering slot list ────────────────────────────── */}
-      {isAdmin && editMode && (
-        <div className="tt-oe-edit-panel">
-          {!editOffering ? (
-            <p className="tt-empty-msg">Pick a course offering above to manage its schedule.</p>
+      {notice && <p className="hg-notice" role="status">{notice} <button type="button" className="fma-link" onClick={() => setNotice('')}>Dismiss</button></p>}
+
+      {/* Edit tray: pick a course, then tap the grid to place it */}
+      {isAdmin && editMode && view !== 'all' && (
+        <div className="hg-tray">
+          <div className="hg-tray-top">
+            <span className="hg-tray-hint">
+              {armedId ? 'Now tap the grid to place it. Tap the course again to put it down.' : 'Pick a course, then tap the grid to place it — or tap any empty hour to add one with options.'}
+            </span>
+            <label className="hg-tray-dur">Length
+              <select value={duration} onChange={e => setDuration(Number(e.target.value))}>
+                {DURATIONS.map(d => <option key={d.minutes} value={d.minutes}>{d.label}</option>)}
+              </select>
+            </label>
+          </div>
+          {trayOfferings.length === 0 ? (
+            <p className="hg-tray-empty">No courses to place here. {view === 'venue' ? 'Switch to a programme level or lecturer.' : 'Add course offerings in Curriculum / Offerings first.'}</p>
           ) : (
-            <>
-              <div className="tt-oe-slot-list">
-                {editOfferingEntries.length === 0 && (
-                  <p className="tt-empty-msg">No time slots yet for {editOffering.course_code}.</p>
-                )}
-                {editOfferingEntries.map(entry => (
-                  <div key={entry.id} className="tt-oe-slot-row">
-                    <div className="tt-oe-slot-info">
-                      <span className="tt-oe-slot-day">{dayName(entry.day_of_week, true)}</span>
-                      <span className="tt-oe-slot-time">{formatTime(entry.start_time)} – {formatTime(entry.end_time)}</span>
-                      {entry.venue && <span className="tt-oe-slot-venue">{entry.venue}</span>}
-                      {conflictIds.has(entry.id) && (
-                        <span className="tt-conflict-badge" title="This lecturer is double-booked at this time">⚠</span>
-                      )}
-                    </div>
-                    <div className="tt-oe-slot-actions">
-                      <button className="tt-oe-slot-edit-btn" onClick={() => openEditSlot(entry)}>Edit</button>
-                      {pendingDeleteId === entry.id ? (
-                        <>
-                          <button className="tt-oe-slot-confirm-btn" onClick={() => handleConfirmDelete(entry.id)}>Confirm</button>
-                          <button className="tt-oe-slot-cancel-btn" onClick={() => setPendingDeleteId(null)}>Cancel</button>
-                        </>
-                      ) : (
-                        <button className="tt-oe-slot-delete-btn" onClick={() => setPendingDeleteId(entry.id)}>Remove</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button className="tt-oe-add-slot-btn" onClick={openAddSlot}>+ Add time slot</button>
-            </>
+            <div className="hg-chips">
+              {trayOfferings.map(o => (
+                <button key={o.id} type="button"
+                  className={`hg-chip${armedId === o.id ? ' hg-chip--armed' : ''}`}
+                  style={{ borderColor: `hsl(${courseHue(o.course_code)} 55% 55%)` }}
+                  onClick={() => setArmedId(armedId === o.id ? null : o.id)}
+                  title={`${o.course_title}${o.staff_name ? ` · ${o.staff_name}` : ' · no lecturer yet'}`}>
+                  <strong>{o.course_code}</strong>
+                  <span>{o.staff_name ?? 'No lecturer'}</span>
+                  <em>{placedCount(o.id)} slot{placedCount(o.id) === 1 ? '' : 's'}</em>
+                </button>
+              ))}
+            </div>
           )}
         </div>
       )}
-
-      {/* ── Read-only grid (admin non-edit, lecturer, student) ───────────── */}
-      {!editMode && (
-        <div className="tt-grid-wrapper">
-          <HigherEdTimetableGrid
-            entries={entries}
-            days={daysToRender}
-            conflictIds={conflictIds}
-            onEntryTap={setDetailEntry}
-          />
-        </div>
+      {isAdmin && editMode && view === 'all' && (
+        <p className="hg-tray-hint hg-tray-hint--solo">Tap an empty hour in a level's row to add a course there. Tap a lesson to change or remove it.</p>
       )}
 
-      {/* ── Add/edit slot modal ──────────────────────────────────────────── */}
-      <Modal open={formOpen} onClose={() => { setFormOpen(false); setFormEntry(null) }} title={formEntry?.id ? 'Edit time slot' : 'Add time slot'}>
+      <div className="tt-grid-wrapper">
+        {view === 'all' && !isStudentView ? (
+          <HigherEdDayOverview
+            entries={entries}
+            rows={overviewRows}
+            days={days}
+            day={activeOverviewDay}
+            onDayChange={setOverviewDay}
+            editMode={editMode && isAdmin}
+            lecturerClashIds={lecturerClashIds}
+            venueClashIds={venueClashIds}
+            onSlotTap={(levelId, start) => void handleSlotTap(activeOverviewDay, start, levelId)}
+            onEntryTap={handleEntryTap}
+          />
+        ) : (
+          <HigherEdWeekGrid
+            entries={viewEntries}
+            days={days}
+            editMode={editMode && isAdmin}
+            armed={armedId !== null}
+            lecturerClashIds={lecturerClashIds}
+            venueClashIds={venueClashIds}
+            showLecturer={view !== 'lecturer'}
+            onSlotTap={(day, start) => void handleSlotTap(day, start)}
+            onEntryTap={handleEntryTap}
+          />
+        )}
+        {viewEntries.length === 0 && view !== 'all' && !editMode && (
+          <p className="hg-empty">Nothing scheduled here yet.{isAdmin ? ' Press Edit to start placing courses.' : ''}</p>
+        )}
+        {(lecturerClashIds.size > 0 || venueClashIds.size > 0) && (
+          <p className="hg-legend">⚠ marks a lecturer or venue booked twice at overlapping times.</p>
+        )}
+      </div>
+
+      {/* ── Add / edit lesson ──────────────────────────────────────────── */}
+      <Modal open={formOpen} onClose={() => { setFormOpen(false); setFormEntry(null) }} title={formEntry?.id ? 'Edit lesson' : 'Add lesson'}>
         {formEntry && (
           <div className="tt-oe-form">
-            {/* Lecturer awareness (TIER 9 / PROBLEM, 2026-07-30) — the
-                lecturer belongs to the course offering itself, not to this
-                one time slot, so this is display + a fix-it-here shortcut,
-                not a per-slot field. When the offering already has a
-                lecturer, show it read-only (this form isn't where a
-                lecturer gets reassigned once one exists — that stays in
-                Curriculum/Offerings setup, matching this problem's own
-                scoping to the "never assigned yet" gap). When it doesn't,
-                offer the picker directly rather than sending the admin
-                back to a different screen mid-scheduling. */}
-            {editOffering && (
+            <label className="tt-oe-form-label">
+              Course
+              {formEntry.id ? (
+                <input className="tt-selector" value={`${formOffering?.course_code ?? ''} — ${formOffering?.course_title ?? ''}`} disabled />
+              ) : (
+                <select className="tt-selector" value={formEntry.course_offering_id ?? ''}
+                  onChange={e => setFormEntry({ ...formEntry, course_offering_id: e.target.value })}>
+                  <option value="">Choose a course…</option>
+                  {modalPool.map(o => <option key={o.id} value={o.id}>{o.course_code} — {o.course_title}{o.staff_name ? ` (${o.staff_name})` : ''}</option>)}
+                </select>
+              )}
+            </label>
+
+            {formOffering && (
               <div className="tt-oe-form-lecturer">
-                {editOffering.staff_id ? (
-                  <p className="tt-oe-form-lecturer-assigned">
-                    <strong>Lecturer:</strong> {editOffering.staff_name ?? 'Assigned'}
-                  </p>
+                {formOffering.staff_id ? (
+                  <p className="tt-oe-form-lecturer-assigned"><strong>Lecturer:</strong> {formOffering.staff_name ?? 'Assigned'}</p>
                 ) : (
                   <label className="tt-oe-form-label">
                     Lecturer — not yet assigned
-                    <select
-                      className="tt-selector"
-                      value={lecturerPickerId}
-                      onChange={e => setLecturerPickerId(e.target.value)}
-                    >
+                    <select className="tt-selector" value={lecturerPickerId} onChange={e => setLecturerPickerId(e.target.value)}>
                       <option value="">Select a lecturer…</option>
-                      {lecturers.map(l => (
-                        <option key={l.id} value={l.id}>{l.full_name}</option>
-                      ))}
+                      {lecturers.map(l => <option key={l.id} value={l.id}>{l.full_name}</option>)}
                     </select>
-                    <button
-                      type="button"
-                      className="tt-oe-form-assign-lecturer-btn"
-                      onClick={handleAssignLecturer}
-                      disabled={!lecturerPickerId || lecturerSaving}
-                    >
+                    <button type="button" className="tt-oe-form-assign-lecturer-btn" onClick={handleAssignLecturer} disabled={!lecturerPickerId || lecturerSaving}>
                       {lecturerSaving ? 'Assigning…' : 'Assign lecturer'}
                     </button>
                     {lecturerError && <p className="tt-oe-form-error">{lecturerError}</p>}
@@ -669,160 +640,78 @@ export default function TimetableModuleHigherEd({
                 )}
               </div>
             )}
+
             <label className="tt-oe-form-label">
               Day
-              <select
-                className="tt-selector"
-                value={formEntry.day_of_week ?? 1}
-                onChange={e => setFormEntry({ ...formEntry, day_of_week: Number(e.target.value) })}
-              >
-                {[0, 1, 2, 3, 4, 5, 6].map(d => (
-                  <option key={d} value={d}>{dayName(d)}</option>
-                ))}
+              <select className="tt-selector" value={formEntry.day_of_week ?? 1} onChange={e => setFormEntry({ ...formEntry, day_of_week: Number(e.target.value) })}>
+                {days.map(d => <option key={d} value={d}>{dayName(d)}</option>)}
               </select>
             </label>
-            {/* Schedule-tab period picker (TIER 9 / PROBLEM, 2026-07-30) —
-                a convenience default only: picking a period pre-fills the
-                two time inputs below, which stay fully editable afterward
-                for a one-off time that doesn't match any saved period. */}
+
             {periods.length > 0 && (
               <label className="tt-oe-form-label">
                 Period
-                <select
-                  className="tt-selector"
-                  value={selectedPeriodId}
-                  onChange={e => handlePeriodPick(e.target.value)}
-                >
+                <select className="tt-selector" value={selectedPeriodId} onChange={e => handlePeriodPick(e.target.value)}>
                   <option value="">Custom time</option>
-                  {periods.filter(p => !p.is_break).map(p => (
-                    <option key={p.id} value={p.id}>
-                      {p.label} ({formatTime(p.start_time)}–{formatTime(p.end_time)})
-                    </option>
-                  ))}
+                  {periods.filter(p => !p.is_break).map(p => <option key={p.id} value={p.id}>{p.label} ({formatTime(p.start_time)}–{formatTime(p.end_time)})</option>)}
                 </select>
               </label>
             )}
-            <label className="tt-oe-form-label">
-              Start time
-              <input
-                type="time"
-                className="tt-selector"
-                value={(formEntry.start_time ?? '09:00').slice(0, 5)}
-                onChange={e => {
-                  const start_time = e.target.value
-                  setFormEntry({ ...formEntry, start_time })
-                  setSelectedPeriodId(matchingPeriodId(start_time, formEntry.end_time ?? '10:00'))
-                }}
-              />
-            </label>
-            <label className="tt-oe-form-label">
-              End time
-              <input
-                type="time"
-                className="tt-selector"
-                value={(formEntry.end_time ?? '10:00').slice(0, 5)}
-                onChange={e => {
-                  const end_time = e.target.value
-                  setFormEntry({ ...formEntry, end_time })
-                  setSelectedPeriodId(matchingPeriodId(formEntry.start_time ?? '09:00', end_time))
-                }}
-              />
-            </label>
+
+            <div className="hg-timerow">
+              <label className="tt-oe-form-label">Starts
+                <input type="time" className="tt-selector" value={(formEntry.start_time ?? '09:00').slice(0, 5)}
+                  onChange={e => { setFormEntry({ ...formEntry, start_time: e.target.value }); setSelectedPeriodId(matchingPeriodId(e.target.value, formEntry.end_time ?? '10:00')) }} />
+              </label>
+              <label className="tt-oe-form-label">Ends
+                <input type="time" className="tt-selector" value={(formEntry.end_time ?? '10:00').slice(0, 5)}
+                  onChange={e => { setFormEntry({ ...formEntry, end_time: e.target.value }); setSelectedPeriodId(matchingPeriodId(formEntry.start_time ?? '09:00', e.target.value)) }} />
+              </label>
+            </div>
+            <div className="hg-durbtns">
+              {DURATIONS.map(d => <button key={d.minutes} type="button" className="hg-durbtn" onClick={() => setDurationOnForm(d.minutes)}>{d.label}</button>)}
+            </div>
+
             <label className="tt-oe-form-label">
               Venue (optional)
-              <input
-                type="text"
-                className="tt-selector"
-                value={formEntry.venue ?? ''}
-                onChange={e => setFormEntry({ ...formEntry, venue: e.target.value || null })}
-                placeholder="e.g. Lecture Theatre 2"
-              />
+              <input type="text" className="tt-selector" value={formEntry.venue ?? ''} list="hg-venues"
+                onChange={e => setFormEntry({ ...formEntry, venue: e.target.value || null })} placeholder="e.g. Lecture Theatre 2" />
+              <datalist id="hg-venues">{venueOptions.filter(v => v.id !== NONE).map(v => <option key={v.id} value={v.label} />)}</datalist>
             </label>
+
             {formError && <p className="tt-oe-form-error">{formError}</p>}
-            <button className="tt-oe-form-save-btn" onClick={handleSaveSlot} disabled={formSaving}>
+            <button className="tt-oe-form-save-btn" onClick={handleSaveSlot} disabled={formSaving || !formEntry.course_offering_id}>
               {formSaving ? 'Saving…' : 'Save'}
             </button>
+            {formEntry.id && (
+              confirmRemove ? (
+                <div className="hg-remove-confirm">
+                  <span>Remove this lesson from the timetable?</span>
+                  <button type="button" className="tt-oe-slot-confirm-btn" onClick={() => void handleRemove()}>Yes, remove</button>
+                  <button type="button" className="tt-oe-slot-cancel-btn" onClick={() => setConfirmRemove(false)}>Keep</button>
+                </div>
+              ) : (
+                <button type="button" className="tt-oe-slot-delete-btn" onClick={() => setConfirmRemove(true)}>Remove lesson</button>
+              )
+            )}
           </div>
         )}
       </Modal>
 
-      {/* ── Read-only detail popup ───────────────────────────────────────── */}
-      <Modal
-        open={detailEntry !== null}
-        onClose={() => setDetailEntry(null)}
-        title={detailEntry ? `${detailEntry.course_code} — ${detailEntry.course_title}` : ''}
-      >
+      {/* ── Read-only lesson detail ────────────────────────────────────── */}
+      <Modal open={detailEntry !== null} onClose={() => setDetailEntry(null)} title={detailEntry ? `${detailEntry.course_code} — ${detailEntry.course_title}` : ''}>
         {detailEntry && (
           <div className="tt-oe-detail">
             <p><strong>Day:</strong> {dayName(detailEntry.day_of_week)}</p>
             <p><strong>Time:</strong> {formatTime(detailEntry.start_time)} – {formatTime(detailEntry.end_time)}</p>
             {detailEntry.staff_name && <p><strong>Lecturer:</strong> {detailEntry.staff_name}</p>}
             {detailEntry.venue && <p><strong>Venue:</strong> {detailEntry.venue}</p>}
-            {conflictIds.has(detailEntry.id) && (
-              <p className="tt-oe-detail-conflict">⚠ This lecturer is double-booked at this time with another course offering.</p>
-            )}
+            {detailEntry.programme_level_id && levelLabels.get(detailEntry.programme_level_id) && <p><strong>For:</strong> {levelLabels.get(detailEntry.programme_level_id)}</p>}
+            {lecturerClashIds.has(detailEntry.id) && <p className="tt-oe-detail-conflict">⚠ This lecturer is double-booked at this time with another course offering.</p>}
+            {venueClashIds.has(detailEntry.id) && <p className="tt-oe-detail-conflict">⚠ This venue is used by another course at an overlapping time.</p>}
           </div>
         )}
       </Modal>
-    </div>
-  )
-}
-
-// ─── Read-only grid — day columns, entries listed by start time ──────────
-// Deliberately NOT a period-row grid (TimetableGrid in TimetableModule.tsx
-// is keyed on a fixed period list this domain doesn't have) — each day
-// column simply lists that day's entries in start-time order. This is the
-// natural rendering for a domain where entries can have arbitrary,
-// non-aligned time ranges rather than snapping to a shared period grid.
-
-function HigherEdTimetableGrid({
-  entries,
-  days,
-  conflictIds,
-  onEntryTap,
-}: {
-  entries: OfferingTimetableEntry[]
-  days: number[]
-  conflictIds: Set<string>
-  onEntryTap: (entry: OfferingTimetableEntry) => void
-}) {
-  if (days.length === 0) {
-    return (
-      <div className="tt-empty-state">
-        <span className="tt-empty-icon"><Icon name="calendar" /></span>
-        <p className="tt-empty-msg">No scheduled lessons yet.</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="tt-oe-grid">
-      {days.map(d => {
-        const dayEntries = entries
-          .filter(e => e.day_of_week === d)
-          .sort((a, b) => a.start_time.localeCompare(b.start_time))
-        return (
-          <div key={d} className="tt-col">
-            <div className="tt-cell tt-cell--day-header">{dayName(d, true)}</div>
-            {dayEntries.length === 0 ? (
-              <div className="tt-cell tt-oe-cell--empty" />
-            ) : (
-              dayEntries.map(entry => (
-                <button
-                  key={entry.id}
-                  className="tt-cell tt-oe-cell--filled"
-                  onClick={() => onEntryTap(entry)}
-                >
-                  <span className="tt-oe-cell-code">{entry.course_code}</span>
-                  <span className="tt-oe-cell-time">{formatTime(entry.start_time)}–{formatTime(entry.end_time)}</span>
-                  {entry.venue && <span className="tt-oe-cell-venue">{entry.venue}</span>}
-                  {conflictIds.has(entry.id) && <span className="tt-conflict-badge">⚠</span>}
-                </button>
-              ))
-            )}
-          </div>
-        )
-      })}
     </div>
   )
 }
