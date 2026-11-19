@@ -170,13 +170,22 @@ export function HigherEdWeekGrid({
   )
 }
 
-// ─── All levels, one day ─────────────────────────────────────────────────────
+// ─── Whole school: every lesson in the institution ───────────────────────────
 
-export interface OverviewRow { key: string; label: string; levelId: string | null }
+/** One row of the master timetable: a room, a programme level or a lecturer. */
+export interface SchoolRow {
+  key: string
+  label: string
+  sub?: string
+  match: (e: OfferingTimetableEntry) => boolean
+  levelId?: string | null
+  venue?: string | null
+  staffId?: string | null
+}
 
 const COL_PX = 84
 
-export function HigherEdDayOverview({
+export function HigherEdSchoolView({
   entries,
   rows,
   days,
@@ -189,19 +198,20 @@ export function HigherEdDayOverview({
   onEntryTap,
 }: {
   entries: OfferingTimetableEntry[]
-  rows: OverviewRow[]
+  rows: SchoolRow[]
   days: number[]
-  day: number
-  onDayChange: (d: number) => void
+  day: number | 'all'
+  onDayChange: (d: number | 'all') => void
   editMode: boolean
   lecturerClashIds: Set<string>
   venueClashIds: Set<string>
-  onSlotTap: (levelId: string | null, startMinutes: number) => void
+  onSlotTap: (day: number, row: SchoolRow, startMinutes: number) => void
   onEntryTap: (entry: OfferingTimetableEntry) => void
 }) {
   const now = useNow()
-  const dayEntries = useMemo(() => entries.filter(e => e.day_of_week === day), [entries, day])
-  const { from, to } = useMemo(() => axisFor(dayEntries), [dayEntries])
+  const shown = day === 'all' ? days : [day]
+  // One shared time axis, so "All days" lines up from block to block.
+  const { from, to } = useMemo(() => axisFor(entries), [entries])
   const hours = useMemo(() => Array.from({ length: (to - from) / 60 }, (_, i) => from + i * 60), [from, to])
   const width = hours.length * COL_PX
   const px = (min: number) => ((min - from) / 60) * COL_PX
@@ -214,52 +224,65 @@ export function HigherEdDayOverview({
             className={`tto-day${day === d ? ' tto-day--on' : ''}${now.day === d ? ' tto-day--today' : ''}`}
             aria-pressed={day === d} onClick={() => onDayChange(d)}>{dayName(d, true)}</button>
         ))}
+        <button type="button" className={`tto-day${day === 'all' ? ' tto-day--on' : ''}`} aria-pressed={day === 'all'} onClick={() => onDayChange('all')}>All days</button>
       </div>
 
-      <div className="hg-scroll">
-        <div className="hgo-table" style={{ width: width + 150 }}>
-          <div className="hgo-row hgo-row--head">
-            <div className="hgo-label" />
-            <div className="hgo-track" style={{ width }}>
-              {hours.map(h => <span key={h} className="hgo-hour" style={{ left: px(h), width: COL_PX }}>{formatTime(fromMin(h))}</span>)}
-            </div>
-          </div>
-
-          {rows.map(r => {
-            const laid = layoutLanes(dayEntries.filter(e => (e.programme_level_id ?? null) === r.levelId))
-            const lanes = Math.max(1, ...laid.map(l => l.lanes))
-            const rowH = lanes * 46 + 8
-            return (
-              <div key={r.key} className="hgo-row">
-                <div className="hgo-label" title={r.label}>{r.label}</div>
-                <div className="hgo-track" style={{ width, height: rowH }}>
-                  {hours.map(h => (
-                    editMode ? (
-                      <button key={h} type="button" className="hgo-cell hgo-cell--tap" style={{ left: px(h), width: COL_PX, height: rowH }}
-                        onClick={() => onSlotTap(r.levelId, h)} aria-label={`${r.label} ${formatTime(fromMin(h))}`}><span>+</span></button>
-                    ) : (
-                      <div key={h} className="hgo-cell" style={{ left: px(h), width: COL_PX, height: rowH }} />
-                    )
-                  ))}
-                  {laid.map(({ e, lane }) => {
-                    const clash = lecturerClashIds.has(e.id) || venueClashIds.has(e.id)
-                    return (
-                      <button key={e.id} type="button" className={`hg-block hgo-block${clash ? ' hg-block--clash' : ''}`}
-                        style={{ left: px(toMin(e.start_time)), width: Math.max(40, px(toMin(e.end_time)) - px(toMin(e.start_time)) - 2), top: 4 + lane * 46, height: 42, ...blockStyle(e.course_code) }}
-                        onClick={() => onEntryTap(e)}
-                        title={`${e.course_code} — ${e.course_title}${e.staff_name ? ` · ${e.staff_name}` : ''}`}>
-                        <span className="hg-b-code">{e.course_code}{clash ? ' ⚠' : ''}</span>
-                        <span className="hg-b-meta">{formatTime(e.start_time)}{e.venue ? ` · ${e.venue}` : ''}</span>
-                      </button>
-                    )
-                  })}
-                  {now.day === day && now.minutes >= from && now.minutes <= to && <div className="hgo-now" style={{ left: px(now.minutes) }} />}
+      {shown.map(d => {
+        const dayEntries = entries.filter(e => e.day_of_week === d)
+        return (
+          <section key={d} className="hgo-day">
+            {day === 'all' && <h4 className="tto-day-title">{dayName(d)} <span className="hgo-count">{dayEntries.length} lesson{dayEntries.length === 1 ? '' : 's'}</span></h4>}
+            <div className="hg-scroll">
+              <div className="hgo-table" style={{ ['--track' as string]: `${width}px` }}>
+                <div className="hgo-row hgo-row--head">
+                  <div className="hgo-label hgo-label--head">{rows.length} row{rows.length === 1 ? '' : 's'}</div>
+                  <div className="hgo-track" style={{ width }}>
+                    {hours.map(h => <span key={h} className="hgo-hour" style={{ left: px(h), width: COL_PX }}>{formatTime(fromMin(h))}</span>)}
+                  </div>
                 </div>
+
+                {rows.map(r => {
+                  const laid = layoutLanes(dayEntries.filter(r.match))
+                  const lanes = Math.max(1, ...laid.map(l => l.lanes), ...laid.map(l => l.lane + 1))
+                  const rowH = lanes * 46 + 8
+                  return (
+                    <div key={r.key} className="hgo-row">
+                      <div className="hgo-label" title={r.sub ? `${r.label} — ${r.sub}` : r.label}>
+                        <span className="hgo-label-main">{r.label}</span>
+                        {r.sub && <span className="hgo-label-sub">{r.sub}</span>}
+                      </div>
+                      <div className="hgo-track" style={{ width, height: rowH }}>
+                        {hours.map(h => (
+                          editMode ? (
+                            <button key={h} type="button" className="hgo-cell hgo-cell--tap" style={{ left: px(h), width: COL_PX, height: rowH }}
+                              onClick={() => onSlotTap(d, r, h)} aria-label={`${r.label}, ${dayName(d)} ${formatTime(fromMin(h))}`}><span>+</span></button>
+                          ) : (
+                            <div key={h} className="hgo-cell" style={{ left: px(h), width: COL_PX, height: rowH }} />
+                          )
+                        ))}
+                        {laid.map(({ e, lane }) => {
+                          const clash = lecturerClashIds.has(e.id) || venueClashIds.has(e.id)
+                          const w = Math.max(44, px(toMin(e.end_time)) - px(toMin(e.start_time)) - 2)
+                          return (
+                            <button key={e.id} type="button" className={`hg-block hgo-block${clash ? ' hg-block--clash' : ''}`}
+                              style={{ left: px(toMin(e.start_time)), width: w, top: 4 + lane * 46, height: 42, ...blockStyle(e.course_code) }}
+                              onClick={() => onEntryTap(e)}
+                              title={`${e.course_code} — ${e.course_title}${e.staff_name ? ` · ${e.staff_name}` : ''}${e.venue ? ` · ${e.venue}` : ''}${clash ? ' (clash)' : ''}`}>
+                              <span className="hg-b-code">{e.course_code}{clash ? ' ⚠' : ''}</span>
+                              <span className="hg-b-meta">{formatTime(e.start_time)}{e.venue ? ` · ${e.venue}` : ''}</span>
+                            </button>
+                          )
+                        })}
+                        {now.day === d && now.minutes >= from && now.minutes <= to && <div className="hgo-now" style={{ left: px(now.minutes) }} />}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-            )
-          })}
-        </div>
-      </div>
+            </div>
+          </section>
+        )
+      })}
     </div>
   )
 }

@@ -59,8 +59,8 @@
 
 import { orderedWeekDays } from '../lib/weekOrder'
 import { loadFirstDayOfWeek, loadWeekDays } from '../services/settingsService'
-import { HigherEdWeekGrid, HigherEdDayOverview, courseHue, fromMin, type OverviewRow } from './HigherEdWeekGrid'
-import { printHigherEdTimetable } from '../services/printHigherEdTimetable'
+import { HigherEdWeekGrid, HigherEdSchoolView, courseHue, fromMin, type SchoolRow } from './HigherEdWeekGrid'
+import { printHigherEdTimetable, printHigherEdSchool } from '../services/printHigherEdTimetable'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   loadOfferingTimetable,
@@ -153,7 +153,11 @@ export default function TimetableModuleHigherEd({
   const [levelSel, setLevelSel] = useState('')
   const [lecturerSel, setLecturerSel] = useState('')
   const [venueSel, setVenueSel] = useState('')
-  const [overviewDay, setOverviewDay] = useState<number | null>(null)
+  const [overviewDay, setOverviewDay] = useState<number | 'all' | null>(null)
+  // Whole school: how rows are grouped, plus search and a clashes-only filter.
+  const [groupBy, setGroupBy] = useState<'room' | 'level' | 'lecturer'>('room')
+  const [query, setQuery] = useState('')
+  const [onlyClashes, setOnlyClashes] = useState(false)
   const [levelLabels, setLevelLabels] = useState<Map<string, string>>(new Map())
   const [schoolDays, setSchoolDays] = useState<number[]>([])
 
@@ -162,7 +166,7 @@ export default function TimetableModuleHigherEd({
   const [armedId, setArmedId] = useState<string | null>(null)
   const [duration, setDuration] = useState(60)
   const [notice, setNotice] = useState('')
-  const [scopeLevel, setScopeLevel] = useState<string | null>(null)   // limits the course picker in the add form
+  const [scopePoolIds, setScopePoolIds] = useState<string[] | null>(null)   // limits the course picker in the add form
   const [formOpen, setFormOpen] = useState(false)
   const [formEntry, setFormEntry] = useState<Partial<OfferingTimetableEntry> | null>(null)
   const [formSaving, setFormSaving] = useState(false)
@@ -292,13 +296,48 @@ export default function TimetableModuleHigherEd({
     return orderedWeekDays(firstDay).filter(d => base.has(d))
   }, [entries, schoolDays, firstDay])
 
-  const overviewRows: OverviewRow[] = useMemo(() => {
-    const rows = levelOptions.filter(o => o.id !== NONE).map(o => ({ key: o.id, label: o.label, levelId: o.id as string | null }))
-    if (levelOptions.some(o => o.id === NONE)) rows.push({ key: NONE, label: 'Shared / no level', levelId: null })
+  // ── Whole school: rows by room, programme level or lecturer ─────────────
+  const schoolRows: SchoolRow[] = useMemo(() => {
+    const has = (pred: (e: OfferingTimetableEntry) => boolean) => entries.some(pred)
+    if (groupBy === 'room') {
+      const rows: SchoolRow[] = venueOptions.filter(v => v.id !== NONE).map(v => ({
+        key: v.id, label: v.label, venue: v.label,
+        match: (e: OfferingTimetableEntry) => (e.venue?.trim().toLowerCase() ?? '') === v.label.toLowerCase(),
+      }))
+      if (has(e => !e.venue?.trim())) rows.push({ key: NONE, label: 'No venue set', venue: null, match: e => !e.venue?.trim() })
+      return rows
+    }
+    if (groupBy === 'level') {
+      const rows: SchoolRow[] = levelOptions.filter(o => o.id !== NONE).map(o => ({
+        key: o.id, label: o.label, levelId: o.id, match: (e: OfferingTimetableEntry) => e.programme_level_id === o.id,
+      }))
+      if (has(e => !e.programme_level_id) || offerings.some(o => !o.programme_level_id)) {
+        rows.push({ key: NONE, label: 'Shared / no level', levelId: null, match: e => !e.programme_level_id })
+      }
+      return rows
+    }
+    const rows: SchoolRow[] = lecturerOptions.filter(o => o.id !== NONE).map(o => ({
+      key: o.id, label: o.label, staffId: o.id, match: (e: OfferingTimetableEntry) => e.staff_id === o.id,
+    }))
+    if (has(e => !e.staff_id) || offerings.some(o => !o.staff_id)) rows.push({ key: NONE, label: 'No lecturer yet', staffId: null, match: e => !e.staff_id })
     return rows
-  }, [levelOptions])
+  }, [groupBy, venueOptions, levelOptions, lecturerOptions, entries, offerings])
 
-  const activeOverviewDay = overviewDay ?? (days.includes(new Date().getDay()) ? new Date().getDay() : (days[0] ?? 1))
+  const schoolEntries = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return entries.filter(e =>
+      (!q || `${e.course_code} ${e.course_title} ${e.staff_name ?? ''} ${e.venue ?? ''}`.toLowerCase().includes(q)) &&
+      (!onlyClashes || lecturerClashIds.has(e.id) || venueClashIds.has(e.id)))
+  }, [entries, query, onlyClashes, lecturerClashIds, venueClashIds])
+
+  const activeSchoolDay: number | 'all' = overviewDay ?? (days.includes(new Date().getDay()) ? new Date().getDay() : (days[0] ?? 1))
+  const summaryEntries = activeSchoolDay === 'all' ? schoolEntries : schoolEntries.filter(e => e.day_of_week === activeSchoolDay)
+  const summary = {
+    lessons: summaryEntries.length,
+    rooms: new Set(summaryEntries.map(e => e.venue?.trim().toLowerCase()).filter(Boolean)).size,
+    lecturers: new Set(summaryEntries.map(e => e.staff_id).filter(Boolean)).size,
+    clashes: summaryEntries.filter(e => lecturerClashIds.has(e.id) || venueClashIds.has(e.id)).length,
+  }
 
   // ── Course tray: what can be placed in the current view ─────────────────
   const trayOfferings = useMemo(() => {
@@ -356,22 +395,25 @@ export default function TimetableModuleHigherEd({
   }
 
   // ── Interactions ────────────────────────────────────────────────────────
-  function openAdd(day: number, startMin: number, levelId: string | null | undefined) {
+  function openAdd(day: number, startMin: number, opts: { pool?: string[] | null; venue?: string | null } = {}) {
     const start = fromMin(startMin)
     const end = fromMin(Math.min(23 * 60 + 59, startMin + duration))
-    const scope = levelId === undefined ? null : (levelId ?? NONE)
-    const pool = scope ? offerings.filter(o => keyOf.level(o) === scope) : trayOfferings
-    setScopeLevel(scope)
-    setFormEntry({ course_offering_id: armedId ?? pool[0]?.id ?? '', day_of_week: day, start_time: start, end_time: end, venue: venueDefault })
+    const poolIds = opts.pool && opts.pool.length > 0 ? opts.pool : null
+    const pool = poolIds ? offerings.filter(o => poolIds.includes(o.id)) : trayOfferings
+    setScopePoolIds(poolIds)
+    setFormEntry({
+      course_offering_id: armedId ?? pool[0]?.id ?? '', day_of_week: day, start_time: start, end_time: end,
+      venue: opts.venue !== undefined ? opts.venue : venueDefault,
+    })
     setSelectedPeriodId(matchingPeriodId(start, end))
     setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
     setFormOpen(true)
   }
 
-  async function handleSlotTap(day: number, startMin: number, levelId?: string | null) {
+  async function handleSlotTap(day: number, startMin: number, row?: SchoolRow) {
     if (!editMode) return
     setNotice('')
-    if (armedId && levelId === undefined) {
+    if (armedId && !row) {
       const res = await commitEntry({
         offeringId: armedId, day, start: fromMin(startMin),
         end: fromMin(Math.min(23 * 60 + 59, startMin + duration)), venue: venueDefault,
@@ -379,12 +421,20 @@ export default function TimetableModuleHigherEd({
       if (typeof res === 'object') setNotice(res.error)
       return
     }
-    openAdd(day, startMin, levelId)
+    // Whole school: the row you tapped decides what the form starts with.
+    let pool: string[] | null = null
+    let venue: string | null | undefined = undefined
+    if (row) {
+      if (row.levelId !== undefined) pool = offerings.filter(o => keyOf.level(o) === (row.levelId ?? NONE)).map(o => o.id)
+      if (row.staffId !== undefined) pool = offerings.filter(o => keyOf.lecturer(o) === (row.staffId ?? NONE)).map(o => o.id)
+      if (row.venue !== undefined) venue = row.venue
+    }
+    openAdd(day, startMin, { pool, venue })
   }
 
   function handleEntryTap(entry: OfferingTimetableEntry) {
     if (editMode && isAdmin) {
-      setScopeLevel(null)
+      setScopePoolIds(null)
       setFormEntry({ ...entry })
       setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
       setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
@@ -448,7 +498,17 @@ export default function TimetableModuleHigherEd({
   }
 
   function handlePrint() {
-    if (view === 'all') { setNotice('Choose a programme level, lecturer or venue to print its week.'); return }
+    if (view === 'all') {
+      const ok = printHigherEdSchool({
+        title: 'Whole-school timetable',
+        subtitle: `${sessionName} · by ${groupBy === 'room' ? 'room' : groupBy === 'level' ? 'programme level' : 'lecturer'}`,
+        entries: schoolEntries,
+        rows: schoolRows.map(r => ({ label: r.label, match: r.match })),
+        days: activeSchoolDay === 'all' ? days : [activeSchoolDay],
+      })
+      if (!ok) setNotice('There are no lessons to print.')
+      return
+    }
     const label = isStudentView ? 'My timetable'
       : view === 'level' ? (levelOptions.find(o => o.id === levelSel)?.label ?? 'Timetable')
       : view === 'lecturer' ? (lecturerOptions.find(o => o.id === lecturerSel)?.label ?? 'Timetable')
@@ -496,7 +556,9 @@ export default function TimetableModuleHigherEd({
     : view === 'lecturer' ? { value: lecturerSel, set: setLecturerSel, options: lecturerOptions, label: 'Lecturer' }
     : { value: venueSel, set: setVenueSel, options: venueOptions, label: 'Venue' }
 
-  const modalPool = scopeLevel ? offerings.filter(o => keyOf.level(o) === scopeLevel) : (formEntry?.id ? offerings : trayOfferings.length ? trayOfferings : offerings)
+  const modalPool = scopePoolIds
+    ? offerings.filter(o => scopePoolIds.includes(o.id))
+    : (formEntry?.id ? offerings : trayOfferings.length ? trayOfferings : offerings)
 
   return (
     <div className="tt-root">
@@ -504,7 +566,7 @@ export default function TimetableModuleHigherEd({
         <div className="tt-header-top">
           <span className="tt-session-badge">{sessionName}</span>
           <div className="tt-header-actions">
-            {!editMode && viewEntries.length > 0 && view !== 'all' && (
+            {!editMode && (view === 'all' ? schoolEntries.length > 0 : viewEntries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint}>Print</button>
             )}
             {isAdmin && !editMode && <button className="tt-edit-btn" onClick={enterEditMode}>Edit</button>}
@@ -514,7 +576,7 @@ export default function TimetableModuleHigherEd({
 
         {!isStudentView && (
           <div className="tt-toggle-row">
-            {([['level', 'Programme level'], ['lecturer', 'Lecturer'], ['venue', 'Venue'], ['all', 'All levels']] as [View, string][]).map(([k, label]) => (
+            {([['level', 'Programme level'], ['lecturer', 'Lecturer'], ['venue', 'Venue'], ['all', 'Whole school']] as [View, string][]).map(([k, label]) => (
               <button key={k} className={`tt-toggle-btn${view === k ? ' tt-toggle-btn--active' : ''}`} onClick={() => { setView(k); setArmedId(null) }}>{label}</button>
             ))}
           </div>
@@ -566,21 +628,41 @@ export default function TimetableModuleHigherEd({
         </div>
       )}
       {isAdmin && editMode && view === 'all' && (
-        <p className="hg-tray-hint hg-tray-hint--solo">Tap an empty hour in a level's row to add a course there. Tap a lesson to change or remove it.</p>
+        <p className="hg-tray-hint hg-tray-hint--solo">Tap an empty hour in any row to add a lesson there — the row sets the room, level or lecturer for you. Tap a lesson to change or remove it.</p>
+      )}
+
+      {view === 'all' && !isStudentView && (
+        <>
+          <div className="hg-summary">
+            <div className="hg-sum"><strong>{summary.lessons}</strong>lesson{summary.lessons === 1 ? '' : 's'}{activeSchoolDay === 'all' ? ' this week' : ''}</div>
+            <div className="hg-sum"><strong>{summary.rooms}</strong>room{summary.rooms === 1 ? '' : 's'} in use</div>
+            <div className="hg-sum"><strong>{summary.lecturers}</strong>lecturer{summary.lecturers === 1 ? '' : 's'} teaching</div>
+            <div className={`hg-sum${summary.clashes > 0 ? ' hg-sum--warn' : ''}`}><strong>{summary.clashes}</strong>clash{summary.clashes === 1 ? '' : 'es'}</div>
+          </div>
+          <div className="hg-filters">
+            <div className="hg-group" role="group" aria-label="Group rows by">
+              {([['room', 'By room'], ['level', 'By level'], ['lecturer', 'By lecturer']] as ['room' | 'level' | 'lecturer', string][]).map(([k, label]) => (
+                <button key={k} type="button" aria-pressed={groupBy === k} onClick={() => setGroupBy(k)}>{label}</button>
+              ))}
+            </div>
+            <input className="hg-search" type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search course, lecturer or room…" aria-label="Search the timetable" />
+            <label className="hg-check"><input type="checkbox" checked={onlyClashes} onChange={e => setOnlyClashes(e.target.checked)} /> Clashes only</label>
+          </div>
+        </>
       )}
 
       <div className="tt-grid-wrapper">
         {view === 'all' && !isStudentView ? (
-          <HigherEdDayOverview
-            entries={entries}
-            rows={overviewRows}
+          <HigherEdSchoolView
+            entries={schoolEntries}
+            rows={schoolRows}
             days={days}
-            day={activeOverviewDay}
+            day={activeSchoolDay}
             onDayChange={setOverviewDay}
             editMode={editMode && isAdmin}
             lecturerClashIds={lecturerClashIds}
             venueClashIds={venueClashIds}
-            onSlotTap={(levelId, start) => void handleSlotTap(activeOverviewDay, start, levelId)}
+            onSlotTap={(d, row, start) => void handleSlotTap(d, start, row)}
             onEntryTap={handleEntryTap}
           />
         ) : (
