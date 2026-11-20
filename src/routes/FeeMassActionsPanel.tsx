@@ -139,7 +139,7 @@ export function FeeMassActionDialog({
   const sample = assignments.slice(0, 3).map(a => `${a.fee_head_name} (${formatNaira(a.amount)})`).join(', ')
 
   return (
-    <Modal open={open} onClose={onClose} title={`${ACTION_TITLE[action]} — ${assignments.length} fee${assignments.length === 1 ? '' : 's'}`} maxWidth="560px">
+    <Modal open={open} onClose={onClose} title={`${ACTION_TITLE[action]} — ${assignments.length} fee${assignments.length === 1 ? '' : 's'}`} showTitle maxWidth="560px">
       <div className="fma">
         <p className="fma-sub">{sample}{assignments.length > 3 ? ` and ${assignments.length - 3} more` : ''}</p>
 

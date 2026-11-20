@@ -1797,7 +1797,7 @@ export default function AttendanceModule({ schoolId, isAdmin, intent: _intent }:
       <Modal
         open={analyticsFor !== null}
         onClose={() => setAnalyticsFor(null)}
-        title={analyticsFor ? `${analyticsFor.name} — analytics` : undefined}
+        title={analyticsFor ? `${analyticsFor.name} — analytics` : undefined} showTitle
         maxWidth="780px"
       >
         {analyticsFor && (

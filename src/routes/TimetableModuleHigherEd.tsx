@@ -432,16 +432,17 @@ export default function TimetableModuleHigherEd({
     openAdd(day, startMin, { pool, venue })
   }
 
+  function openEditForm(entry: OfferingTimetableEntry) {
+    setScopePoolIds(null)
+    setFormEntry({ ...entry })
+    setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
+    setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
+    setFormOpen(true)
+  }
+
   function handleEntryTap(entry: OfferingTimetableEntry) {
-    if (editMode && isAdmin) {
-      setScopePoolIds(null)
-      setFormEntry({ ...entry })
-      setSelectedPeriodId(matchingPeriodId(entry.start_time, entry.end_time))
-      setLecturerPickerId(''); setLecturerError(null); setFormError(null); setConfirmRemove(false)
-      setFormOpen(true)
-    } else {
-      setDetailEntry(entry)
-    }
+    if (editMode && isAdmin) openEditForm(entry)
+    else setDetailEntry(entry)
   }
 
   function matchingPeriodId(startTime: string, endTime: string): string {
@@ -687,7 +688,7 @@ export default function TimetableModuleHigherEd({
       </div>
 
       {/* ── Add / edit lesson ──────────────────────────────────────────── */}
-      <Modal open={formOpen} onClose={() => { setFormOpen(false); setFormEntry(null) }} title={formEntry?.id ? 'Edit lesson' : 'Add lesson'}>
+      <Modal open={formOpen} onClose={() => { setFormOpen(false); setFormEntry(null) }} title={formEntry?.id ? 'Edit lesson' : 'Add lesson'} showTitle>
         {formEntry && (
           <div className="tt-oe-form">
             <label className="tt-oe-form-label">
@@ -780,19 +781,92 @@ export default function TimetableModuleHigherEd({
         )}
       </Modal>
 
-      {/* ── Read-only lesson detail ────────────────────────────────────── */}
+      {/* ── Lesson detail ──────────────────────────────────────────────── */}
       <Modal open={detailEntry !== null} onClose={() => setDetailEntry(null)} title={detailEntry ? `${detailEntry.course_code} — ${detailEntry.course_title}` : ''}>
-        {detailEntry && (
-          <div className="tt-oe-detail">
-            <p><strong>Day:</strong> {dayName(detailEntry.day_of_week)}</p>
-            <p><strong>Time:</strong> {formatTime(detailEntry.start_time)} – {formatTime(detailEntry.end_time)}</p>
-            {detailEntry.staff_name && <p><strong>Lecturer:</strong> {detailEntry.staff_name}</p>}
-            {detailEntry.venue && <p><strong>Venue:</strong> {detailEntry.venue}</p>}
-            {detailEntry.programme_level_id && levelLabels.get(detailEntry.programme_level_id) && <p><strong>For:</strong> {levelLabels.get(detailEntry.programme_level_id)}</p>}
-            {lecturerClashIds.has(detailEntry.id) && <p className="tt-oe-detail-conflict">⚠ This lecturer is double-booked at this time with another course offering.</p>}
-            {venueClashIds.has(detailEntry.id) && <p className="tt-oe-detail-conflict">⚠ This venue is used by another course at an overlapping time.</p>}
-          </div>
-        )}
+        {detailEntry && (() => {
+          const e = detailEntry
+          const lengthMin = mins(e.end_time) - mins(e.start_time)
+          const length = lengthMin % 60 === 0 ? `${lengthMin / 60} hr${lengthMin === 60 ? '' : 's'}` : `${Math.floor(lengthMin / 60) ? Math.floor(lengthMin / 60) + ' hr ' : ''}${lengthMin % 60} min`
+          const overlaps = (o: OfferingTimetableEntry) =>
+            o.id !== e.id && o.course_offering_id !== e.course_offering_id && o.day_of_week === e.day_of_week &&
+            rangesOverlap(o.start_time, o.end_time, e.start_time, e.end_time)
+          const lecturerWith = e.staff_id ? entries.filter(o => o.staff_id === e.staff_id && overlaps(o)) : []
+          const venueWith = e.venue?.trim()
+            ? entries.filter(o => o.venue?.trim().toLowerCase() === e.venue!.trim().toLowerCase() && overlaps(o)) : []
+          const other = entries
+            .filter(o => o.course_offering_id === e.course_offering_id && o.id !== e.id)
+            .sort((a, b) => orderedWeekDays(firstDay).indexOf(a.day_of_week) - orderedWeekDays(firstDay).indexOf(b.day_of_week) || a.start_time.localeCompare(b.start_time))
+          const level = e.programme_level_id ? levelLabels.get(e.programme_level_id) : null
+          const describe = (o: OfferingTimetableEntry) =>
+            `${o.course_code} (${formatTime(o.start_time)}–${formatTime(o.end_time)}${o.venue ? `, ${o.venue}` : ''})`
+          return (
+            <>
+              <div className="modal-badge" style={{
+                background: 'color-mix(in srgb, var(--color-brand-600, #2563eb) 12%, transparent)',
+                color: 'var(--color-brand-700, var(--color-brand-600))',
+              }}>
+                {dayName(e.day_of_week, true)} · {formatTime(e.start_time)} – {formatTime(e.end_time)}
+              </div>
+              <div className="modal-title">{e.course_code}</div>
+              <div className="modal-sub">{e.course_title}</div>
+              <div className="modal-div" />
+
+              <div className="modal-row">
+                <span className="modal-ic" aria-hidden="true"><Icon name="clock" size={18} /></span>
+                <span>Time: <strong>{dayName(e.day_of_week)}, {formatTime(e.start_time)} – {formatTime(e.end_time)}</strong> ({length})</span>
+              </div>
+              <div className="modal-row">
+                <span className="modal-ic" aria-hidden="true"><Icon name="user" size={18} /></span>
+                <span>Lecturer: <strong>{e.staff_name ?? 'Not assigned yet'}</strong></span>
+              </div>
+              <div className="modal-row">
+                <span className="modal-ic" aria-hidden="true"><Icon name="door-open" size={18} /></span>
+                <span>Venue: <strong>{e.venue?.trim() || 'Not set'}</strong></span>
+              </div>
+              <div className="modal-row">
+                <span className="modal-ic" aria-hidden="true"><Icon name="graduation-cap" size={18} /></span>
+                <span>For: <strong>{level ?? 'Shared / all programmes'}</strong></span>
+              </div>
+
+              {other.length > 0 && (
+                <>
+                  <div className="modal-div" />
+                  <div className="modal-row">
+                    <span className="modal-ic" aria-hidden="true"><Icon name="calendar" size={18} /></span>
+                    <span>Also meets:</span>
+                  </div>
+                  <ul className="modal-list">
+                    {other.map(o => <li key={o.id}>{dayName(o.day_of_week, true)} {formatTime(o.start_time)}–{formatTime(o.end_time)}{o.venue ? ` · ${o.venue}` : ''}</li>)}
+                  </ul>
+                </>
+              )}
+
+              {(lecturerWith.length > 0 || venueWith.length > 0) && (
+                <>
+                  <div className="modal-div" />
+                  {lecturerWith.length > 0 && (
+                    <div className="modal-row modal-row--conflict">
+                      <span className="modal-ic" aria-hidden="true"><Icon name="alert-triangle" size={18} /></span>
+                      <span>{e.staff_name} is also teaching {lecturerWith.map(describe).join('; ')} at the same time.</span>
+                    </div>
+                  )}
+                  {venueWith.length > 0 && (
+                    <div className="modal-row modal-row--conflict">
+                      <span className="modal-ic" aria-hidden="true"><Icon name="alert-triangle" size={18} /></span>
+                      <span>{e.venue} is also used by {venueWith.map(describe).join('; ')} at the same time.</span>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {isAdmin && (
+                <button type="button" className="tt-edit-btn modal-action" onClick={() => { setDetailEntry(null); enterEditMode(); openEditForm(e) }}>
+                  Edit this lesson
+                </button>
+              )}
+            </>
+          )
+        })()}
       </Modal>
     </div>
   )

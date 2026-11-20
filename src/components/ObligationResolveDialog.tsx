@@ -46,7 +46,7 @@ export default function ObligationResolveDialog({
     new Date(d.length > 10 ? d : d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 
   return (
-    <Modal open={open} onClose={onClose} title={`Queries, fines & tasks — ${studentName}`}>
+    <Modal open={open} onClose={onClose} title={`Queries, fines & tasks — ${studentName}`} showTitle>
       {items.length === 0 ? (
         <p className="obl-dlg-empty">Nothing outstanding.</p>
       ) : (

@@ -795,7 +795,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
       <Modal
         open={chooser !== null}
         onClose={() => setChooser(null)}
-        title={chooser ? `${chooser.classNode.name} · ${dayName(chooser.dayOfWeek)} · ${chooser.period.label}` : undefined}
+        title={chooser ? `${chooser.classNode.name} · ${dayName(chooser.dayOfWeek)} · ${chooser.period.label}` : undefined} showTitle
       >
         {chooser && (() => {
           const pool = allAssignments.filter(a => a.class_node_id === chooser.classNode.id)

@@ -279,7 +279,7 @@ export default function FinanceLedger({ schoolId, isAdmin, canPost }: { schoolId
       )}
 
       {statement && (
-        <Modal open onClose={() => setStatement(null)} title={`${statement.account.code} · ${statement.account.name}`} maxWidth="640px">
+        <Modal open onClose={() => setStatement(null)} title={`${statement.account.code} · ${statement.account.name}`} showTitle maxWidth="640px">
           <p className="fma-hint">{fmtDate(range.from)} – {fmtDate(range.to)}</p>
           {statement.lines.length === 0 ? <p className="fad-empty">Nothing posted to this account in this period.</p> : (
             <table className="fl-lines">
@@ -322,7 +322,7 @@ function EntryForm({ accounts, onClose, onPosted }: { accounts: Account[]; onClo
   }
 
   return (
-    <Modal open onClose={onClose} title="New journal entry" maxWidth="680px">
+    <Modal open onClose={onClose} title="New journal entry" showTitle maxWidth="680px">
       <div className="fma">
         <div className="fad-form">
           <label>Date<input className="fma-input" type="date" value={date} onChange={e => setDate(e.target.value)} /></label>
@@ -376,7 +376,7 @@ function AccountForm({ schoolId, initial, onClose, onSaved }: { schoolId: string
     await onSaved()
   }
   return (
-    <Modal open onClose={onClose} title={initial.id ? 'Edit account' : 'Add account'} maxWidth="440px">
+    <Modal open onClose={onClose} title={initial.id ? 'Edit account' : 'Add account'} showTitle maxWidth="440px">
       <div className="fma">
         <label className="fma-reason">Code<input className="fma-input" value={code} onChange={e => setCode(e.target.value)} placeholder="e.g. 5400" /></label>
         <label className="fma-reason">Name<input className="fma-input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Fuel and generator" /></label>

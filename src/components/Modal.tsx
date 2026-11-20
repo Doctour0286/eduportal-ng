@@ -62,13 +62,15 @@ interface ModalProps {
   open: boolean
   onClose: () => void
   title?: string
+  /** Draw the title as a heading. Off by default — older popups draw their own header in the body. */
+  showTitle?: boolean
   children: ReactNode
   /** Optional max-width override, e.g. '480px'. Defaults to the
    *  reference app's own 400px card width via CSS. */
   maxWidth?: string
 }
 
-export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) {
+export function Modal({ open, onClose, title, showTitle, children, maxWidth }: ModalProps) {
   const closeBtnRef = useRef<HTMLButtonElement>(null)
   const lastFocusBeforeModal = useRef<HTMLElement | null>(null)
 
@@ -117,6 +119,7 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
           <Icon name="x" size={14} />
         </button>
         <div className="modal-content">
+          {showTitle && title && <h3 className="modal-heading">{title}</h3>}
           {children}
         </div>
       </div>
