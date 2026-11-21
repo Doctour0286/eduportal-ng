@@ -52,6 +52,7 @@
  *     forward only — UI warns before the mark-paid step since it triggers the ledger)
  */
 
+import AddStaffDialog from './AddStaffDialog'
 import { NAME_PREFIXES, splitNamePrefix, composeName } from '../lib/namePrefix'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Icon } from '../components/icons'
@@ -240,6 +241,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
 
   // ── Staff tab ───────────────────────────────────────────────────────────────
   const [staffList,    setStaffList]    = useState<StaffMember[]>([])
+  const [addStaffOpen, setAddStaffOpen] = useState(false)
   const [staffState,   setStaffState]   = useState<LoadState>('booting')
   const [staffError,   setStaffError]   = useState('')
   const [searchQuery,  setSearchQuery]  = useState('')
@@ -1391,7 +1393,22 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
 
   // ── Staff tab ───────────────────────────────────────────────────────────────
 
+  // Adding staff happens here, not in the setup wizard.
   function renderStaffTab() {
+    return (
+      <>
+        {canManageStaff && (
+          <div className="hr-add-row">
+            <button type="button" className="obl-btn obl-btn--primary" onClick={() => setAddStaffOpen(true)}>+ Add staff</button>
+          </div>
+        )}
+        {renderStaffTabBody()}
+        <AddStaffDialog open={addStaffOpen} schoolId={schoolId} onClose={() => setAddStaffOpen(false)} onAdded={loadStaff} />
+      </>
+    )
+  }
+
+  function renderStaffTabBody() {
     if (staffState === 'loading' || staffState === 'booting') {
       return (
         <div className="hr-list-skel">
@@ -1412,7 +1429,7 @@ export default function HRModule({ schoolId, isAdmin, authUserId, currentStaffId
       return (
         <div className="hr-empty-state">
           <span className="hr-empty-icon"><Icon name="users" /></span>
-          <p className="hr-empty-msg">No staff records yet.</p>
+          <p className="hr-empty-msg">No staff records yet.{canManageStaff ? ' Use “Add staff” above to create the first account.' : ''}</p>
         </div>
       )
     }

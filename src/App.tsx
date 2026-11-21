@@ -834,7 +834,7 @@ export default function App() {
               isAdmin={isAdminRole || actorType === 'platform_admin'}
               schoolType={school.school_type}
               onNavigate={(tab: NavTab, intent?: NavIntent) => onNavigate(tab, intent)}
-              onOpenSetup={() => setForceShowOnboarding(true)}
+              onOpenSetup={() => { if (school.onboarding_complete && !window.confirm('The setup wizard changes school-wide settings such as school type, calendar and roles. For everyday changes — adding staff, editing terms, fees — use Settings, HR and the other modules instead.\n\nOpen the setup wizard anyway?')) return; setForceShowOnboarding(true) }}
             />
           )
         }
@@ -1134,6 +1134,7 @@ export default function App() {
               }}
               onOpenSetup={() => {
                 setMoreSheetOpen(false)
+                if (school.onboarding_complete && !window.confirm('The setup wizard changes school-wide settings such as school type, calendar and roles. For everyday changes — adding staff, editing terms, fees — use Settings, HR and the other modules instead.\n\nOpen the setup wizard anyway?')) return
                 setForceShowOnboarding(true)
               }}
             />
@@ -1747,7 +1748,7 @@ function MoreSheetContent({
             <span className="more-menu-item-icon"><Icon name="compass" /></span>
             <div>
               <p className="more-menu-item-label">Setup guide</p>
-              <p className="more-menu-item-desc">Return to the onboarding wizard</p>
+              <p className="more-menu-item-desc">Re-run first-time setup (advanced)</p>
             </div>
             <span className="more-menu-item-arrow">›</span>
           </button>

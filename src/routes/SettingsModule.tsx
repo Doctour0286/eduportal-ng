@@ -41,7 +41,7 @@ import {
   loadHomepagePosts,        createHomepagePost, updateHomepagePost,
   deleteHomepagePost,       reorderHomepagePosts,
   loadSessions,             upsertSession,
-  loadTerms,                upsertTerm,
+  loadTerms,  loadTermUsage,  deleteTerm,                upsertTerm,
   loadWeekDays,             saveWeekDays,
   loadFirstDayOfWeek,       saveFirstDayOfWeek,
   loadPeriods,              upsertPeriod,   deletePeriod,
@@ -112,6 +112,7 @@ import {
 // with their own domain services — they live in AssessmentsSettings.tsx (see
 // that file's header for why), imported here as tab bodies only.
 import { AssessmentsTab, PromotionTabSecondary } from './AssessmentsSettings'
+import CarryOverPanel from './CarryOverPanel'
 import AttendanceClassRules from './AttendanceClassRules'
 import { orderedWeekDays } from '../lib/weekOrder'
 // SESSION 65c — admission pipeline/field-settings/master-switch authoring.
@@ -1549,6 +1550,31 @@ function CalendarTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
     setShowTermForm(true)
   }
 
+  // Deleting a term: look at what depends on it first. In use → explain and
+  // refuse; unused → confirm, then delete.
+  const [deletingTerm, setDeletingTerm] = useState<Term | null>(null)
+  const [termUsage, setTermUsage] = useState<{ label: string; count: number }[] | null>(null)
+  const [termDeleting, setTermDeleting] = useState(false)
+  const [termDeleteError, setTermDeleteError] = useState<string | null>(null)
+
+  async function startDeleteTerm(t: Term) {
+    setDeletingTerm(t); setTermUsage(null); setTermDeleteError(null)
+    setTermUsage(await loadTermUsage(t.id))
+  }
+
+  async function confirmDeleteTerm() {
+    if (!deletingTerm) return
+    setTermDeleting(true); setTermDeleteError(null)
+    const res = await deleteTerm(schoolId, deletingTerm.id)
+    setTermDeleting(false)
+    if (res.error) { setTermDeleteError(res.error); return }
+    setDeletingTerm(null)
+    if (selectedSessionId) {
+      const r = await loadTerms(schoolId, selectedSessionId)
+      setTerms(r.data)
+    }
+  }
+
   async function handleSaveTerm() {
     if (!termName || !termStart || !termEnd || !selectedSessionId) { setTermError('All fields are required.'); return }
     if (termStart >= termEnd) { setTermError(`This ${periodWord}'s start date must be before its end date.`); return }
@@ -1632,7 +1658,10 @@ function CalendarTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
                     <p className="set-list-row-name">{t.name}</p>
                     <p className="set-list-row-meta">{t.start_date} → {t.end_date}</p>
                   </div>
-                  <button className="set-edit-btn" onClick={() => openTermForm(t)}>Edit</button>
+                  <div className="set-list-row-actions">
+                    <button className="set-edit-btn" onClick={() => openTermForm(t)}>Edit</button>
+                    <button className="set-edit-btn set-delete-btn" onClick={() => void startDeleteTerm(t)}>Delete</button>
+                  </div>
                 </div>
               ))
           }
@@ -1652,6 +1681,52 @@ function CalendarTab({ schoolId, schoolType }: { schoolId: string; schoolType?: 
             <div className="set-sheet-footer">
               <button className="set-cancel-btn" onClick={() => setShowSessionForm(false)}>Cancel</button>
               <button className="set-save-btn" onClick={handleSaveSession} disabled={sesSaving}>{sesSaving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sessions.length > 1 && (
+        <div className="cop-card">
+          <SectionLabel>Copy from a previous session</SectionLabel>
+          <p className="set-hint-text">Starting a new session? Carry the setup forward instead of rebuilding it.</p>
+          <CarryOverPanel
+            schoolId={schoolId}
+            kinds={isHigherEd ? ['offerings', 'fees'] : ['teaching', 'fees']}
+            usesTerms={usesTerms}
+            periodWord={periodWord}
+          />
+        </div>
+      )}
+
+      {/* Delete term sheet */}
+      {deletingTerm && (
+        <div className="set-overlay" onClick={() => !termDeleting && setDeletingTerm(null)}>
+          <div className="set-sheet" onClick={e => e.stopPropagation()}>
+            <h2 className="set-sheet-title">Delete {deletingTerm.name}?</h2>
+            {termUsage === null ? (
+              <p className="set-hint-text">Checking what uses this {periodWord}…</p>
+            ) : termUsage.length > 0 ? (
+              <>
+                <p className="set-hint-text">
+                  This {periodWord} can’t be deleted because it’s still in use:
+                </p>
+                <ul className="set-usage-list">
+                  {termUsage.map(u => <li key={u.label}><strong>{u.count}</strong> {u.label}</li>)}
+                </ul>
+                <p className="set-hint-text">Remove or move those first, or simply leave the {periodWord} in place — it does no harm.</p>
+              </>
+            ) : (
+              <p className="set-hint-text">Nothing uses this {periodWord}. Deleting it can’t be undone.</p>
+            )}
+            {termDeleteError && <p className="set-form-error">{termDeleteError}</p>}
+            <div className="set-sheet-footer">
+              <button className="set-cancel-btn" onClick={() => setDeletingTerm(null)} disabled={termDeleting}>{termUsage && termUsage.length > 0 ? 'Close' : 'Cancel'}</button>
+              {termUsage !== null && termUsage.length === 0 && (
+                <button className="set-save-btn set-save-btn--danger" onClick={() => void confirmDeleteTerm()} disabled={termDeleting}>
+                  {termDeleting ? 'Deleting…' : `Delete ${periodWord}`}
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -983,6 +983,52 @@ export async function upsertTerm(
   }
 }
 
+// What can hang off a term. Each is probed independently — a table that
+// doesn't exist (or has no term_id) simply isn't counted — and the database's
+// own foreign keys remain the final guard.
+const TERM_DEPENDENTS: { table: string; label: string }[] = [
+  { table: 'fee_assignments',     label: 'fee assignments' },
+  { table: 'course_offerings',    label: 'course offerings' },
+  { table: 'scores',              label: 'recorded scores' },
+  { table: 'assessment_windows',  label: 'assessment windows' },
+  { table: 'course_registrations', label: 'course registrations' },
+  { table: 'report_cards',        label: 'report cards' },
+  { table: 'curriculum_subjects', label: 'curriculum entries' },
+  { table: 'exam_timetable_entries', label: 'exam timetable entries' },
+]
+
+export async function loadTermUsage(termId: string): Promise<{ label: string; count: number }[]> {
+  const out: { label: string; count: number }[] = []
+  await Promise.all(TERM_DEPENDENTS.map(async d => {
+    const { count, error } = await supabase
+      .from(d.table)
+      .select('id', { count: 'exact', head: true })
+      .eq('term_id', termId)
+    if (!error && count && count > 0) out.push({ label: d.label, count })
+  }))
+  return out
+}
+
+export async function deleteTerm(schoolId: string, termId: string): Promise<{ error: string | null }> {
+  const { data, error } = await supabase
+    .from('terms')
+    .delete()
+    .eq('id', termId)
+    .eq('school_id', schoolId)
+    .select('id')
+  if (error) {
+    return {
+      error: error.code === '23503'
+        ? 'Something still uses this term, so it cannot be deleted.'
+        : error.message,
+    }
+  }
+  if (!data || data.length === 0) {
+    return { error: 'The term was not deleted. Only an administrator can delete terms (run migration_term_delete.sql if you have not).' }
+  }
+  return { error: null }
+}
+
 // ─── School calendar (holidays / exam days / breaks) ─────────────────────────
 // Session 18, PRD Problem 5.2 (Goals 2–4) + Problem 6.7's term-extension
 // refinement (owner-requested per-entry choice, not a global rule — see

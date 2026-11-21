@@ -142,6 +142,15 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
 
   // ── View state ────────────────────────────────────────────────────────────────
   const [viewMode, setViewMode]               = useState<ViewMode>('class')
+  const [fullscreen, setFullscreen]           = useState(false)
+  useEffect(() => {
+    if (!fullscreen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false) }
+    document.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = prev }
+  }, [fullscreen])
   const [firstDay, setFirstDay]               = useState(1)
   useEffect(() => { void loadFirstDayOfWeek(schoolId).then(setFirstDay) }, [schoolId])
   // Grid columns follow the school's chosen first day of the week.
@@ -616,7 +625,7 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
   const leafNodes = classNodes.filter(n => n.is_leaf_enrollable)
 
   return (
-    <div className="tt-root">
+    <div className={`tt-root${fullscreen ? ' tt-fullscreen' : ''}`}>
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="tt-header">
@@ -628,6 +637,9 @@ export default function TimetableModuleSecondary({ schoolId, schoolName, isAdmin
                 Today ↓
               </button>
             )}
+            <button type="button" className="tt-print-btn" onClick={() => setFullscreen(f => !f)} aria-pressed={fullscreen}>
+              {fullscreen ? 'Exit full screen' : 'Full screen'}
+            </button>
             {!editMode && ttData && (ttData.entries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint} aria-label="Print timetable">
                 <Icon name="printer" size={18} />

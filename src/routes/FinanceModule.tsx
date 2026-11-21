@@ -35,6 +35,7 @@
  *     — once applied they are permanent; UI warns clearly before applying)
  */
 
+import CarryOverPanel from './CarryOverPanel'
 import FinanceLedger from './FinanceLedger'
 import FeeAssignmentDetail from './FeeAssignmentDetail'
 import { FeeMassActionDialog, FeeActionHistory } from './FeeMassActionsPanel'
@@ -1445,6 +1446,19 @@ export default function FinanceModule({ schoolId, schoolType, intent }: FinanceM
 
         {!selectMode && assignments.length > 0 && (
           <p className="fma-tip">Click a fee to see who it covers, edit it, waive or exempt students, or review its history.</p>
+        )}
+
+        {canManageFees && !detailAssignment && (
+          <details className="cop-details">
+            <summary>Copy fees from a previous session</summary>
+            <CarryOverPanel
+              schoolId={schoolId}
+              kinds={['fees']}
+              usesTerms={terms.length > 0}
+              periodWord="term"
+              onDone={() => { void loadAssignmentList(); void loadBalances() }}
+            />
+          </details>
         )}
 
         {(canManageFees || canApplyDiscounts) && currentSession && (

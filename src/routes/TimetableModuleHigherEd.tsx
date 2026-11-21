@@ -158,6 +158,9 @@ export default function TimetableModuleHigherEd({
   const [groupBy, setGroupBy] = useState<'room' | 'level' | 'lecturer'>('room')
   const [query, setQuery] = useState('')
   const [onlyClashes, setOnlyClashes] = useState(false)
+  // Space for the timetable itself: tools fold away and the whole thing can go full screen.
+  const [showTools, setShowTools] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
   const [levelLabels, setLevelLabels] = useState<Map<string, string>>(new Map())
   const [schoolDays, setSchoolDays] = useState<number[]>([])
 
@@ -223,6 +226,15 @@ export default function TimetableModuleHigherEd({
   }, [schoolId, isAdmin, isStudentView, currentStudentId, currentStaffId])
 
   useEffect(() => { void load() }, [load])
+
+  useEffect(() => {
+    if (!fullscreen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false) }
+    document.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = prev }
+  }, [fullscreen])
 
   // After an edit, refresh just the lessons — no full-page skeleton flash.
   const refreshEntries = useCallback(async () => {
@@ -552,6 +564,7 @@ export default function TimetableModuleHigherEd({
   }
 
   const showSelector = !isStudentView && view !== 'all'
+  const activeFilterCount = (query.trim() ? 1 : 0) + (onlyClashes ? 1 : 0)
   const selection =
     view === 'level' ? { value: levelSel, set: setLevelSel, options: levelOptions, label: 'Programme level' }
     : view === 'lecturer' ? { value: lecturerSel, set: setLecturerSel, options: lecturerOptions, label: 'Lecturer' }
@@ -562,11 +575,26 @@ export default function TimetableModuleHigherEd({
     : (formEntry?.id ? offerings : trayOfferings.length ? trayOfferings : offerings)
 
   return (
-    <div className="tt-root">
-      <div className="tt-header">
-        <div className="tt-header-top">
+    <div className={`tt-root${fullscreen ? ' tt-fullscreen' : ''}`}>
+      <div className="tt-header hg-header">
+        <div className="hg-bar">
           <span className="tt-session-badge">{sessionName}</span>
-          <div className="tt-header-actions">
+          {!isStudentView && (
+            <div className="tt-toggle-row hg-views">
+              {([['level', 'Programme level'], ['lecturer', 'Lecturer'], ['venue', 'Venue'], ['all', 'Whole school']] as [View, string][]).map(([k, label]) => (
+                <button key={k} className={`tt-toggle-btn${view === k ? ' tt-toggle-btn--active' : ''}`} onClick={() => { setView(k); setArmedId(null) }}>{label}</button>
+              ))}
+            </div>
+          )}
+          <div className="tt-header-actions hg-actions">
+            {view === 'all' && !isStudentView && (
+              <button type="button" className="tt-print-btn" aria-expanded={showTools} onClick={() => setShowTools(v => !v)}>
+                Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+              </button>
+            )}
+            <button type="button" className="tt-print-btn" onClick={() => setFullscreen(f => !f)} aria-pressed={fullscreen}>
+              {fullscreen ? 'Exit full screen' : 'Full screen'}
+            </button>
             {!editMode && (view === 'all' ? schoolEntries.length > 0 : viewEntries.length > 0) && (
               <button className="tt-print-btn" onClick={handlePrint}>Print</button>
             )}
@@ -575,21 +603,23 @@ export default function TimetableModuleHigherEd({
           </div>
         </div>
 
-        {!isStudentView && (
-          <div className="tt-toggle-row">
-            {([['level', 'Programme level'], ['lecturer', 'Lecturer'], ['venue', 'Venue'], ['all', 'Whole school']] as [View, string][]).map(([k, label]) => (
-              <button key={k} className={`tt-toggle-btn${view === k ? ' tt-toggle-btn--active' : ''}`} onClick={() => { setView(k); setArmedId(null) }}>{label}</button>
-            ))}
-          </div>
-        )}
-
-        {showSelector && (
-          <div className="tt-selector-row">
-            <label className="tt-selector-label">{selection.label}</label>
-            <select className="tt-selector" value={selection.value} onChange={e => { selection.set(e.target.value); setArmedId(null) }}>
-              {selection.options.length === 0 && <option value="">Nothing to show yet</option>}
-              {selection.options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
-            </select>
+        {(showSelector || (view === 'all' && !isStudentView)) && (
+          <div className="hg-bar hg-bar--sub">
+            {showSelector ? (
+              <>
+                <label className="tt-selector-label">{selection.label}</label>
+                <select className="tt-selector hg-select" value={selection.value} onChange={e => { selection.set(e.target.value); setArmedId(null) }}>
+                  {selection.options.length === 0 && <option value="">Nothing to show yet</option>}
+                  {selection.options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </select>
+              </>
+            ) : (
+              <div className="hg-group" role="group" aria-label="Group rows by">
+                {([['room', 'By room'], ['level', 'By level'], ['lecturer', 'By lecturer']] as ['room' | 'level' | 'lecturer', string][]).map(([k, label]) => (
+                  <button key={k} type="button" aria-pressed={groupBy === k} onClick={() => setGroupBy(k)}>{label}</button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -597,7 +627,21 @@ export default function TimetableModuleHigherEd({
       {notice && <p className="hg-notice" role="status">{notice} <button type="button" className="fma-link" onClick={() => setNotice('')}>Dismiss</button></p>}
 
       {/* Edit tray: pick a course, then tap the grid to place it */}
-      {isAdmin && editMode && view !== 'all' && (
+      {isAdmin && editMode && view !== 'all' && armedId && (() => {
+        const o = offerings.find(x => x.id === armedId)
+        return (
+          <div className="hg-armed">
+            <span>Placing <strong>{o?.course_code ?? 'course'}</strong> — tap the grid</span>
+            <label className="hg-tray-dur">Length
+              <select value={duration} onChange={e => setDuration(Number(e.target.value))}>
+                {DURATIONS.map(d => <option key={d.minutes} value={d.minutes}>{d.label}</option>)}
+              </select>
+            </label>
+            <button type="button" className="hg-armed-stop" onClick={() => setArmedId(null)}>Put down</button>
+          </div>
+        )
+      })()}
+      {isAdmin && editMode && view !== 'all' && !armedId && (
         <div className="hg-tray">
           <div className="hg-tray-top">
             <span className="hg-tray-hint">
@@ -632,8 +676,8 @@ export default function TimetableModuleHigherEd({
         <p className="hg-tray-hint hg-tray-hint--solo">Tap an empty hour in any row to add a lesson there — the row sets the room, level or lecturer for you. Tap a lesson to change or remove it.</p>
       )}
 
-      {view === 'all' && !isStudentView && (
-        <>
+      {view === 'all' && !isStudentView && showTools && (
+        <div className="hg-tools">
           <div className="hg-summary">
             <div className="hg-sum"><strong>{summary.lessons}</strong>lesson{summary.lessons === 1 ? '' : 's'}{activeSchoolDay === 'all' ? ' this week' : ''}</div>
             <div className="hg-sum"><strong>{summary.rooms}</strong>room{summary.rooms === 1 ? '' : 's'} in use</div>
@@ -641,15 +685,10 @@ export default function TimetableModuleHigherEd({
             <div className={`hg-sum${summary.clashes > 0 ? ' hg-sum--warn' : ''}`}><strong>{summary.clashes}</strong>clash{summary.clashes === 1 ? '' : 'es'}</div>
           </div>
           <div className="hg-filters">
-            <div className="hg-group" role="group" aria-label="Group rows by">
-              {([['room', 'By room'], ['level', 'By level'], ['lecturer', 'By lecturer']] as ['room' | 'level' | 'lecturer', string][]).map(([k, label]) => (
-                <button key={k} type="button" aria-pressed={groupBy === k} onClick={() => setGroupBy(k)}>{label}</button>
-              ))}
-            </div>
             <input className="hg-search" type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search course, lecturer or room…" aria-label="Search the timetable" />
             <label className="hg-check"><input type="checkbox" checked={onlyClashes} onChange={e => setOnlyClashes(e.target.checked)} /> Clashes only</label>
           </div>
-        </>
+        </div>
       )}
 
       <div className="tt-grid-wrapper">
